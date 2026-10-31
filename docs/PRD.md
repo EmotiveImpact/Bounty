@@ -6,16 +6,42 @@ Help a UK shopper decide whether a specific trip can save money or produce enoug
 
 ## Decisions and boundaries
 
-Vite + React + TypeScript client, Node HTTP API, persistent SQLite and independent ingestion workers for the single-user pilot. Retail acquisition, competing asking prices, and completed sales are separate evidence classes. Retailers set permissions per programme. An affiliate feed does not establish local stock. No privileged access, fabricated sales or automatic checkout.
+Vite + React + TypeScript client, Node HTTP API, persistent SQLite and independent ingestion workers for the single-user pilot. Retail acquisition, competing asking prices, and completed sales are separate evidence classes. Retailers set permissions per programme. An affiliate feed does not establish local stock. No privileged access, fabricated sales or automatic checkout. Promotion eligibility is assessed per person: a new-customer or first-order offer appears only for a member who genuinely qualifies, and Bounty never suggests repeat sign-ups or extra accounts to reuse one. Sponsored placements never change the ranking, which stays based on the member's own profit, time and costs.
 
 ## User journeys and acceptance
 
 1. **Source research**: import dated, attributable GB observations; retain source IDs and units. A retry must not duplicate rows. Expose provenance, source availability and missing configuration. Keep licensed feed data and ODbL observations separate.
-2. **Match an offer**: use a barcode plus exact size, pack, model and condition. A similar product goes to research. Preserve observation time separately from import time. A completed sale requires the actual realised amount including buyer postage. Keep active listings outside the sold sample.
-3. **Plan a trip**: budget, units, location, transport, comfortable load and hourly floor constrain the result. Show cash required before payout, fees, returns, variable travel costs, parcel costs, contribution, active hours and earnings per hour. Share journey costs across units. Negative profit, expired observations or absent evidence must not trigger a buy alert.
-4. **Personal goals**: support dispatch windows, storage, monthly savings or income target, date cash is needed and downside if units remain unsold. Compare baskets under one cash constraint. Track realised cash separately from potential proceeds.
-5. **Bounties**: cap distribution by available units and competing sellers. Allow opt-in alerts, expiry, stock reports and claims. Claims reserve attention, not retailer stock. Show sourcing pressure separately from resale competition.
-6. **Trust and membership**: reconcile receipt, sold listing, payout, expenses, returns and elapsed work. Reward accurate negative reports too. Keep evidence private. Clearly distinguish paid early access from earned reputation. Sponsored placements must be identifiable.
+2. **Match an offer**: use a barcode plus exact size, pack, model and condition. A similar product goes to research. Preserve observation time separately from import time. A completed sale requires the actual realised amount including buyer postage. Keep active listings outside the sold sample. Where available, show three prices side by side: the retailer's claimed previous price, the price observed over time, and recent completed resale prices. A large claimed reduction alone never qualifies an offer.
+3. **Plan a trip**: budget, units, location, transport, comfortable load and hourly floor constrain the result. Show cash required before payout, fees, returns, variable travel costs, parcel costs, contribution, active hours and earnings per hour. Share journey costs across units. Show active working time separately from time until payment. Recommend a purchase quantity from budget, carrying limit, competition and the member's own sales history, starting with a small trial batch. Label access needs: widely accessible, vehicle required, heavy handling, limited local stock or specialist storage. Offer **What changes if I drive?**, keeping the walking or public transport plan on screen beside a driving plan with the extra opportunities, mileage, parking, total load and time saved. Fixed costs such as insurance are goals that earnings can cover; fuel for the collection run is a cost of that trip, never counted twice. Each opportunity card shows when price and stock were last checked and its main uncertainty. Negative profit, expired observations or absent evidence must not trigger a buy alert.
+4. **Personal goals**: support dispatch windows, storage, monthly savings or income target, date cash is needed and downside if units remain unsold. Compare combined baskets under one cash constraint, reserving cash for postage and packaging before any stock is bought; separate cards for alternative trips do not meet this requirement. Goals can name what the money is for, such as a hobby, fuel or a bill; a deadline goal counts only cash received by that date. Track realised cash separately from potential proceeds.
+5. **Bounties**: cap distribution by available units and competing sellers. Allow opt-in alerts, expiry, stock reports and claims. Claims reserve attention, not retailer stock. Show sourcing pressure separately from resale competition. Distinguish two bounty types: **buy and resell**, where the member spends their own money and carries the stock risk, and **fixed reward**, where a task pays a set amount; every card states who owns the stock and who carries the risk. Pause alerts when an opportunity looks saturated, and send a "don't make the trip" notice when a member reports the shelf empty.
+6. **Trust and membership**: reconcile receipt, sold listing, payout, expenses, returns and elapsed work. Reward accurate negative reports too. Keep evidence private. Clearly distinguish paid early access from earned reputation. Early access may use ranked tiers with staggered release windows, sized to remaining stock and resale demand; the tier names, number of tiers, window lengths and whether access is paid, earned or both are open decisions. Sponsored placements must be identifiable.
+
+## Opportunity rules
+
+These hard filters are starting defaults, tuned per member and reviewed against realised outcomes. An offer failing any of them never reaches the shortlist.
+
+| Filter                     | Starting default                                       |
+| -------------------------- | ------------------------------------------------------ |
+| Purchase price             | £5 to £50 per unit                                     |
+| Parcel                     | Small and simple to pack, preferably under 2 kg        |
+| Estimated profit           | At least £5 per unit after variable costs              |
+| Return on acquisition cost | At least 35%                                           |
+| Demand evidence            | Multiple recent completed sales of the exact variant   |
+| Match confidence           | Exact match; uncertain matches go to Review            |
+| Stock exposure             | Small trial purchase before increasing quantity        |
+
+Each qualifying opportunity is placed in one tier:
+
+| Tier       | Meaning                                                                       |
+| ---------- | ----------------------------------------------------------------------------- |
+| Priority 1 | Strong profit, convincing sold evidence, easy fulfilment and confirmed stock  |
+| Priority 2 | Promising economics with weaker demand or more competition                   |
+| Watch      | Worth buying only if the price falls further                                  |
+| Review     | Potential opportunity with missing or uncertain evidence                      |
+| Reject     | Fails a profit, size, demand or risk limit                                    |
+
+Category rules apply on top: clothing needs size-specific demand and a higher returns allowance; food such as honey needs weight, packaging and shelf-life checks.
 
 ## Delivery gates
 
@@ -23,9 +49,18 @@ Vite + React + TypeScript client, Node HTTP API, persistent SQLite and independe
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Local pilot        | App starts from a clean checkout; sample opportunities labelled; API and persistent ledger work.                                                                                                                                                         |
 | Source foundation  | Document all upstreams and access requirements; support a public feed, credential-gated research, repeatable imports and manually researched sales; expose readiness in app.                                                                             |
-| Real buying alerts | In one UK locality, check 30 barcoded items against retailer and actual sold evidence. Audit availability, promotion eligibility, shipping, days to sell, multiple independent recent sales and permission to display. Fail closed on uncertain matches. |
+| Real buying alerts | In one London locality (borough to be chosen), check 30 barcoded items against retailer and actual sold evidence. Audit availability, promotion eligibility, shipping, days to sell, multiple independent recent sales and permission to display. Fail closed on uncertain matches. |
 | Closed member beta | Accounts, private proof storage, claim concurrency, saturation limits and opt-in alerts; test cash recovery and realised hourly earnings against predictions.                                                                                            |
 | Paid release       | Verify licensing, exposure limits and membership billing; measure retention, forecast error, unsold stock and time to payout.                                                                                                                            |
+
+## Open decisions
+
+- Automated source of completed eBay sales; until one is licensed, sold evidence is manual and buy alerts stay operator-reviewed.
+- London borough and the two retailers for the 30-item validation, and which source gives branch-level stock.
+- Whether the opportunity rule defaults above stand as written.
+- Membership: paid, earned or both; tier names, number of tiers and release window lengths; pricing.
+- Who funds fixed-reward bounties.
+- Proof-of-presence standard for photos and their metadata, and how location privacy is protected.
 
 ## Operational model
 
