@@ -21,7 +21,7 @@ An affiliate feed or online catalogue never establishes branch stock. Local stoc
 
 | Area                              | Server files                                                                                       | Client files                                |
 | --------------------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------- |
-| Shared foundations                | `contract.mjs`, `http.mjs`, `app.mjs`, `api.mjs`, `db.mjs`, `trip.mjs`, `alerts.mjs`, `test-support.mjs` | `main.tsx`, `api.ts`, `style.css`           |
+| Shared foundations                | `contract.mjs`, `http.mjs`, `app.mjs`, `api.mjs`, `db.mjs`, `trip.mjs`, `alerts.mjs`, `opportunity.mjs`, `metadata.mjs`, `test-support.mjs` | `main.tsx`, `api.ts`, `style.css`           |
 | Sources and ingestion             | `sources.mjs`, `evidence.mjs`, `worker.mjs`, `research.mjs`, `loop.mjs`, `routes-evidence.mjs`        | `Sources.tsx`                               |
 | Matching, estimate, validation    | `matching.mjs`, `estimate.mjs`, `audit.mjs`, `routes-research.mjs`                                    | `Research.tsx`, `ResearchCalculator.tsx`    |
 | Planner, goals and baskets        | `catalog.mjs`, `goals.mjs`, `routes-plan.mjs`                                                         | `Planner.tsx`, `Goals.tsx`                  |
@@ -42,7 +42,25 @@ The API answers only requests addressed to `127.0.0.1`, `localhost` or `::1`, re
 
 ## Buy-alert gate (`server/alerts.mjs`)
 
-`evaluateAlert(input)` returns `{ eligible, reasons, checks }`. Every check must pass on positive evidence: live evidence, exact match, positive contribution, hourly floor, fresh offer (7 days), confirmed branch stock, in stock, promotion eligibility, known parcel cost, at least three independent completed sales in 90 days, days to sell known and within the cash date, and display permission. Planner fixtures always fail the first check.
+`evaluateAlert(input)` returns `{ eligible, reasons, checks }`. Every check must pass on positive evidence: live evidence, exact match, positive contribution, hourly floor, fresh offer (7 days), confirmed branch stock, in stock, promotion eligibility, known parcel cost, at least three independent completed sales in 90 days, days to sell known and within the cash date, display permission, the buying thresholds (Priority 1 or 2) and a trial batch of at most three units for an unproven item. Planner fixtures always fail the first check.
+
+## Opportunity rules (`server/opportunity.mjs`)
+
+`OPPORTUNITY_RULES` holds the agreed buying thresholds: £5 to £50 purchase price per unit, under 2 kg, at least £5 profit per unit after variable costs (including the unit's share of travel) and at least a 35% return on the purchase price, with a trial batch of three. `effectiveRules(overrides)` lets a member tighten these but never loosen them. `classifyOpportunity(input)` returns one of five tiers with reasons:
+
+| Tier       | Meaning                                                                                        |
+| ---------- | ---------------------------------------------------------------------------------------------- |
+| Reject     | Fails a hard filter (price band, weight, or no purchase price would meet the thresholds)       |
+| Review     | Evidence missing or uncertain (no exact match, too few sales, stale offer, sample data)        |
+| Watch      | Evidence is fine but profit or return falls short; `targetPrice` is the price that would pass |
+| Priority 2 | Passes, but stock is unconfirmed, demand weaker or pressure higher or unknown                 |
+| Priority 1 | Passes with strong sold evidence, confirmed stock, quick sale and low pressure                |
+
+`MEMBERSHIP_TIERS` lists the early access tiers as data (names, release offsets and earned-point thresholds are still open decisions). `accessTier()` takes the earlier of a member's current paid tier and the tier their earned reputation unlocks, returning both so paid and earned status are shown separately.
+
+## Uploaded images (`server/metadata.mjs`)
+
+`stripMetadata(buffer, mediaType)` removes Exif, XMP, comments and PNG text chunks so shelf photos and receipt pictures never keep location data. PDFs pass through unchanged. Uploaded files are stored privately on this computer and are never served over HTTP.
 
 ## Cross-module contracts
 
@@ -59,16 +77,20 @@ Request:
            journeyCost, journeyMinutes, overheadMinutes, handlingMinutes },
   hourlyFloor: 1200,                      // pence per hour
   localStockConfirmed: false, promotionEligible: false,
-  cashNeededDays: null, now: "2026-10-31T12:00:00Z"
+  cashNeededDays: null, now: "2026-10-31T12:00:00Z",
+  weightKg: 0.9,                          // kg per unit; missing rejects the opportunity
+  rules: { minUnitProfit: 800 }           // optional member thresholds; only stricter values apply
 }
 ```
 
-Result: `{ offer, sample: { used, excluded: [{ row, reason }], count, independent, lowerMedian, newest, oldest, daysToSell }, competition: { activeListings, lowestAsking, sellers }, match, economics, alert }` where `match` is `"exact" | "research" | "none"`, `economics` is a `tripEconomics` result or `null` when no sale qualifies, and `alert` is an `evaluateAlert` result. Active listings are reported under `competition` and never enter `sample`.
+Result: `{ offer, sample: { used, excluded: [{ row, reason }], count, independent, lowerMedian, newest, oldest, daysToSell }, competition: { activeListings, lowestAsking, sellers }, match, economics, alert }` where `match` is `"exact" | "research" | "none"`, `economics` is a `tripEconomics` result or `null` when no sale qualifies, and `alert` is an `evaluateAlert` result. Active listings are reported under `competition` and never enter `sample`. `opportunity` is the `classifyOpportunity` result (tier, reasons, unitProfit, returnOnCost, targetPrice, meetsThresholds, trialUnits) plus unitPrice, weightKg, salesPerWeek, resaleWeeksOfSupply, sourcingPressure (null at research time, so Priority 2 at best) and provenItem (false until verified trades are linked). `thresholds` is `{ rules, defaults, tightened, ignored }`. The alert's meetsThresholds, units and trialUnits come from the classification and the effective rules.
 
 ### Ledger
 
 - `POST /api/ledger/trips` `{ label, source: "planner"|"research"|"bounty"|"manual", kind: "resale"|"household", reference?, predicted?: { units, proceeds, contribution, cashRequired, activeMinutes, payoutBy? } }` returns `{ id }`. Predictions are stored for forecast error and never counted as realised cash.
 - `GET /api/ledger/summary?month=YYYY-MM` returns `{ month, realisedEarnings, householdSavings, pendingPayouts, potentialProceeds, cashTiedUp, unsoldUnits, realisedMinutes, realisedHourly }`. Realised earnings come only from recorded payouts less recorded costs; potential proceeds come only from predictions on open trips; household savings are never counted as earnings.
+- The summary also returns `payouts`, `verifiedPayouts`, `verifiedEarnings`, `verifiedTrips`, `unverifiedTrips`, `openTrips` and `basis`. A trade is verified only when its purchase receipt entry and its payout entry each have an attached proof (two different files). Potential proceeds leave out sales already recorded on a trip (those are pending payouts), so the two never overlap. `predicted.units` must be at least 1.
+- Other routes: `GET /api/ledger/trips`, `GET /api/ledger/trips/:id` (entries, proof metadata, reconciliation), `POST /api/ledger/trips/:id/entries`, `DELETE /api/ledger/trips/:id/entries/:entryId` (open trips only), `POST /api/ledger/trips/:id/close`, `POST /api/ledger/trips/:id/proofs` `{ label, mediaType, data (base64), entryId? }` (JPEG, PNG or PDF up to 5 MB; image metadata removed before hashing; stored at `<data dir>/proofs/<sha256>`, mode 0600, never served), `GET /api/ledger/metrics`. Tables: `ledger_trips`, `ledger_entries`, `ledger_proofs`, `ledger_legacy_outcomes`; the legacy `outcomes` table is migrated and kept.
 
 ### Bounties
 

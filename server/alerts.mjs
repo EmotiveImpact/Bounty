@@ -35,6 +35,9 @@ export function ageDays(date, now) {
 //  daysToSell          median days from listing to sale, or null if unknown
 //  cashNeededDays      days until the user needs the cash back, or null
 //  displayPermitted    licence or programme permits showing this offer
+//  meetsThresholds     classifyOpportunity(...).meetsThresholds
+//  units, trialUnits   units planned and the trial batch size (default 3)
+//  provenItem          true when a verified trade exists for the item
 export function evaluateAlert(input = {}, rules = ALERT_RULES) {
   const checks = [];
   const add = (id, ok, pass, failure) =>
@@ -134,6 +137,25 @@ export function evaluateAlert(input = {}, rules = ALERT_RULES) {
     input.displayPermitted === true,
     "Source permits display",
     "No recorded permission to display this source",
+  );
+  // Buying thresholds and tiers come from classifyOpportunity in
+  // opportunity.mjs; only Priority 1 and Priority 2 set meetsThresholds.
+  add(
+    "buying-thresholds",
+    input.meetsThresholds === true,
+    "Meets the buying thresholds (Priority 1 or 2)",
+    "Does not meet the buying thresholds for price, weight, profit per unit and return",
+  );
+  // A first purchase of an item is a small trial batch until a verified
+  // trade (receipt and payout) proves it.
+  const trialUnits = Number.isInteger(input.trialUnits) ? input.trialUnits : 3;
+  add(
+    "trial-batch",
+    Number.isInteger(input.units) &&
+      input.units >= 1 &&
+      (input.units <= trialUnits || input.provenItem === true),
+    "Within the trial batch size",
+    "More than a trial batch of " + trialUnits + " units for an unproven item",
   );
   return {
     eligible: checks.every((c) => c.ok),

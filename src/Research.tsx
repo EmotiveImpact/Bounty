@@ -1,77 +1,183 @@
 import { useEffect, useState } from "react";
-type Source = { name: string; kind: string; status: string };
-import { ResearchCalculator, type Evidence as Row } from "./ResearchCalculator";
+import { api, dateTime, money } from "./api";
+import {
+  ResearchCalculator,
+  attributesText,
+  isSampleRow,
+  type AuditDraft,
+  type EvidenceRow,
+} from "./ResearchCalculator";
+import Audit from "./Audit";
+import "./Research.css";
+
+// Evidence classes from server/contract.mjs. Each is shown on its own tab and
+// never pooled: they answer different questions.
+const KINDS = [
+  {
+    kind: "Retail offer",
+    tab: "Retail offers",
+    price: "offer price",
+    note: "What it costs to acquire, from feeds and catalogues. A feed or online catalogue never establishes branch stock.",
+  },
+  {
+    kind: "Reported completed sale",
+    tab: "Completed sales",
+    price: "realised total incl. buyer postage",
+    note: "What buyers actually paid, including buyer postage. Self-reported research records; only confirmed exact matches enter a sold sample.",
+  },
+  {
+    kind: "Active asking price",
+    tab: "Asking prices",
+    price: "asking price",
+    note: "What competing sellers hope to get. Resale competition only: never used as a sale price.",
+  },
+  {
+    kind: "Amazon offer history",
+    tab: "Amazon history",
+    price: "Amazon price",
+    note: "Amazon as seller price history. Research context only: not a sale and not a local offer.",
+  },
+] as const;
+const PAGE = 50;
+
 export default function Research() {
-  const [data, D] = useState<{ sources: Source[]; rows: Row[] }>({
-      sources: [],
-      rows: [],
-    }),
-    [error, E] = useState(""),
-    [filter, F] = useState("");
+  const [kind, setKind] = useState<string>(KINDS[0].kind);
+  const [filter, setFilter] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [data, setData] = useState<{ rows: EvidenceRow[]; total: number }>({
+    rows: [],
+    total: 0,
+  });
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [draft, setDraft] = useState<AuditDraft | null>(null);
+
   useEffect(() => {
-    const controller = new AbortController();
-    fetch("/api/research", { signal: controller.signal })
-      .then(async (r) => {
-        if (!r.ok) throw Error("Could not load research");
-        D(await r.json());
-      })
-      .catch((e) => {
-        if (!controller.signal.aborted) E(e.message);
+    let active = true;
+    setLoading(true);
+    const timer = setTimeout(() => {
+      const params = new URLSearchParams({
+        kind,
+        limit: String(PAGE),
+        offset: String(offset),
       });
-    return () => controller.abort();
-  }, []);
+      if (filter.trim()) params.set("q", filter.trim());
+      api<{ rows: EvidenceRow[]; total: number }>("evidence?" + params)
+        .then((d) => {
+          if (!active) return;
+          setData(d);
+          setError("");
+        })
+        .catch((e: Error) => active && setError(e.message))
+        .finally(() => active && setLoading(false));
+    }, 250);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [kind, filter, offset]);
+
+  const current = KINDS.find((k) => k.kind === kind) ?? KINDS[0];
+  const last = Math.min(offset + data.rows.length, data.total);
   return (
-    <section>
-      <small>RESEARCH DESK / SOURCE REGISTER</small>
-      <h2>Connected sources</h2>
-      {error && <p role="alert">{error}</p>}
-      {data.sources.map((s) => (
-        <div className="row" key={s.name}>
-          <span>
-            <b>{s.name}</b>
-            <small>{s.kind}</small>
-          </span>
-          {s.status}
-        </div>
-      ))}
-      <ResearchCalculator rows={data.rows} />
-      <h2>Evidence register</h2>
-      <label>
-        Filter by barcode or title
-        <input value={filter} onChange={(e) => F(e.target.value)} />
-      </label>
-      <p>
-        Showing the most recent 200 imported records. Compare the exact variant
-        and pack before using a sale. Source dates can differ from import dates.
-      </p>
-      {!data.rows.length && (
+    <section className="research">
+      <ResearchCalculator
+        onAuditDraft={(d) => {
+          setDraft(d);
+          setTimeout(() => document.getElementById("audit")?.scrollIntoView({ behavior: "smooth" }), 0);
+        }}
+      />
+      <div id="audit">
+        <Audit draft={draft} />
+      </div>
+
+      <article>
+        <small>RESEARCH DESK / EVIDENCE REGISTER</small>
+        <h2>Evidence register</h2>
         <p>
-          No commercial or manual evidence imported yet. Public UK receipt
-          observations appear in Observations.
+          Imported records by evidence class. Source dates can differ from import
+          dates. Open Prices observations are kept separately under Sources.
         </p>
-      )}
-      {data.rows
-        .filter((r) =>
-          (r.title + " " + (r.barcode || ""))
-            .toLowerCase()
-            .includes(filter.toLowerCase()),
-        )
-        .map((r) => (
-          <div className="row" key={r.provider + r.source_id}>
+        <nav className="kind-tabs" aria-label="Evidence class">
+          {KINDS.map((k) => (
+            <button
+              key={k.kind}
+              type="button"
+              aria-pressed={k.kind === kind}
+              onClick={() => {
+                setKind(k.kind);
+                setOffset(0);
+              }}
+            >
+              {k.tab}
+            </button>
+          ))}
+        </nav>
+        <p className="muted">{current.note}</p>
+        <label>
+          Filter by barcode or title
+          <input
+            value={filter}
+            maxLength={200}
+            onChange={(e) => {
+              setFilter(e.target.value);
+              setOffset(0);
+            }}
+          />
+        </label>
+        {error && <p role="alert">{error}</p>}
+        {!error && !loading && data.total === 0 && (
+          <p>
+            No {current.tab.toLowerCase()} imported
+            {filter.trim() ? " match this filter" : " yet"}.
+          </p>
+        )}
+        {data.rows.map((r) => (
+          <div className="row" key={r.provider + "|" + r.source_id}>
             <span>
               <small>
+                {isSampleRow(r) && <span className="badge sample">Sample</span>}
                 {r.provider} · {r.kind}
+                {r.licence ? " · " + r.licence : ""}
               </small>
               <b>{r.title}</b>
-              {r.variant} {r.barcode}
+              <em>
+                {r.barcode ? "Barcode " + r.barcode : "No barcode"}
+                {r.variant ? " · " + r.variant : ""}
+              </em>
+              <em>{attributesText(r)}</em>
               <small>
-                {r.retailer} · Source date {r.observed || "unknown"} · Imported{" "}
-                {r.imported} UTC
+                {r.kind === "Reported completed sale" || r.kind === "Active asking price"
+                  ? "Seller " + (r.seller || "unknown")
+                  : (r.retailer || "Retailer unknown") + (r.location ? " · " + r.location : "")}
+                {" · "}Source date {r.observed || "unknown"} · Imported {dateTime(r.imported)} UTC
               </small>
             </span>
-            <strong>£{(r.price / 100).toFixed(2)}</strong>
+            <span>
+              <b>{money(r.price)}</b>
+              <small>{current.price}</small>
+              {r.kind === "Active asking price" && (
+                <small>
+                  {r.shipping === null ? "shipping unknown" : "+ " + money(r.shipping) + " shipping"}
+                </small>
+              )}
+            </span>
           </div>
         ))}
+        {data.total > 0 && (
+          <div className="pager">
+            <button type="button" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>
+              Newer
+            </button>
+            <span className="muted">
+              {offset + 1} to {last} of {data.total}
+            </span>
+            <button type="button" disabled={last >= data.total} onClick={() => setOffset(offset + PAGE)}>
+              Older
+            </button>
+          </div>
+        )}
+      </article>
     </section>
   );
 }

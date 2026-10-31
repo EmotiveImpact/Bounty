@@ -36,7 +36,7 @@ const gbp = new Intl.NumberFormat("en-GB", {
 });
 export const money = (pence: number | null | undefined) =>
   pence === null || pence === undefined || !Number.isFinite(pence)
-    ? "—"
+    ? "not known"
     : gbp.format(pence / 100);
 export const toPence = (pounds: number | string) =>
   Math.round(Number(pounds) * 100);

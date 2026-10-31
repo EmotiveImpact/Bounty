@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
 import Planner from "./Planner";
@@ -47,6 +47,15 @@ function App() {
     const hash = decodeURIComponent(location.hash.slice(1));
     return hash in TABS ? (hash as Tab) : "Planner";
   });
+  // Follow in-page links such as the Planner's "Open the basket plan in Goals".
+  useEffect(() => {
+    const follow = () => {
+      const hash = decodeURIComponent(location.hash.slice(1));
+      if (hash in TABS) setTab(hash as Tab);
+    };
+    window.addEventListener("hashchange", follow);
+    return () => window.removeEventListener("hashchange", follow);
+  }, []);
   const View = TABS[tab].view;
   return (
     <>

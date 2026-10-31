@@ -96,6 +96,8 @@ const passing = {
   daysToSell: 6,
   cashNeededDays: 14,
   displayPermitted: true,
+  meetsThresholds: true,
+  units: 3,
 };
 
 test("alerts require every check and explain each failure", () => {
@@ -115,6 +117,9 @@ test("alerts require every check and explain each failure", () => {
     ["daysToSell", 20],
     ["displayPermitted", false],
     ["hourly", 1000],
+    ["meetsThresholds", false],
+    ["units", 4],
+    ["units", 0],
   ]) {
     const result = evaluateAlert({ ...passing, [field]: value });
     assert.equal(result.eligible, false, field + "=" + value);
@@ -135,6 +140,7 @@ test("a loyalty price needs confirmed eligibility; empty input fails closed", ()
     }).eligible,
     true,
   );
+  assert.equal(evaluateAlert({ ...passing, units: 8, provenItem: true }).eligible, true);
   const empty = evaluateAlert({});
   assert.equal(empty.eligible, false);
   assert.ok(empty.checks.every((c) => !c.ok || c.id === "promotion"));

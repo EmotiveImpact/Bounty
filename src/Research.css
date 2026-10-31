@@ -1,0 +1,218 @@
+/* Research desk, trip estimate and validation audit. Shared utilities live in
+   style.css; only layout specific to these views is here. */
+/* The tab is a stack of articles; the outer section adds no frame. */
+.research {
+  background: none;
+  border: 0;
+  padding: 0;
+}
+.research > article:first-child {
+  margin-top: 0;
+}
+/* An offer card stays readable when chosen (the shared pressed-button style
+   would turn its text white). */
+.research-calculator .card.active {
+  color: inherit;
+}
+.research-calculator .card > span:last-child {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+/* A fieldset's default minimum width is its content, which lets a wide
+   table push the page sideways on a phone. */
+.research fieldset {
+  min-width: 0;
+}
+.research-calculator .offer-list {
+  max-height: 460px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.research-calculator .card b,
+.research-calculator .card em {
+  overflow-wrap: anywhere;
+}
+.badges {
+  display: block;
+  margin: 4px 0;
+}
+.offer-summary {
+  border: 1px solid #c7d0c4;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 12px 0;
+  background: #fffef9;
+}
+.offer-summary dl,
+.result dl.figures {
+  margin: 8px 0;
+}
+.offer-summary dt,
+.result dl.figures dt {
+  text-transform: none;
+}
+.offer-summary dd,
+.result dl.figures dd {
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.evidence-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 180px) 1fr auto;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid #dce0d6;
+  align-items: start;
+}
+.evidence-row > div:only-child,
+.audit-items .evidence-row {
+  grid-template-columns: 1fr;
+}
+.evidence-row:has(> div:nth-child(2)):not(:has(> label)) {
+  grid-template-columns: 1fr auto;
+}
+.evidence-row b {
+  overflow-wrap: anywhere;
+}
+.evidence-row .amount {
+  text-align: right;
+}
+.evidence-row.status-exact {
+  border-left: 3px solid #34714f;
+  padding-left: 10px;
+}
+.evidence-row.status-research {
+  border-left: 3px solid #c9b74a;
+  padding-left: 10px;
+}
+.confirm {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 0;
+  font-size: 13px;
+}
+.confirm input {
+  margin-top: 3px;
+}
+.reasons {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: #4b6056;
+}
+.result {
+  margin: 16px 0;
+}
+.result h3 {
+  font: 600 15px system-ui, sans-serif;
+  margin: 16px 0 4px;
+}
+.warnings {
+  color: #8a2716;
+  font-size: 14px;
+  padding-left: 18px;
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0 8px;
+}
+.actions button {
+  background: #1d4939;
+  color: white;
+}
+.actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.kind-tabs {
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 12px;
+}
+.audit-progress progress {
+  width: 100%;
+  height: 14px;
+}
+.stock-check table {
+  margin-top: 12px;
+}
+@media (max-width: 740px) {
+  .evidence-row,
+  .evidence-row:has(> div:nth-child(2)):not(:has(> label)) {
+    grid-template-columns: 1fr;
+  }
+  .evidence-row .amount {
+    text-align: left;
+  }
+  .offer-summary dd,
+  .result dl.figures dd {
+    text-align: left;
+  }
+  .offer-summary dl,
+  .result dl.figures {
+    grid-template-columns: 1fr;
+  }
+  .offer-summary dt,
+  .result dl.figures dt {
+    border-bottom: none;
+    padding-bottom: 0;
+    font-size: 13px;
+    color: #4b6056;
+  }
+}
+/* Opportunity tier and buying thresholds. */
+.tier {
+  border: 1px solid #c7d0c4;
+  border-left-width: 4px;
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 8px 0 16px;
+  background: #fffef9;
+}
+.tier-priority-1,
+.tier-priority-2 {
+  border-left-color: #34714f;
+}
+.tier-watch,
+.tier-review {
+  border-left-color: #c9b74a;
+}
+.tier-reject {
+  border-left-color: #8a2716;
+}
+.tier-head {
+  margin: 0 0 4px;
+}
+.tier-head b,
+.tier b.inline {
+  display: inline;
+}
+.tier-head b {
+  font-size: 15px;
+}
+.threshold-list {
+  margin: 6px 0;
+  padding-left: 18px;
+  font-size: 14px;
+}
+.threshold-list li {
+  padding: 2px 0;
+}
+.threshold-list .badge {
+  margin-left: 4px;
+}
+.thresholds .inputs label > span {
+  display: block;
+}
+.thresholds button {
+  margin-top: 8px;
+}

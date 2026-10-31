@@ -1,0 +1,239 @@
+// Opportunity rules: buying thresholds, the five opportunity tiers and paid
+// membership release order. Values are configuration, not facts; Edem has an
+// open decision on the thresholds and the membership names, so everything
+// here is data that can change without touching the logic.
+
+// Buying thresholds (PRD "Opportunity rules"). Money in pence.
+export const OPPORTUNITY_RULES = Object.freeze({
+  minUnitPrice: 500, // £5 purchase price per unit
+  maxUnitPrice: 5000, // £50
+  maxWeightKg: 2, // a unit must weigh under 2 kg
+  minUnitProfit: 500, // £5 estimated profit per unit after variable costs
+  minReturn: 0.35, // profit per unit divided by purchase price per unit
+  trialUnits: 3, // a first purchase of an item is a small trial batch
+  // Priority 1 needs strong sold evidence, easy fulfilment and low pressure.
+  strongIndependentSales: 6,
+  maxDaysToSellPriority1: 14,
+  maxResaleWeeksOfSupplyPriority1: 2,
+  maxSourcingPressurePriority1: 0.5,
+});
+
+/**
+ * Thresholds for one member. Members may tighten the agreed thresholds for
+ * themselves but never loosen them, so each override only applies when it is
+ * stricter than the default. Invalid overrides are ignored.
+ */
+export function effectiveRules(overrides = {}, base = OPPORTUNITY_RULES) {
+  const valid = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+  const higher = (key) =>
+    valid(overrides[key]) ? Math.max(base[key], overrides[key]) : base[key];
+  const lower = (key) =>
+    valid(overrides[key]) ? Math.min(base[key], overrides[key]) : base[key];
+  return Object.freeze({
+    ...base,
+    minUnitPrice: higher("minUnitPrice"),
+    maxUnitPrice: lower("maxUnitPrice"),
+    maxWeightKg: lower("maxWeightKg"),
+    minUnitProfit: higher("minUnitProfit"),
+    minReturn: higher("minReturn"),
+    trialUnits: lower("trialUnits"),
+  });
+}
+
+export const TIERS = Object.freeze([
+  "Priority 1",
+  "Priority 2",
+  "Watch",
+  "Review",
+  "Reject",
+]);
+
+// Checks from evaluateAlert that concern evidence quality. When any fails the
+// opportunity goes to Review rather than being judged on its numbers.
+const EVIDENCE_CHECKS = new Set([
+  "live-evidence",
+  "exact-match",
+  "offer-fresh",
+  "independent-sales",
+  "days-to-sell",
+  "shipping",
+]);
+// Checks about branch stock. Unknown stock caps a tier at Priority 2.
+const STOCK_CHECKS = new Set(["local-stock", "availability"]);
+
+/**
+ * Profit per unit and return on purchase price. Profit per unit is the trip
+ * contribution divided by units, so it already carries fees, postage,
+ * packaging, the returns allowance and the unit's share of travel.
+ */
+export function unitReturns(economics) {
+  if (!economics || !economics.units) return { unitProfit: null, returnOnCost: null };
+  const unitProfit = Math.floor(economics.contribution / economics.units);
+  const returnOnCost = economics.unitCost
+    ? Math.round((unitProfit / economics.unitCost) * 1000) / 1000
+    : null;
+  return { unitProfit, returnOnCost };
+}
+
+/**
+ * Highest purchase price per unit at which the item would meet both the
+ * profit and return thresholds, all other costs unchanged. Buying a penny
+ * cheaper raises profit by a penny because fees, postage and packaging do
+ * not depend on the purchase price. Null when no price works.
+ */
+export function targetPrice(economics, rules = OPPORTUNITY_RULES) {
+  const { unitProfit } = unitReturns(economics);
+  if (unitProfit === null) return null;
+  const headroom = unitProfit + economics.unitCost; // profit at a zero price
+  const byProfit = headroom - rules.minUnitProfit;
+  const byReturn = Math.floor(headroom / (1 + rules.minReturn));
+  const target = Math.min(byProfit, byReturn);
+  return target >= rules.minUnitPrice ? target : null;
+}
+
+/**
+ * Hard filters that do not depend on evidence: the purchase price band and
+ * the weight limit. Unknown weight fails closed.
+ */
+export function hardFilters({ unitPrice, weightKg }, rules = OPPORTUNITY_RULES) {
+  const reasons = [];
+  if (!Number.isSafeInteger(unitPrice)) reasons.push("Purchase price unknown");
+  else if (unitPrice < rules.minUnitPrice || unitPrice > rules.maxUnitPrice)
+    reasons.push(
+      `Purchase price outside £${rules.minUnitPrice / 100} to £${rules.maxUnitPrice / 100} per unit`,
+    );
+  if (!(typeof weightKg === "number" && Number.isFinite(weightKg) && weightKg > 0))
+    reasons.push("Unit weight unknown");
+  else if (weightKg >= rules.maxWeightKg)
+    reasons.push(`Unit weighs ${rules.maxWeightKg} kg or more`);
+  return reasons;
+}
+
+/**
+ * Classifies an opportunity into one of the five tiers.
+ *
+ * input:
+ *  unitPrice    purchase price per unit (pence)
+ *  weightKg     weight of one unit
+ *  economics    tripEconomics result, or null when no sale price is known
+ *  alert        evaluateAlert result for the same trip
+ *  independentSales, daysToSell   from the sold sample
+ *  sourcingPressure  claimed or reported demand on the shelf relative to
+ *               available units (0 to 1+), null when unknown
+ *  resaleWeeksOfSupply  competing listings divided by sales per week, null
+ *               when unknown
+ *
+ * Returns { tier, reasons, unitProfit, returnOnCost, targetPrice,
+ * meetsThresholds, trialUnits }. meetsThresholds is true only for Priority 1
+ * and Priority 2, and the buy-alert gate requires it.
+ */
+export function classifyOpportunity(input, rules = OPPORTUNITY_RULES) {
+  const { unitProfit, returnOnCost } = unitReturns(input.economics);
+  const result = (tier, reasons, extra = {}) => ({
+    tier,
+    reasons,
+    unitProfit,
+    returnOnCost,
+    targetPrice: null,
+    meetsThresholds: tier === "Priority 1" || tier === "Priority 2",
+    trialUnits: rules.trialUnits,
+    ...extra,
+  });
+
+  const hard = hardFilters(input, rules);
+  if (hard.length) return result("Reject", hard);
+
+  const checks = input.alert?.checks || [];
+  const failed = (ids) =>
+    checks.filter((c) => ids.has(c.id) && !c.ok).map((c) => c.detail);
+  const evidenceGaps = input.economics
+    ? failed(EVIDENCE_CHECKS)
+    : ["No completed-sale price for this exact variant"];
+  if (!checks.length) evidenceGaps.push("Evidence checks were not run");
+  if (evidenceGaps.length) return result("Review", evidenceGaps);
+
+  const short = [];
+  if (unitProfit < rules.minUnitProfit)
+    short.push(`Profit per unit below £${rules.minUnitProfit / 100}`);
+  if (returnOnCost === null || returnOnCost < rules.minReturn)
+    short.push(`Return below ${Math.round(rules.minReturn * 100)}% of purchase price`);
+  if (short.length) {
+    const target = targetPrice(input.economics, rules);
+    if (target === null)
+      return result("Reject", [...short, "No purchase price in the band would meet the thresholds"]);
+    return result("Watch", [...short, "Would qualify at a purchase price of £" + (target / 100).toFixed(2) + " or less"], {
+      targetPrice: target,
+    });
+  }
+
+  const priority2 = [];
+  const stockGaps = failed(STOCK_CHECKS);
+  if (stockGaps.length) priority2.push("Branch stock not confirmed");
+  // Unknown values never count as strong (null would compare as 0).
+  const atMost = (v, max) => typeof v === "number" && Number.isFinite(v) && v <= max;
+  const atLeast = (v, min) => typeof v === "number" && Number.isFinite(v) && v >= min;
+  if (!atLeast(input.independentSales, rules.strongIndependentSales))
+    priority2.push("Fewer than " + rules.strongIndependentSales + " independent recent sales");
+  if (!atMost(input.daysToSell, rules.maxDaysToSellPriority1))
+    priority2.push("Expected to take more than " + rules.maxDaysToSellPriority1 + " days to sell, or unknown");
+  if (!atMost(input.resaleWeeksOfSupply, rules.maxResaleWeeksOfSupplyPriority1))
+    priority2.push("Resale competition high or unknown");
+  if (!atMost(input.sourcingPressure, rules.maxSourcingPressurePriority1))
+    priority2.push("Sourcing pressure high or unknown");
+  if (priority2.length) return result("Priority 2", priority2);
+  return result("Priority 1", ["Strong sold evidence, confirmed stock and low pressure"]);
+}
+
+// Early access tiers, in release order. Edem chose paid and earned early
+// access from launch: a member can pay for a tier or earn it through
+// reputation, and the app always shows the two separately. Names, the number
+// of tiers, window lengths and point thresholds are still open, so they are
+// data here. offsetMinutes is how long after a bounty opens a tier is
+// alerted. earnPoints is the earned reputation that unlocks the tier (null:
+// cannot be earned). The bounty exposure limit stops alerts once the
+// stock-sized cap is used, so with little stock later tiers receive nothing.
+export const MEMBERSHIP_TIERS = Object.freeze([
+  { id: "diamond", name: "Diamond", offsetMinutes: 0, earnPoints: 500 },
+  { id: "ruby", name: "Ruby", offsetMinutes: 90, earnPoints: 250 },
+  { id: "sapphire", name: "Sapphire", offsetMinutes: 180, earnPoints: 120 },
+  { id: "emerald", name: "Emerald", offsetMinutes: 270, earnPoints: 60 },
+  { id: "amethyst", name: "Amethyst", offsetMinutes: 360, earnPoints: 25 },
+  { id: "new", name: "New member", offsetMinutes: 450, earnPoints: 0 },
+]);
+export const PAID_TIER_IDS = Object.freeze(
+  MEMBERSHIP_TIERS.filter((t) => t.id !== "new").map((t) => t.id),
+);
+
+/** The tier definition for an id, or null. */
+export function membershipTier(id) {
+  return MEMBERSHIP_TIERS.find((t) => t.id === id) || null;
+}
+
+/** The highest tier unlocked by earned reputation points. */
+export function earnedTier(points) {
+  const score = Number.isFinite(points) ? points : 0;
+  return MEMBERSHIP_TIERS.find(
+    (t) => t.earnPoints !== null && score >= t.earnPoints,
+  );
+}
+
+/**
+ * Release position for a member: the earlier of their paid tier (only while
+ * paid membership is current) and their earned tier. Both are returned so
+ * the interface can show paid status and earned status separately.
+ */
+export function accessTier({ paidTier, paidUntil, reputation, now }) {
+  const current =
+    paidTier && (!paidUntil || Date.parse(paidUntil) > Date.parse(now))
+      ? membershipTier(paidTier)
+      : null;
+  const earned = earnedTier(reputation);
+  const rank = (t) => MEMBERSHIP_TIERS.indexOf(t);
+  const best = current && rank(current) < rank(earned) ? current : earned;
+  return {
+    tier: best,
+    via: current && best === current ? "paid" : "earned",
+    paid: current,
+    earned,
+  };
+}
