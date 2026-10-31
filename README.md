@@ -23,6 +23,6 @@ Open the local address printed by Vite (normally http://127.0.0.1:5173). The API
 The local database is stored in `.data/` (override with BOUNTY_DATA_DIR). Profiles are saved in the browser. This pilot has no multi-user authentication, hosted scheduler or verified paid-provider access. Keep it local. A production release needs authenticated data isolation, licensed sold evidence, freshness and stock checks, and calibrated fees and postage.
 
 ## Requirements and sources
-[Product requirements](docs/PRD.md) · [Source register, credentials and import commands](docs/SOURCES.md)
+[Product requirements](docs/PRD.md) · [Feature backlog](docs/FEATURES.md) · [Source register, credentials and import commands](docs/SOURCES.md)
 
 Open **Research** to inspect source readiness and imported retail, asking-price and manually recorded sales evidence. Use **Observations** for the separate Open Prices dataset. Optional adapters require your authorised feeds and credentials. Run `npm run worker:loop` for recurring public imports while the local process is running.

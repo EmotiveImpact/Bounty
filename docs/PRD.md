@@ -31,5 +31,9 @@ Vite + React + TypeScript client, Node HTTP API, persistent SQLite and independe
 
 Schedule public imports upstream of user requests. Credentialed lookups are explicitly triggered, cache results locally and never expose tokens to the browser. Separate imported records, estimates and user-entered outcomes. Start with one worker and one API. Add durable queues, user isolation, monitoring and retries before opening access beyond localhost.
 
+## Feature backlog
+
+Candidate features, competitor lessons and a suggested build order are kept in the [feature backlog](FEATURES.md). An idea becomes scope only when it is added here.
+
 ## Implementation status
 The local pilot and source setup are implemented. Source-specific request shapes and sample imports are tested locally. Live public observations have been retrieved. Authenticated providers need credentialed acceptance runs. The Research desk supports selecting a barcoded acquisition offer and confirming matching sold variants before calculating an illustrative per-unit trip. No automatic promotion follows a manual sale. The 30-product validation, member beta and paid release gates are pending.
