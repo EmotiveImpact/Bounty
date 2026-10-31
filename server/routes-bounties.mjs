@@ -151,7 +151,7 @@ function rechecker(db, { estimate, askingLookup }) {
       result = await estimate(db, request, { now });
       // The figures must be for the units one member can claim: when the
       // estimate was for more, work it out again for that many.
-      const plan = planForBounty(bounty, result, { lookup });
+      const plan = planForBounty(bounty, result, { lookup, db });
       if (plan.rerun) result = await estimate(db, { ...request, units: plan.figures }, { now });
     } catch (error) {
       result = { error: error.message };
@@ -165,8 +165,11 @@ function rechecker(db, { estimate, askingLookup }) {
 
 /**
  * Each active claim's own trip check worked out again on the evidence now
- * (R3M2), with its stored units, journey and promotion answer and the
- * member's rules (memberRequest, memberTripCheck; neither is changed).
+ * (R3M2), with its stored units and journey, the member's promotion
+ * standing now (promotionStanding: a member who has since bought at a
+ * first-order price at the retailer, or answered "not" or "used", no longer
+ * qualifies, round 4 N2) and the member's rules (memberRequest,
+ * memberTripCheck; neither is changed).
  * Demand is shared in claim order: the units bought on the bounty and the
  * units of claims made before this one count as competing units. A claim's
  * own hourly floor and cash date are used when the claim stores them (a
@@ -203,7 +206,12 @@ async function recheckClaims(db, bounty, { estimate, now }) {
       }
       const mine = bought.filter((r) => r.member_id === c.member_id).reduce((n, r) => n + r.units, 0);
       const shared = { ...sharedDemand(db, bounty, member, now), committed: boughtUnits + ahead, mine };
-      const request = memberRequest(bounty, member, { units, journey, qualifies: c.promotion_confirmed === 1, terms });
+      // The member's standing now, not only the answer stored with the claim
+      // (round 4, N2): once they buy at a first-order price at this retailer
+      // (or answer "not" or "used"), the price is no longer theirs.
+      const standing = promotionStanding(db, bounty, member);
+      const qualifies = standing ? standing.confirmed === true : c.promotion_confirmed === 1;
+      const request = memberRequest(bounty, member, { units, journey, qualifies, terms });
       let result;
       try {
         if (!request) throw Error("no stored estimate request");
@@ -591,15 +599,20 @@ export function routes(db, options = {}) {
       "POST",
       "/api/claims/:id/complete",
       ({ params, body }) => {
+        const now = clock();
         const input = body0(body);
         const done = completeClaim(db, {
           claimId: pathId(params.id, "Claim"),
           memberId: input.memberId,
           unitsBought: input.units,
-          now: clock(),
+          now,
         });
+        const retailer = requireBounty(db, done.bounty_id).retailer;
+        // Claims this member holds on other first-order bounties at the
+        // retailer are told at once that the price is no longer theirs.
+        if (done.promotionUsed) recheckOpenBounties(db, { retailer, now });
         const used = done.promotionUsed
-          ? ` You bought at a first-order price, so the first-order offer at ${requireBounty(db, done.bounty_id).retailer} is now recorded as used and its price will not be offered to you again.`
+          ? ` You bought at a first-order price, so the first-order offer at ${retailer} is now recorded as used and its price will not be offered to you again.`
           : "";
         return {
           claim: done,

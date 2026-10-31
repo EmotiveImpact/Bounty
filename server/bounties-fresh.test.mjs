@@ -334,7 +334,9 @@ test("a lookup that found no competing listings counts for 6 hours; then reads s
 test("a positive competing-listings count lapses after 7 days", () => {
   const db = memoryDb(schema, auditSchema);
   const b = liveBounty(db, { expiresAt: at(10 * DAY) });
-  assert.equal(competitionNow(b, at(7 * DAY + 23 * HOUR)).lapsed, false);
+  // At most 7 x 24 hours, as matching.competition counts listings (round 4, N4).
+  assert.equal(competitionNow(b, at(7 * DAY)).lapsed, false);
+  assert.equal(competitionNow(b, at(7 * DAY + 23 * HOUR)).lapsed, true);
   const late = at(8 * DAY);
   assert.equal(competitionNow(b, late).lapsed, true);
   const list = blockerList(db, b, late);

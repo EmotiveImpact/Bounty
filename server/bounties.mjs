@@ -404,7 +404,8 @@ const plain = (row) => (row ? { ...row } : null);
 const round2 = (v) => Math.round(v * 100) / 100;
 const isCount = (v) => Number.isSafeInteger(v) && v >= 0;
 const isPositive = (v) => typeof v === "number" && Number.isFinite(v) && v > 0;
-const pounds = (pence) => "£" + (pence / 100).toFixed(2);
+// A loss reads "-£5.00", never "£-5.00".
+const pounds = (pence) => (pence < 0 ? "-£" : "£") + (Math.abs(pence) / 100).toFixed(2);
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 // Share as a percentage to one decimal place, rounded down (34.96% is 34.9%).
 const percentDown = (share) => (Math.floor(share * 1000 + 1e-9) / 10).toLocaleString("en-GB") + "%";
@@ -763,9 +764,19 @@ function lookupOf(estimate, lookup) {
  * entry. Competing listings come from the estimate's resale competition.
  * No listings with no recorded asking-price lookup means nobody looked, so
  * competition is unknown, never zero. Unknown evidence fails closed (cap 0).
+ *
+ * options.boughtBefore: units members marked as bought through this bounty
+ * before that stock check (round 4, N3). They are no longer on the shelf the
+ * check counted, but they stay held against the cap (completed claims), so
+ * the units the bounty shares in all are the count plus those units; without
+ * them a check made after purchases would take those units off twice.
+ * basis.demand is the cap before any shelf limit: the resale demand left
+ * after competing listings, never more than the operator's limit.
  */
-function capBasis(entered, estimate, lookup = null) {
-  const units = evidencedUnits(estimate.stock);
+function capBasis(entered, estimate, lookup = null, { boughtBefore = 0 } = {}) {
+  const counted = evidencedUnits(estimate.stock);
+  const before = counted === null || !isCount(boughtBefore) ? 0 : boughtBefore;
+  const units = counted === null ? null : counted + before;
   const rate = evidencedSalesPerWeek(estimate.sample?.count);
   const listings = estimate.competition?.activeListings;
   const sellers = estimate.competition?.sellers;
@@ -794,7 +805,15 @@ function capBasis(entered, estimate, lookup = null) {
         : "No stock check with a unit count, so units on the shelf are unknown and the cap is 0",
     );
   else if (limit !== null && limit < units)
-    notes.push(`Units to share limited to ${limit} of the ${units} counted on the latest stock check`);
+    notes.push(
+      before > 0
+        ? `Units to share limited to ${limit} of the ${units}: the ${counted} counted on the latest stock check and the ${before} members bought through this bounty before it`
+        : `Units to share limited to ${limit} of the ${units} counted on the latest stock check`,
+    );
+  else if (before > 0)
+    notes.push(
+      `Units to share: ${units}, the ${plural(counted, "unit")} counted on the latest stock check and the ${plural(before, "unit")} members bought through this bounty before it`,
+    );
   if (rate === null) notes.push("No confirmed sales count, so the cap is 0");
   else if (rate < entered.salesPerWeek)
     notes.push(
@@ -813,7 +832,8 @@ function capBasis(entered, estimate, lookup = null) {
   return {
     entered,
     evidence: {
-      unitsSeen: units,
+      unitsSeen: counted,
+      boughtBefore: before,
       salesPerWeek: rate === null ? null : round2(rate),
       confirmedSales: isCount(estimate.sample?.count) ? estimate.sample.count : null,
       competingListings: knownListings,
@@ -822,8 +842,19 @@ function capBasis(entered, estimate, lookup = null) {
     },
     used: { ...used, salesPerWeek: used.salesPerWeek === null ? null : round2(used.salesPerWeek) },
     cap: distributionCap(used),
+    demand: demandCap(used, limit),
     notes,
   };
+}
+
+/**
+ * The cap before any shelf limit (round 4, N3): the resale demand in the
+ * sell window less competing listings, never more than the operator's
+ * limit on units to share (null for none). 0 when any figure is unknown.
+ */
+function demandCap(used, limit = null) {
+  const demand = distributionCap({ ...used, availableUnits: Number.MAX_SAFE_INTEGER });
+  return isCount(limit) ? Math.min(limit, demand) : demand;
 }
 
 // ------------------------------------------------------- estimate snapshot
@@ -942,10 +973,19 @@ function sellerDates(sample) {
     const name = sellerName(row?.seller);
     const at = Date.parse(row?.observed);
     if (name === null || !Number.isFinite(at)) continue;
-    if (!newest.has(name) || at > newest.get(name)) newest.set(name, at);
+    if (!newest.has(name) || at > newest.get(name).ms) newest.set(name, { ms: at, value: saleDateValue(row.observed, at) });
   }
-  return [...newest.values()].sort((a, b) => a - b).map((ms) => iso(ms));
+  return [...newest.values()].sort((a, b) => a.ms - b.ms).map((d) => d.value);
 }
+
+const CALENDAR_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * A sale date as the snapshot keeps it (round 4, N5): a calendar date
+ * ("2026-05-02") stays a calendar date, so a later read ages it in UK days
+ * as the estimate does (alerts.mjs ageDays); a time is kept as an ISO time.
+ */
+const saleDateValue = (observed, ms) => (typeof observed === "string" && CALENDAR_DATE.test(observed) ? observed : iso(ms));
 
 /**
  * The date of every confirmed sale behind the figures, oldest first, so a
@@ -956,9 +996,9 @@ function sellerDates(sample) {
 function saleDates(sample) {
   const used = Array.isArray(sample?.used) ? sample.used : null;
   if (!used) return null;
-  const dates = used.map((row) => Date.parse(row?.observed));
-  if (dates.some((ms) => !Number.isFinite(ms))) return null;
-  return dates.sort((a, b) => a - b).map((ms) => iso(ms));
+  const dates = used.map((row) => ({ ms: Date.parse(row?.observed), observed: row?.observed }));
+  if (dates.some((d) => !Number.isFinite(d.ms))) return null;
+  return dates.sort((a, b) => a.ms - b.ms).map((d) => saleDateValue(d.observed, d.ms));
 }
 
 /**
@@ -975,21 +1015,41 @@ function journeyOf(request) {
 /**
  * Units one member can claim on a live bounty: the smallest of the
  * estimate's units, the distribution cap and the trial batch (0 when any of
- * them is unknown or 0).
+ * them is unknown or 0), and, when given (not null), the units left on the
+ * shelf.
  */
-export function claimableUnits({ estimateUnits, cap, trialUnits }) {
-  return Math.min(...[estimateUnits, cap, trialUnits].map((v) => (Number.isSafeInteger(v) && v >= 0 ? v : 0)));
+export function claimableUnits({ estimateUnits, cap, trialUnits, shelfUnits = null }) {
+  const limits = [estimateUnits, cap, trialUnits];
+  if (shelfUnits !== null && shelfUnits !== undefined) limits.push(shelfUnits);
+  return Math.min(...limits.map((v) => (Number.isSafeInteger(v) && v >= 0 ? v : 0)));
+}
+
+/**
+ * Units likely left on the shelf by the estimate's own count (stock.shelf:
+ * the newest branch check or stock report less units members bought through
+ * bounties since, as the buy-alert gate's shelf-units check reads it), or
+ * null when the estimate does not confirm stock or has no count.
+ */
+function estimateShelfUnits(estimate) {
+  const stock = estimate?.stock;
+  return stock?.confirmed === true && isCount(stock.shelf?.units) ? stock.shelf.units : null;
 }
 
 /**
  * The unit plan for a live bounty from its evidence: { cap, trial,
- * estimateUnits, claimable, figures, rerun }. figures is the count the
- * bounty's figures must be worked out for (claimable, at least 1); rerun is
- * true when the estimate was for more units than that, so it must be run
- * again for `figures` units before the bounty may alert.
+ * estimateUnits, shelf, claimable, figures, rerun }. figures is the count
+ * the bounty's figures must be worked out for (claimable, at least 1);
+ * rerun is true when the estimate was for more units than that, so it must
+ * be run again for `figures` units before the bounty may alert.
+ *
+ * Round 4 (N1): claimable is never more than the units the estimate says
+ * are left on the shelf (shelf), so once members buy some of the units a
+ * check counted, the figures are worked out again for the units left
+ * instead of failing the shelf-units check for the whole bounty. Nor is it
+ * more than the cap less units already bought (options.completed).
  */
-function unitsPlan(entered, estimate, lookup) {
-  const basis = capBasis(entered, estimate, lookup);
+function unitsPlan(entered, estimate, lookup, { boughtBefore = 0, completed = 0 } = {}) {
+  const basis = capBasis(entered, estimate, lookup, { boughtBefore });
   const tightened = estimate?.opportunity?.trialUnits;
   const trial =
     Number.isSafeInteger(tightened) && tightened >= 1 ? Math.min(BOUNTY_RULES.maxClaimUnits, tightened) : BOUNTY_RULES.maxClaimUnits;
@@ -1000,12 +1060,15 @@ function unitsPlan(entered, estimate, lookup) {
     : Number.isSafeInteger(fromRequest)
       ? fromRequest
       : null;
-  const claimable = claimableUnits({ estimateUnits, cap: basis.cap, trialUnits: trial });
+  const shelf = estimateShelfUnits(estimate);
+  const bought = isCount(completed) ? completed : 0;
+  const claimable = claimableUnits({ estimateUnits, cap: Math.max(0, basis.cap - bought), trialUnits: trial, shelfUnits: shelf });
   const figures = Math.max(1, claimable);
   return {
     cap: basis.cap,
     trial,
     estimateUnits,
+    shelf,
     claimable,
     figures,
     rerun: Number.isSafeInteger(fromEconomics) && fromEconomics > figures,
@@ -1026,9 +1089,31 @@ export function planForInput(input, estimate, { lookup = null, now } = {}) {
   );
 }
 
-/** The unit plan for re-checking a live bounty with a fresh estimate. */
-export function planForBounty(bounty, estimate, { lookup = null } = {}) {
-  return unitsPlan(enteredOf(bounty), estimate, lookup);
+/**
+ * The unit plan for re-checking a live bounty with a fresh estimate. With
+ * options.db, the units bought through the bounty count as refreshBounty
+ * counts them (before the estimate's stock check, and in all).
+ */
+export function planForBounty(bounty, estimate, { lookup = null, db = null } = {}) {
+  return unitsPlan(enteredOf(bounty), estimate, lookup, db ? boughtOn(db, bounty, estimate) : {});
+}
+
+/**
+ * Units members marked as bought through a bounty: { boughtBefore, completed }
+ * where boughtBefore is those bought at or before the estimate's stock check
+ * (capBasis) and completed every unit bought.
+ */
+function boughtOn(db, bounty, estimate) {
+  const rows = db.prepare("SELECT units, ended_at FROM claims WHERE bounty_id = ? AND status = 'completed'").all(bounty.id);
+  const checkAt = Date.parse(estimate?.stock?.check?.checked_at);
+  let boughtBefore = 0;
+  let completed = 0;
+  for (const r of rows) {
+    if (!isCount(r.units)) continue;
+    completed += r.units;
+    if (Number.isFinite(checkAt) && Date.parse(r.ended_at) <= checkAt) boughtBefore += r.units;
+  }
+  return { boughtBefore, completed };
 }
 
 const enteredOf = (bounty) =>
@@ -1074,7 +1159,14 @@ function estimateSnapshot(estimate, request, at, lookup = null, plan = null) {
     // The figures are for `units.figures` units (the most one member can
     // claim) with the operator's journey.
     units: plan
-      ? { requested: plan.estimateUnits, claimable: plan.claimable, figures: plan.figures, cap: plan.cap, trial: plan.trial }
+      ? {
+          requested: plan.estimateUnits,
+          claimable: plan.claimable,
+          figures: plan.figures,
+          cap: plan.cap,
+          trial: plan.trial,
+          shelf: plan.shelf ?? null,
+        }
       : null,
     journey: journeyOf(request),
     category: categorySnapshot(estimate),
@@ -1108,7 +1200,7 @@ function alertFrom(estimate, plan = null) {
   if (plan?.rerun) {
     eligible = false;
     reasons.push(
-      `The figures are for ${plural(plan.estimateUnits, "unit")}, but one member can claim at most ${plural(plan.figures, "unit")} (the smallest of the estimate's units, the cap and the trial batch): the estimate must be worked out again for ${plural(plan.figures, "unit")}`,
+      `The figures are for ${plural(plan.estimateUnits, "unit")}, but one member can claim at most ${plural(plan.figures, "unit")} (the smallest of the estimate's units, the cap, the trial batch${plan.shelf === null || plan.shelf === undefined ? "" : " and the units likely left on the shelf"}): the estimate must be worked out again for ${plural(plan.figures, "unit")}`,
     );
   }
   return { eligible, reasons: eligible ? [] : reasons };
@@ -1316,8 +1408,11 @@ export function refreshBounty(db, bountyId, estimate, now, { lookup = null, clai
     );
     return settled(db, bounty.id, now);
   }
-  const basis = capBasis(entered, estimate, lookup);
-  const plan = unitsPlan(entered, estimate, lookup);
+  // Units bought through this bounty before the new stock check stay held
+  // against the cap but are not on the shelf it counted (round 4, N3).
+  const bought = boughtOn(db, bounty, estimate);
+  const basis = capBasis(entered, estimate, lookup, bought);
+  const plan = unitsPlan(entered, estimate, lookup, bought);
   const alert = alertFrom(estimate, plan);
   const opportunity = opportunitySnapshot(estimate);
   const snapshot = estimateSnapshot(estimate, old.request ?? null, at, lookup, plan);
@@ -1694,8 +1789,12 @@ export function salesNow(bounty, now) {
   if (bounty.sample) return null;
   const s = json(bounty.estimate, null)?.sample;
   if (!s) return null;
+  // Aged as the estimate ages them (round 4, N5): a calendar date in UK
+  // days. An older snapshot stored a calendar date as midnight UTC, which is
+  // read back as that date (never younger than the estimate counts it).
   const recentEnough = (d) => {
-    const age = ageDays(d, now);
+    const legacy = typeof d === "string" ? /^(\d{4}-\d{2}-\d{2})T00:00:00(?:\.000)?Z$/.exec(d) : null;
+    const age = ageDays(legacy ? legacy[1] : d, now);
     return age !== null && age >= 0 && age <= ALERT_RULES.maxSaleAgeDays;
   };
   const total = isCount(s.count) ? s.count : null;
@@ -1762,16 +1861,22 @@ export function competitionNow(bounty, now) {
       headline: lapsed ? `competing listings were last checked more than ${plural(hours, "hour")} ago, so competition is not known now` : null,
     };
   }
-  const checked = Date.parse(snapshot.competition?.checkedAt ?? snapshot.checkedAt);
+  // Current means at most 7 x 24 hours elapsed, the rule matching.competition
+  // counts listings by (round 4, N4), never 7 whole days rounded down. A
+  // listing dated after the re-check that counted it is taken as seen at the
+  // re-check, so it never holds longer than the estimate would keep it.
+  let checked = Date.parse(snapshot.competition?.checkedAt ?? snapshot.checkedAt);
+  const recheckedAt = Date.parse(snapshot.checkedAt);
+  if (Number.isFinite(checked) && Number.isFinite(recheckedAt) && checked > recheckedAt) checked = recheckedAt;
   const days = ALERT_RULES.maxOfferAgeDays;
-  const lapsed = !Number.isFinite(checked) || at < checked - DAY || Math.floor((at - checked) / DAY) > days;
+  const lapsed = !(Number.isFinite(checked) && checked <= at && at - checked <= days * DAY);
   return {
     known: !lapsed,
     lapsed,
     listings: lapsed ? null : listings,
     relies: "listings",
     checkedAt: Number.isFinite(checked) ? iso(checked) : null,
-    until: Number.isFinite(checked) ? iso(checked + (days + 1) * DAY) : null,
+    until: Number.isFinite(checked) ? iso(checked + days * DAY) : null,
     text: lapsed
       ? `The latest asking-price check (${Number.isFinite(checked) ? humanDate(checked) : "date unknown"}) is more than ${plural(days, "day")} old, so the ${plural(listings, "competing listing")} behind the cap may have changed and competition is not known now: run an asking-price lookup again before anyone travels`
       : null,
@@ -1880,15 +1985,18 @@ function shelfCount(db, bounty, live, report = latestReport(db, bounty.id)) {
  * count of the shelf with fewer units, sales that aged out of the sale
  * window (the sales rate counts only the recent ones), a competing-listings
  * count that lapsed (competition unknown, so 0), and the one sell window.
- * Returns { cap, changed, basis, notes }: basis is the cap basis to show,
- * with live { base, at, notes } kept beside the re-check's own figures so
- * a later read can work the cap out again from them; changed says whether
- * it differs from what is stored.
+ * Returns { cap, changed, basis, notes, demand }: basis is the cap basis to
+ * show, with live { base, at, notes } kept beside the re-check's own figures
+ * so a later read can work the cap out again from them; changed says
+ * whether it differs from what is stored. demand is the cap before any
+ * shelf limit (capBasis's demand, lowered by sales and competition now).
+ * A newer shelf count lowers the units to share to that count plus the
+ * units bought through the bounty before it (round 4, N3).
  */
 export function capNow(db, bounty, now, live = liveEvidence(db, bounty, now)) {
   const stored = json(bounty.cap_basis, null);
   const base = isObject(stored?.live?.base) ? stored.live.base : stored;
-  if (bounty.sample || !isObject(base?.used)) return { cap: bounty.cap, changed: false, basis: stored, notes: [] };
+  if (bounty.sample || !isObject(base?.used)) return { cap: bounty.cap, changed: false, basis: stored, notes: [], demand: bounty.cap };
   const baseCap = Number.isSafeInteger(base.cap) ? base.cap : bounty.cap;
   const used = { ...base.used };
   const notes = [];
@@ -1911,10 +2019,27 @@ export function capNow(db, bounty, now, live = liveEvidence(db, bounty, now)) {
           `The latest ${checkWord(count.source)} (${humanTime(count.at)}) recorded no unit count, so units on the shelf are unknown and the cap is 0`,
         );
       }
-    } else if (!isCount(used.availableUnits) || count.units < used.availableUnits) {
-      used.availableUnits = count.units;
-      drop.push(/^Units to share/);
-      notes.push(`Units to share lowered to ${count.units}: the latest ${checkWord(count.source)} (${humanTime(count.at)}) saw ${plural(count.units, "unit")}`);
+    } else {
+      // Units bought through this bounty before the count are off the shelf
+      // it saw but still held against the cap (completed claims), so the
+      // units shared in all are the count plus them (round 4, N3).
+      const before = db
+        .prepare("SELECT COALESCE(SUM(units), 0) AS n FROM claims WHERE bounty_id = ? AND status = 'completed' AND ended_at <= ?")
+        .get(bounty.id, count.at).n;
+      const total = count.units + before;
+      if (!isCount(used.availableUnits) || total < used.availableUnits) {
+        used.availableUnits = total;
+        drop.push(/^Units to share/);
+        const since = boughtAtBranch(db, bounty, count.at);
+        const left = Math.max(0, count.units - since);
+        notes.push(
+          `Units to share lowered to ${total}: the latest ${checkWord(count.source)} (${humanTime(count.at)}) saw ${plural(count.units, "unit")}` +
+            (before > 0 ? `, after members had bought ${plural(before, "unit")} through this bounty` : "") +
+            (since > 0
+              ? `, and members have bought ${plural(since, "unit")} since, so ${left === 0 ? "none are" : `about ${plural(left, "unit")} ${left === 1 ? "is" : "are"}`} likely left on the shelf`
+              : ""),
+        );
+      }
     }
   }
   const s = live?.sales;
@@ -1941,20 +2066,26 @@ export function capNow(db, bounty, now, live = liveEvidence(db, bounty, now)) {
     drop.push(/^An asking-price lookup/);
     notes.push(`${c.text}. The cap is 0 until then`);
   }
+  // The cap before any shelf limit (round 4, N3), lowered only by demand
+  // that changed since the re-check (sales, competition, the sell window).
+  const limit = isCount(base.entered?.availableUnits) ? base.entered.availableUnits : null;
+  const baseDemand = isCount(base.demand) ? base.demand : demandCap(base.used, limit);
   if (!notes.length) {
     const back = baseCap !== bounty.cap || stored !== base;
-    return { cap: baseCap, changed: back, basis: base, notes };
+    return { cap: baseCap, changed: back, basis: base, notes, demand: baseDemand };
   }
   const cap = Math.min(baseCap, distributionCap(used));
+  const demand = Math.min(baseDemand, demandCap(used, limit));
   const basis = {
     ...base,
     used,
     cap,
+    demand,
     notes: [...(Array.isArray(base.notes) ? base.notes : []).filter((n) => !drop.some((re) => re.test(n))), ...notes],
     live: { base, at: stored?.live?.at && sameNotes(stored.live.notes, notes) ? stored.live.at : iso(clock(now)), notes },
   };
   const changed = cap !== bounty.cap || !sameNotes(stored?.live?.notes, notes);
-  return { cap, changed, basis, notes };
+  return { cap, changed, basis, notes, demand };
 }
 
 const sameNotes = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
@@ -1974,13 +2105,19 @@ function applyCap(bounty, result) {
 /**
  * Who among a live bounty's claim holders can still be served by the units
  * left (R3M5): active claims in claim order (the earliest keep theirs) are
- * kept while their units fit in the room, which is the cap now less units
- * already bought, and no more than the units on the shelf now (the newest
- * count less units bought since). The first claim that does not fit and
- * every later one are beyond it. Returns { room, active, over, kept: Map,
- * beyond: Map } keyed by member id, each { claim, before, ref, message },
- * plus phrase (why the room is what it is) and headline (the bounty-level
- * "Don't make the trip" line while it is over-claimed).
+ * kept while their units fit in the room. The first claim that does not fit
+ * and every later one are beyond it. Returns { room, active, over, kept:
+ * Map, beyond: Map } keyed by member id, each { claim, before, ref,
+ * message }, plus phrase (why the room is what it is) and headline (the
+ * bounty-level "Don't make the trip" line while it is over-claimed).
+ *
+ * The limits are kept apart (round 4, N3), so a unit is never taken off
+ * twice: the room is the smallest of the demand room (the cap before any
+ * shelf limit, capNow's demand, less every unit bought), the cap room (the
+ * cap now less every unit bought: the cap counts the units bought before
+ * its shelf count, so this is the units on that count less units bought
+ * since) and the shelf room (the newest count less units bought since,
+ * shelfUnitsNow; 0 when the units on the shelf are not known).
  */
 function claimSeats(db, bounty, now, live, cap = capNow(db, bounty, now, live)) {
   const at = iso(clock(now));
@@ -1993,9 +2130,11 @@ function claimSeats(db, bounty, now, live, cap = capNow(db, bounty, now, live)) 
   const held = claimedUnits(db, bounty.id, now);
   const snapshot = json(bounty.estimate, null);
   const shelf = shelfUnitsNow(db, bounty, snapshot, cap.basis, latestReport(db, bounty.id), live);
-  const capRoom = Math.max(0, cap.cap - held.completed);
-  const byShelf = isCount(shelf.units) && shelf.units <= capRoom;
-  const room = isCount(shelf.units) ? Math.min(capRoom, shelf.units) : capRoom;
+  const demand = isCount(cap.demand) ? cap.demand : cap.cap;
+  const evidenceRoom = Math.max(0, Math.min(demand, cap.cap) - held.completed);
+  const shelfRoom = isCount(shelf.units) ? shelf.units : 0;
+  const byShelf = isCount(shelf.units) && shelfRoom <= evidenceRoom;
+  const room = Math.min(evidenceRoom, shelfRoom);
   const when = shelf.at ? ` (latest ${checkWord(shelf.source)}, ${humanTime(shelf.at)}${shelf.boughtSince ? `, less ${plural(shelf.boughtSince, "unit")} members bought since` : ""})` : "";
   const phrase = byShelf
     ? room === 0
@@ -2018,10 +2157,13 @@ function claimSeats(db, bounty, now, live, cap = capNow(db, bounty, now, live)) 
     }
     full = true;
     const before = used;
+    // Never "the first 0 units": with no room, no claim can be met.
     const message =
-      before < room && before + c.units > room
-        ? `${TERMS.stop}: ${phrase}, and members who claimed before you hold ${before === 0 ? "none" : before} of them, so your claim for ${plural(c.units, "unit")} cannot be met in full. Release it and claim again for what is left if your own figures still pass`
-        : `${TERMS.stop}: ${phrase} and members have claimed ${plural(held.active, "unit")}. Yours is not one of the first ${plural(room, "unit")} claimed`;
+      room === 0
+        ? `${TERMS.stop}: ${phrase}. No claim held now can be met, yours included: release your claim`
+        : before < room && before + c.units > room
+          ? `${TERMS.stop}: ${phrase}, and members who claimed before you hold ${before === 0 ? "none" : before} of them, so your claim for ${plural(c.units, "unit")} cannot be met in full. Release it and claim again for what is left if your own figures still pass`
+          : `${TERMS.stop}: ${phrase} and members have claimed ${plural(held.active, "unit")}. Yours is not one of the first ${plural(room, "unit")} claimed`;
     beyond.set(c.member_id, { claim: c, before, ref: `over:${c.id}:${room}:${shelf.at ?? "none"}`, message });
   }
   const over = beyond.size > 0;
@@ -2041,7 +2183,13 @@ function claimSeats(db, bounty, now, live, cap = capNow(db, bounty, now, live)) 
     phrase,
     headline: over
       ? `${TERMS.stop}: ${phrase} and members have claimed ${plural(held.active, "unit")}, ${
-          kept.size ? "so only the members who claimed first can go" : "more than the shelf holds, so no claim held now can be met"
+          kept.size
+            ? "so only the members who claimed first can go"
+            : room === 0
+              ? "so no claim held now can be met"
+              : byShelf
+                ? "more than the shelf holds, so no claim held now can be met"
+                : "more than is left to share, so no claim held now can be met"
         }`
       : null,
   };
@@ -2067,13 +2215,52 @@ function ownFigureFailures(db, bounty, now) {
       Number.isSafeInteger(c.journey_cost) && Number.isSafeInteger(c.journey_minutes)
         ? ` with your journey (${pounds(c.journey_cost)}, ${plural(c.journey_minutes, "minute")})`
         : "";
-    const profit = Number.isSafeInteger(f.unitProfit) && !f.outOfDate ? ` (profit per unit ${pounds(f.unitProfit)})` : "";
+    const profit =
+      Number.isSafeInteger(f.unitProfit) && !f.outOfDate
+        ? f.unitProfit < 0
+          ? ` (a loss of ${pounds(-f.unitProfit)} a unit)`
+          : ` (profit per unit ${pounds(f.unitProfit)})`
+        : "";
     out.set(c.member_id, {
       claim: c,
       // One notice per claim and failure: the same reasons at the same price
       // on a later re-check do not notify again.
       ref: `own:${c.id}:${createHash("sha256").update(JSON.stringify([f.unitCost ?? null, f.reasons ?? null])).digest("hex").slice(0, 12)}`,
       message: `${TERMS.stop}: your own figures for ${plural(c.units, "unit")}${journey}, worked out again ${price}on the latest evidence (${humanTime(f.checkedAt)}), now fail${profit}: ${reasons}`,
+    });
+  }
+  return out;
+}
+
+/**
+ * Claim holders the bounty's promotion price is no longer for (round 4,
+ * N2): their standing is declined (promotionStanding: they bought at a
+ * first-order price at this retailer, said they already used such an
+ * offer, or said they do not qualify) while their claim is live. Map member
+ * id -> { claim, ref, message }. Their trip stays stopped: the figures their
+ * claim rests on use a price that is not available to them.
+ */
+function declinedHolders(db, bounty, now) {
+  const out = new Map();
+  if (bounty.sample || !promotionOf(bounty)?.needsMemberConfirmation) return out;
+  const rows = db
+    .prepare("SELECT id, member_id, units FROM claims WHERE bounty_id = ? AND status = 'active' AND expires_at > ? ORDER BY created, id")
+    .all(bounty.id, iso(clock(now)))
+    .map(plain);
+  for (const c of rows) {
+    const member = getMember(db, c.member_id);
+    const standing = member ? promotionStanding(db, bounty, member) : null;
+    if (!standing?.declined) continue;
+    const why = standing.usedBy === "purchase"
+      ? `you have already used the first-order offer at ${standing.retailer}, so this price is not available to you (you marked a claim at a first-order price there as bought on ${humanDate(standing.usedOn)}): release this claim`
+      : standing.usedHere
+        ? `you said you have already used a first-order offer at ${standing.retailer}, so this price is not available to you: release this claim, or choose "I answered by mistake" if that was wrong`
+        : `you said you do not qualify for this price ("${standing.condition}"), so it is not available to you: release this claim, or choose "I answered by mistake" if that was wrong`;
+    out.set(c.member_id, {
+      claim: c,
+      // One notice per claim and reason.
+      ref: `declined:${c.id}:${standing.usedBy ?? standing.answer ?? "declined"}`,
+      message: `${TERMS.stop}: ${why}`,
     });
   }
   return out;
@@ -2253,7 +2440,8 @@ export function blockerList(db, bounty, now, live = liveEvidence(db, bounty, now
     return list;
   }
   const snapshot = json(bounty.estimate, null) ?? {};
-  const shelf = shelfStatus(db, bounty.id);
+  // An empty-shelf report pauses the trip until a branch check after it.
+  const shelf = shelfNow(db, bounty, live);
   if (shelf.paused)
     add(
       "shelf-empty",
@@ -2360,12 +2548,16 @@ export function blockerList(db, bounty, now, live = liveEvidence(db, bounty, now
 function shelfLimitNote(db, bounty, snapshot, live) {
   const asked = storedRequest(bounty)?.units;
   const figures = Number.isSafeInteger(snapshot.units?.figures) ? snapshot.units.figures : snapshot.economics?.units;
-  const used = json(bounty.cap_basis, null)?.used;
   if (!(Number.isSafeInteger(asked) && Number.isSafeInteger(figures) && figures < asked)) return "";
-  if (!(Number.isSafeInteger(used?.availableUnits) && used.availableUnits === figures && bounty.cap === figures)) return "";
-  const count = shelfCount(db, bounty, live);
-  if (!count || count.units !== figures) return "";
-  return `The latest ${checkWord(count.source)} (${humanTime(count.at)}) saw ${plural(figures, "unit")}, so at most ${figures} can be claimed. At ${plural(figures, "unit")} the buy-alert checks do not pass: `;
+  // The shelf is why when the units one member can claim are the units left
+  // on it (the newest count less units bought since, round 4 N1).
+  const claimable = snapshot.units?.claimable;
+  if (Number.isSafeInteger(claimable) && claimable !== figures) return "";
+  const shelf = shelfUnitsNow(db, bounty, snapshot, json(bounty.cap_basis, null), latestReport(db, bounty.id), live);
+  if (!shelf.at || shelf.units !== figures) return "";
+  const seen = shelf.units + (shelf.boughtSince ?? 0);
+  const bought = shelf.boughtSince ? `, and members have bought ${plural(shelf.boughtSince, "unit")} since` : "";
+  return `The latest ${checkWord(shelf.source)} (${humanTime(shelf.at)}) saw ${plural(seen, "unit")}${bought}, so at most ${figures} can be claimed. At ${plural(figures, "unit")} the buy-alert checks do not pass: `;
 }
 
 /**
@@ -2412,8 +2604,9 @@ export function tripBlockers(db, bounty, now, live = liveEvidence(db, bounty, no
  * - when a trip blocker has appeared, everyone alerted or holding a claim
  *   who has no current "Don't make the trip" notice gets one;
  * - otherwise, claim holders beyond the units on the shelf (claimSeats:
- *   the earliest claims keep theirs) and holders whose own figures now fail
- *   (ownFigureFailures) get a stop notice that says why, members holding a
+ *   the earliest claims keep theirs), holders whose own figures now fail
+ *   (ownFigureFailures) and holders the promotion price is no longer for
+ *   (declinedHolders, round 4 N2) get a stop notice that says why, members holding a
  *   stop notice are told the trip reopened, and while more is claimed than
  *   the shelf holds the holders who keep their units are told so.
  * Everything is worked out without a transaction; BEGIN IMMEDIATE is taken
@@ -2462,10 +2655,14 @@ export function syncTrip(db, bounty, now, live = null, { read = true } = {}) {
   } else {
     const seats = claimSeats(db, bounty, now, evidence, cap);
     const own = ownFigureFailures(db, bounty, now);
+    const declined = declinedHolders(db, bounty, now);
     Object.assign(out, { over: seats.over, headline: seats.headline, room: seats.room, active: seats.active });
-    // Members who stay stopped, and why: their own figures first.
+    // Members who stay stopped, and why: a price that is not for them
+    // first, then their own figures, then claims beyond the units left.
     const stops = new Map();
-    for (const [memberId, o] of own) stops.set(memberId, { reason: "own-figures", ref: o.ref, message: o.message });
+    for (const [memberId, o] of declined) stops.set(memberId, { reason: "promotion-declined", ref: o.ref, message: o.message });
+    for (const [memberId, o] of own)
+      if (!stops.has(memberId)) stops.set(memberId, { reason: "own-figures", ref: o.ref, message: o.message });
     for (const [memberId, o] of seats.beyond)
       if (!stops.has(memberId)) stops.set(memberId, { reason: "over-claimed", ref: o.ref, message: o.message });
     for (const [memberId, stop] of stops) {
@@ -3475,7 +3672,8 @@ const getReport = (db, reportId) => plain(db.prepare("SELECT * FROM stock_report
  */
 function stopForEmptyShelf(db, bounty, report, { now, exclude = null, confirmed = false }) {
   if (bounty.sample || report.units_seen !== 0) return 0;
-  const shelf = shelfStatus(db, bounty.id);
+  // A report older than a branch check on record stops nobody (shelfNow).
+  const shelf = shelfNow(db, bounty, { check: newerCheck(db, bounty, now) });
   if (!shelf.paused || shelf.reportId !== report.id) return 0;
   return notifyStop(db, bounty, {
     reason: confirmed ? "verified-empty" : "empty-shelf",
@@ -3509,6 +3707,28 @@ export function shelfStatus(db, bountyId) {
     verified: latest.verified,
     reportId: latest.id,
   };
+}
+
+/**
+ * The shelf as the latest stock report describes it (shelfStatus), with
+ * an empty-shelf pause lifted once a branch check made after that report
+ * is on record (round 4, R3P7): the evidence's own stock check after a
+ * re-check, or a newer branch check (live.check). The newest word on the
+ * shelf then decides, as shelfCount and the estimate's branchShelf read it:
+ * a check that found stock lifts the pause, and one that found none stops
+ * the trip as "out of stock" instead. liftedBy is { at, inStock } for the
+ * check that lifted it, else null.
+ */
+function shelfNow(db, bounty, live = null) {
+  const shelf = shelfStatus(db, bounty.id);
+  if (!shelf.paused || bounty.sample) return { ...shelf, liftedBy: null };
+  const reportAt = Date.parse(shelf.at);
+  const stock = json(bounty.estimate, null)?.stock;
+  const checks = [];
+  if (stock?.checkedAt) checks.push({ at: stock.checkedAt, inStock: stock.availability === "in_stock" });
+  if (live?.check?.checked_at) checks.push({ at: live.check.checked_at, inStock: live.check.in_stock === 1 });
+  const newer = checks.filter((c) => Date.parse(c.at) > reportAt).sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0];
+  return newer ? { ...shelf, paused: false, liftedBy: newer } : { ...shelf, liftedBy: null };
 }
 
 /**
@@ -3801,10 +4021,13 @@ export function dispatchAlerts(db, bountyId, now, { memberId = null } = {}) {
  * may go), "paused" (an empty-shelf report), "out-of-stock" (the newest
  * branch check found none), "stock-unconfirmed" (the stock check lapsed),
  * "blocked" (any other blocker, such as a price rise, sales that aged out,
- * a lapsed competition count, more claimed than the shelf holds, or the
- * viewer's own figures failing), "sample", "expired" or "withdrawn".
- * headline is the "Don't make the trip" line and reason the first
- * blocker's id (blockerList), "over-claimed" or "own-figures".
+ * a lapsed competition count, more claimed than the shelf holds, the
+ * viewer's own figures failing, or a promotion price that is no longer
+ * theirs), "sample", "expired" or "withdrawn". headline is the "Don't make
+ * the trip" line and reason the first blocker's id (blockerList),
+ * "over-claimed", "own-figures" or "promotion-declined" (round 4, N2: a
+ * holder who bought at a first-order price at the retailer, or answered
+ * "not" or "used", label "This price is not available to you").
  * options.memberId: the viewer, so a holder who keeps their units while
  * more is claimed than the shelf holds sees "Your claim stands" (go), and
  * a holder beyond them or whose own figures now fail sees why not. With
@@ -3827,6 +4050,10 @@ export function tripState(db, bounty, now, list = blockerList(db, bounty, now), 
     const [state, label] = TRIP_STATES[first.id] ?? ["blocked", "Not open for trips"];
     return { state, go: false, label: first.label ?? label, headline: first.headline, reason: first.id };
   }
+  // A holder the promotion price is no longer for (round 4, N2).
+  const declined = memberId === null ? null : declinedHolders(db, bounty, now).get(memberId);
+  if (declined)
+    return { state: "blocked", go: false, label: "This price is not available to you", headline: declined.message, reason: "promotion-declined" };
   const own = memberId === null ? null : ownFigureFailures(db, bounty, now).get(memberId);
   if (own) return { state: "blocked", go: false, label: "Your figures no longer pass", headline: own.message, reason: "own-figures" };
   const s = seats ?? claimSeats(db, bounty, now, live ?? liveEvidence(db, bounty, now));
@@ -4043,7 +4270,7 @@ function uncertaintyFor(bounty, snapshot, list, { showFigures, condition = null 
  * first-order offer keeps its title only when the member holds or held a
  * claim on it, so the inbox never lists the offer itself again.
  */
-function declinedAlert(db, a, bounty, member, { display, standing, list, now }) {
+function declinedAlert(db, a, bounty, member, { display, standing, list, live = null, now }) {
   const claimed = Boolean(
     db
       .prepare("SELECT 1 FROM claims WHERE bounty_id = ? AND member_id = ? AND status IN ('active', 'completed') LIMIT 1")
@@ -4065,8 +4292,9 @@ function declinedAlert(db, a, bounty, member, { display, standing, list, now }) 
     via: a.via,
     label: a.via === "paid" ? "Paid early access" : "Earned release",
     bountyStatus: bountyStatus(bounty, now),
-    trip: tripState(db, bounty, now, list),
-    shelf: shelfStatus(db, bounty.id),
+    // A holder the price is no longer for sees why (round 4, N2).
+    trip: tripState(db, bounty, now, list, { memberId: member.id, live }),
+    shelf: shelfNow(db, bounty, live),
     promotion: null,
     eligibility: display.permitted ? standing : null,
     questionNote: display.permitted ? `${standing.notForYou}.` : "This bounty is not for you.",
@@ -4133,7 +4361,7 @@ export function memberAlerts(db, memberId, { now, cache = new Map() }) {
     const shelfUnits = shelfUnitsNow(db, bounty, snapshot, json(bounty.cap_basis, null), latestReport(db, bounty.id), live);
     // The entry follows the member's answer: a price they said they do not
     // qualify for, or a first-order offer they used here, is not for them.
-    if (standing?.declined) return declinedAlert(db, a, bounty, member, { display, standing, list, now });
+    if (standing?.declined) return declinedAlert(db, a, bounty, member, { display, standing, list, live, now });
     const kind = a.kind === "question" ? "question" : "alert";
     const showFigures = display.permitted && kind === "alert" && (!standing || standing.confirmed);
     const opportunity = json(bounty.opportunity, null);
@@ -4160,7 +4388,7 @@ export function memberAlerts(db, memberId, { now, cache = new Map() }) {
       label: a.via === "paid" ? "Paid early access" : "Earned release",
       bountyStatus: bountyStatus(bounty, now),
       trip: tripState(db, bounty, now, list, { memberId: member.id, live }),
-      shelf: shelfStatus(db, bounty.id),
+      shelf: shelfNow(db, bounty, live),
       promotion:
         condition && display.permitted
           ? {
@@ -4269,7 +4497,9 @@ export function resolveViewer(db, viewer) {
  * Units on the shelf now, from evidence only: the newest of the stock check
  * behind the estimate, a newer branch check (live.check, R3B1) and the
  * latest stock report that was not marked inaccurate (shelfCount), less
- * units members marked as bought after that count. A sample uses its
+ * units members marked as bought after that count through any bounty (not
+ * a sample) for the item at the same retailer and locality (boughtAtBranch,
+ * as the estimate's branchShelf counts them). A sample uses its
  * hand-entered figure. units is null when no count exists. source is
  * "stock check" (a branch check) or "stock report".
  */
@@ -4279,10 +4509,36 @@ function shelfUnitsNow(db, bounty, snapshot, basis, latestReport, live = null) {
   const count = shelfCount(db, bounty, live, latestReport ?? null);
   if (!count) return { units: null, source: null, at: null, boughtSince: 0 };
   if (count.units === null) return { units: null, source: count.source, at: count.at, boughtSince: 0 };
-  const boughtSince = db
-    .prepare("SELECT COALESCE(SUM(units), 0) AS n FROM claims WHERE bounty_id = ? AND status = 'completed' AND ended_at > ?")
-    .get(bounty.id, count.at).n;
+  const boughtSince = boughtAtBranch(db, bounty, count.at);
   return { units: Math.max(0, count.units - boughtSince), source: count.source, at: count.at, boughtSince };
+}
+
+/**
+ * Units members marked as bought after `at` through any bounty (not a
+ * sample) for the same item (canonical barcode) at the same retailer and
+ * locality, so a bounty opened after purchases on an earlier one for the
+ * item counts them off the shelf as the estimate does (estimate.mjs
+ * branchShelf, R3Q6, round 4 N1).
+ */
+function boughtAtBranch(db, bounty, at) {
+  const shop = normaliseLocality(bounty.retailer);
+  const place = normaliseLocality(bounty.locality);
+  // A live bounty stores the canonical GTIN (createBounty), as openBountyRows reads it.
+  const gtin = normaliseBarcode(bounty.barcode);
+  const ids = gtin
+    ? db
+        .prepare("SELECT id, retailer, locality FROM bounties WHERE sample = 0 AND barcode = ?")
+        .all(gtin)
+        .filter((b) => normaliseLocality(b.retailer) === shop && normaliseLocality(b.locality) === place)
+        .map((b) => b.id)
+    : [];
+  if (!ids.includes(bounty.id)) ids.push(bounty.id);
+  return db
+    .prepare(
+      `SELECT COALESCE(SUM(units), 0) AS n FROM claims WHERE bounty_id IN (${ids.map(() => "?").join(", ")})
+ AND status = 'completed' AND ended_at > ?`,
+    )
+    .get(...ids, at).n;
 }
 
 /**
@@ -4404,7 +4660,8 @@ export function bountyView(db, bounty, { viewer = { kind: "public" }, now, cache
   );
   const basis = json(bounty.cap_basis, null);
   const snapshot = json(bounty.estimate, null);
-  const shelf = shelfStatus(db, bounty.id);
+  // The latest stock report, its pause lifted by a branch check after it.
+  const shelf = shelfNow(db, bounty, live);
   const reports = db
     .prepare(
       `SELECT r.*, m.name AS member_name, e.points FROM stock_reports r JOIN members m ON m.id = r.member_id
@@ -4562,7 +4819,8 @@ export function bountyView(db, bounty, { viewer = { kind: "public" }, now, cache
         promotion?.needsMemberConfirmation && !hidden
           ? {
               condition: promotion.condition,
-              confirmed: Boolean(active?.promotionConfirmed) || Boolean(standing?.confirmed),
+              // Never confirmed once the price is not for them (round 4, N2).
+              confirmed: !standing?.declined && (Boolean(active?.promotionConfirmed) || Boolean(standing?.confirmed)),
               risk: promotionRisk(promotion, figuresHidden ? null : stored?.unitProfit),
             }
           : null,
@@ -4582,7 +4840,7 @@ export function bountyView(db, bounty, { viewer = { kind: "public" }, now, cache
     display,
     promotion,
     viewer,
-    confirmed: Boolean(viewerInfo?.activeClaim?.promotionConfirmed) || Boolean(standing?.confirmed),
+    confirmed: !standing?.declined && (Boolean(viewerInfo?.activeClaim?.promotionConfirmed) || Boolean(standing?.confirmed)),
     attributes,
     list,
     shelfUnits,

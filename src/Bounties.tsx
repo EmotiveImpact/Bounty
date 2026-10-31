@@ -167,6 +167,7 @@ type TripReason =
   | "demand-aged"
   | "over-claimed"
   | "own-figures"
+  | "promotion-declined"
   | "sample"
   | "expired"
   | "withdrawn"
