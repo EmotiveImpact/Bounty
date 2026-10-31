@@ -1,3 +1,4 @@
+import { status } from "./sources.mjs";
 import { createServer } from "node:http";
 import { db } from "./db.mjs";
 import { offers, defaults, plan } from "./catalog.mjs";
@@ -53,6 +54,15 @@ createServer(async (req, res) => {
           ),
       );
     }
+    if (req.method === "GET" && path === "/api/research")
+      return send(200, {
+        sources: status(),
+        rows: db
+          .prepare(
+            "SELECT * FROM research ORDER BY imported DESC,provider,source_id LIMIT 200",
+          )
+          .all(),
+      });
     if (req.method === "GET" && path === "/api/observations")
       return send(
         200,

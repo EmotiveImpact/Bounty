@@ -6,7 +6,7 @@ if (!res.ok) throw Error("Open Prices returned " + res.status);
 const { items } = await res.json();
 if (!Array.isArray(items)) throw Error("Invalid source response");
 const insert = db.prepare(
-  "INSERT OR REPLACE INTO observations VALUES(?,?,?,?,?,?,?)",
+  "INSERT OR REPLACE INTO observations(id,title,store,place,price,day,unit,barcode,proof_id) VALUES(?,?,?,?,?,?,?,?,?)",
 );
 db.exec("BEGIN");
 try {
@@ -31,6 +31,8 @@ try {
       Math.round(row.price * 100),
       row.date,
       row.price_per || "UNKNOWN",
+      row.product_code ?? null,
+      row.proof_id == null ? null : String(row.proof_id),
     );
     count++;
   }

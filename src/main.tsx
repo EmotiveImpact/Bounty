@@ -1,3 +1,4 @@
+import Research from "./Research";
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
@@ -37,6 +38,8 @@ type Observation = {
   price: number;
   day: string;
   unit: string;
+  barcode: string | null;
+  proof_id: string | null;
 };
 type Outcome = {
   id: number;
@@ -103,7 +106,7 @@ function App() {
       } else if (tab === "Observations") {
         const rows = await api<Observation[]>("observations");
         if (active) B(rows);
-      } else {
+      } else if (tab === "Ledger") {
         const rows = await api<Outcome[]>("outcomes");
         if (active) L(rows);
       }
@@ -139,17 +142,21 @@ function App() {
             ? "Bounty planner"
             : tab === "Observations"
               ? "Price observations"
-              : "Outcome ledger"}
+              : tab === "Research"
+                ? "Source research"
+                : "Outcome ledger"}
         </h1>
         <p>
           {tab === "Planner"
             ? "Find the trips that fit your cash, time and carrying capacity."
             : tab === "Observations"
               ? "Dated UK shelf and receipt observations from Open Prices."
-              : "Review your recorded proceeds, costs and working time."}
+              : tab === "Research"
+                ? "Inspect acquisition and resale evidence before planning a purchase."
+                : "Review your recorded proceeds, costs and working time."}
         </p>
         <nav>
-          {["Planner", "Observations", "Ledger"].map((t) => (
+          {["Planner", "Observations", "Research", "Ledger"].map((t) => (
             <button key={t} aria-pressed={t === tab} onClick={() => T(t)}>
               {t}
             </button>
@@ -321,6 +328,8 @@ function App() {
                   <b>{r.title}</b>
                   <small>
                     {r.store} · {r.place} · {r.day}
+                    {r.barcode && " · Barcode " + r.barcode}
+                    {r.proof_id && " · Proof #" + r.proof_id}
                   </small>
                 </span>
                 <span>
@@ -330,6 +339,7 @@ function App() {
             ))}
           </section>
         )}
+        {tab === "Research" && <Research />}
         {tab === "Ledger" && (
           <section>
             {!log.length && (
