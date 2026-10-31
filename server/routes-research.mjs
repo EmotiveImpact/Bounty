@@ -12,6 +12,7 @@ import {
 } from "./estimate.mjs";
 import { listChecks, listItems, progress, recordCheck, recordItem, signOff, tableExists } from "./audit.mjs";
 import { recheckOpenBounties } from "./bounties.mjs";
+import { refreshOpenBounties } from "./routes-bounties.mjs";
 
 // Query-string helpers: values arrive as text and are validated like JSON.
 function queryInt(url, name, min, max, fallback) {
@@ -82,16 +83,26 @@ export function routes(db) {
     [
       "POST",
       "/api/research/checks",
-      ({ body }) => {
+      async ({ body }) => {
         const now = serverNow();
         const check = recordCheck(db, body, { now });
-        // A check that finds the shelf empty (or stock again) reaches open
-        // bounties for the item at once: alerted members and claim holders
-        // get "Don't make the trip" (or "Open for trips again") now, not on
-        // their next read.
-        const bounties = tableExists(db, "bounties")
-          ? recheckOpenBounties(db, { barcode: check.barcode, retailer: check.retailer, now })
-          : null;
+        // A check reaches open bounties for the item at once (R3B1): each
+        // estimate, cap, demand and claim holder's own figures are worked out
+        // again with it (refreshOpenBounties), so alerted members and claim
+        // holders get "Don't make the trip" (or "Open for trips again") now,
+        // not on their next read. If that fails the check stays recorded and
+        // the blocker pass still runs.
+        let bounties = null;
+        if (tableExists(db, "bounties")) {
+          try {
+            bounties = await refreshOpenBounties(db, { barcode: check.barcode, retailer: check.retailer, now });
+          } catch (error) {
+            bounties = {
+              ...recheckOpenBounties(db, { barcode: check.barcode, retailer: check.retailer, now }),
+              error: `The bounties for this item could not be worked out again: ${error.message}`,
+            };
+          }
+        }
         return reply(201, { ...check, bounties });
       },
     ],

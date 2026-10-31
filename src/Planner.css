@@ -136,8 +136,15 @@ h3 .badge {
   gap: 8px;
   font-size: 14px;
 }
-.planner-check input {
+/* A checkbox keeps its size beside a label that wraps (the shared input
+   padding and the flex row would otherwise squash it). */
+.planner-check input,
+.planner-days input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
   margin: 0;
+  padding: 0;
 }
 .planner .card em + em {
   margin-top: 2px;

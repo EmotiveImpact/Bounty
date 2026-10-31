@@ -175,6 +175,23 @@ test("an empty shelf is named as such in the availability check", () => {
   assert.match(unknown.reasons.join(" "), /No branch check has found stock/);
 });
 
+test("planning more units than are left on the shelf fails the gate", () => {
+  const check = (r) => r.checks.find((c) => c.id === "shelf-units");
+  // An uncounted shelf leaves this to the availability check.
+  assert.equal(check(evaluateAlert({ ...passing, shelfUnits: null })).ok, true);
+  assert.equal(evaluateAlert({ ...passing, shelfUnits: null }).eligible, true);
+  assert.equal(evaluateAlert({ ...passing, shelfUnits: 3 }).eligible, true);
+  const short = evaluateAlert({ ...passing, shelfUnits: 2 });
+  assert.equal(short.eligible, false);
+  assert.equal(check(short).ok, false);
+  assert.equal(check(short).detail, "Only about 2 likely left on the shelf, fewer than the 3 planned");
+  // A count with no units planned cannot be checked, so it fails closed.
+  assert.equal(check(evaluateAlert({ ...passing, shelfUnits: 5, units: undefined })).ok, false);
+  // A count that is not a whole number is not a count.
+  assert.equal(check(evaluateAlert({ ...passing, shelfUnits: 1.5 })).ok, true);
+  assert.equal(check(evaluateAlert({ ...passing, shelfUnits: -1 })).ok, true);
+});
+
 test("the cash date is checked against the payout, not the sale", () => {
   // Sells in 4 days, but posting, delivery and the payout delay land the
   // money after the date it is needed.
@@ -224,5 +241,20 @@ test("a loyalty price needs confirmed eligibility; empty input fails closed", ()
   assert.equal(evaluateAlert({ ...passing, units: 8, provenItem: true, demandUnits: 8 }).eligible, true);
   const empty = evaluateAlert({});
   assert.equal(empty.eligible, false);
-  assert.ok(empty.checks.every((c) => !c.ok || c.id === "promotion"));
+  // Only the two checks that guard a condition (a promotion, a counted shelf)
+  // pass when it is absent; every positive-evidence check fails.
+  assert.deepEqual(empty.checks.filter((c) => c.ok).map((c) => c.id), ["shelf-units", "promotion"]);
+});
+
+test("an offer's age is counted in UK days, so it expires at UK midnight", async () => {
+  const { ageDays } = await import("./alerts.mjs");
+  // 00:30 on 1 August in London is 23:30 on 31 July in UTC.
+  assert.equal(ageDays("2026-07-24", "2026-07-31T23:30:00Z"), 8);
+  assert.equal(ageDays("2026-07-24", "2026-07-31T22:30:00Z"), 7);
+  assert.equal(ageDays("2026-12-24", "2026-12-31T23:30:00Z"), 7);
+  assert.equal(ageDays("2026-11-01", "2026-10-31T23:30:00Z"), -1);
+  const late = evaluateAlert({ ...passing, offerObserved: "2026-07-24", now: "2026-07-31T23:30:00Z" });
+  assert.equal(late.checks.find((c) => c.id === "offer-fresh").ok, false);
+  // Timestamps keep counting elapsed whole days.
+  assert.equal(ageDays("2026-07-24T12:00:00Z", "2026-07-31T11:59:00Z"), 6);
 });

@@ -146,9 +146,21 @@ export function migrateToAutoincrement(db) {
       db.exec("ALTER TABLE ledger_entries_rebuild RENAME TO ledger_entries");
     }
     db.exec("ALTER TABLE ledger_proofs_rebuild RENAME TO ledger_proofs");
+    // Ids deleted before the upgrade above the highest remaining id were
+    // never recorded, so new ids start well clear of them: a stale tab or a
+    // retried DELETE from before the upgrade still finds nothing.
+    for (const table of entries ? ["ledger_entries", "ledger_proofs"] : ["ledger_proofs"]) {
+      const next = (db.prepare(`SELECT MAX(id) AS id FROM ${table}`).get().id ?? 0) + ID_REUSE_MARGIN;
+      const seq = db.prepare("SELECT seq FROM sqlite_sequence WHERE name = ?").get(table);
+      if (seq) db.prepare("UPDATE sqlite_sequence SET seq = ? WHERE name = ?").run(Math.max(seq.seq, next), table);
+      else db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)").run(table, next);
+    }
   });
   return true;
 }
+
+// How far past the highest surviving id new rows start after the upgrade.
+const ID_REUSE_MARGIN = 1000;
 
 // ---------------------------------------------------------------------------
 // Dates

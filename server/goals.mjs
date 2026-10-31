@@ -18,6 +18,7 @@ import {
   meetsReturn,
 } from "./opportunity.mjs";
 import {
+  FARE_NEEDED,
   accessNeeds,
   assessSample,
   blankInputs,
@@ -531,10 +532,16 @@ const better = (a, b) => b.contribution - a.contribution || (b.hourly ?? -Infini
  * (the payout waits for the last unit to sell at the item's sales rate), and
  * the reasons it falls short. At most one basket is marked recommended: the
  * best-ranked one with positive contribution, the hourly target met, every
- * item inside the buying thresholds and the trial batch, a public transport
- * fare entered when travelling by public transport and, when a cash date is
- * set, the payout on time. A basket with contribution of zero or below is
- * never recommended. `timing` at the top level is the payout for one unit.
+ * item inside the buying thresholds and the trial batch and, when a cash
+ * date is set, the payout on time. A basket with contribution of zero or
+ * below is never recommended. `timing` at the top level is the payout for
+ * one unit.
+ *
+ * A blank public transport fare is a missing input, never a free journey:
+ * by public transport with no fare entered, no basket is built. An offer
+ * that would otherwise be searched is excluded (not rejected) with
+ * FARE_NEEDED and `fareNeeded: true`; one that fails the thresholds even
+ * before its share of the journey is rejected as usual.
  */
 export function basketOptions(offers, profile, goals, { now = new Date().toISOString() } = {}) {
   const rules = effectiveRules(profile.rules || {});
@@ -542,6 +549,7 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
   const unitCap = Math.min(profile.quantity, storage);
   const load = loadLimit(profile.transport, profile.carry);
   const carryGrams = Math.floor(load * 1000 + 1e-6);
+  const noFare = fareMissing(profile);
   const excluded = [];
   const pool = [];
   for (const offer of offers) {
@@ -559,7 +567,7 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
     if (blank.length) {
       excluded.push({
         ...brief,
-        reason: `Profit per unit cannot be checked until these are entered: ${blank.join(", ")}`,
+        reason: `Profit per unit cannot be checked until these are entered: ${[...blank, ...(noFare ? ["public transport fare"] : [])].join(", ")}`,
         rejected: true,
       });
       continue;
@@ -612,12 +620,18 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
     const one = tripEconomics({ ...base, units: 1, journeyCost: 0 });
     const best = unitThresholdFailures(one.contribution, offer.buy, rules);
     if (best.length) {
-      const travels = journeyFor(profile, offer.miles).cost > 0;
+      const travels = noFare || journeyFor(profile, offer.miles).cost > 0;
       excluded.push({
         ...brief,
         reason: best.join("; ") + (travels ? " (even before its share of the journey)" : ""),
         rejected: true,
       });
+      continue;
+    }
+    // Whether it clears the thresholds with its share of the journey
+    // cannot be known without the fare, so it never enters a basket.
+    if (noFare) {
+      excluded.push({ ...brief, reason: FARE_NEEDED, fareNeeded: true });
       continue;
     }
     pool.push({ offer, base, terms, grams, max, net: one.contribution, cash: one.cashRequired });
@@ -758,7 +772,7 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
       sellWindowWeeks: OPPORTUNITY_RULES.sellWindowWeeks,
       hourlyTarget: profile.target,
       transport: profile.transport,
-      fareMissing: fareMissing(profile),
+      fareMissing: noFare,
       area: profile.area,
     },
     approximation: BASKET_APPROXIMATION,
@@ -859,6 +873,8 @@ function describeBasket(candidate, { pool, profile, goals, rules, now, route, st
   const hourly = activeMinutes ? Math.round((contribution * 60) / activeMinutes) : null;
   const unsoldLoss = -(costs.stock + costs.packaging + costs.travel);
   const halfSells = perItem.reduce((total, e) => total + e.half.contribution, 0);
+  // Units sold in the half-sold case: half of each item's units, rounded down.
+  const halfSellsUnits = perItem.reduce((total, e) => total + e.half.sold, 0);
 
   const reasons = [];
   if (!(contribution > 0)) reasons.push("Loses money");
@@ -868,8 +884,9 @@ function describeBasket(candidate, { pool, profile, goals, rules, now, route, st
     if (it.units > rules.trialUnits && !it.provenItem)
       reasons.push(`${it.name}: more than the trial batch of ${rules.trialUnits} for a first purchase`);
   }
-  if (fareMissing(profile))
-    reasons.push("Public transport fare not entered, so the journey is costed as free");
+  // basketOptions builds no basket while the fare is blank; this keeps any
+  // other caller from recommending one.
+  if (fareMissing(profile)) reasons.push(FARE_NEEDED);
   if (goals.cashNeededBy && timing.cash.status !== "on time") reasons.push(cashDateReason(timing));
 
   return {
@@ -893,7 +910,7 @@ function describeBasket(candidate, { pool, profile, goals, rules, now, route, st
       hourly,
       unsoldLoss,
     },
-    downside: { nothingSells: unsoldLoss, halfSells },
+    downside: { nothingSells: unsoldLoss, halfSells, halfSellsUnits },
     timing: basketTiming(timing),
     reasons,
     recommended: false,

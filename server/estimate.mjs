@@ -116,8 +116,10 @@ const CLOTHING_WORDS =
 const FOOD_WORDS =
   /\b(honey|chocolates?|biscuits?|cookies?|crisps|sweets|flapjacks?|cereals?|granola|muesli|porridge|oats|coffee|teabags?|tea|jam|marmalade|syrup|sauces?|ketchup|mayonnaise|pasta|noodles|rice|nuts|peanuts|almonds|raisins|cakes?|snacks?|crackers|spreads?|peanut butter|olive oil|vinegar|spices?|gravy|stock cubes|soups?|beans|tinned|canned|juice|cordial|squash|protein bars?|cereal bars?|sugar|flour)\b/;
 
-// A quantity sold by weight or volume (340 g, 1.5kg, 500 ml, 2 l), as food is.
-// "4G" and "5G" (mobile networks) are not weights.
+// A quantity by weight or volume (340 g, 1.5kg, 500 ml, 2 l). It suggests
+// food only from a food catalogue (suggestCategory): kettles, flasks and
+// toiletries state volumes too. "4G" and "5G" (mobile networks) are not
+// weights.
 const FOOD_QUANTITY = /(?<![\w.])(\d+(?:[.,]\d+)?)\s?(kg|g|ml|cl|l)(?![a-z0-9])/i;
 const NETWORK = /^[2-6]G$/;
 const foodQuantity = (value) => {
@@ -125,14 +127,24 @@ const foodQuantity = (value) => {
   return found && !NETWORK.test(found[0]) ? found[0] : null;
 };
 
+// Sources that catalogue groceries, where a weight or volume usually means
+// food: Hobnight is a supermarket catalogue. (Open Prices is food whatever
+// the size, below.)
+const FOOD_CATALOGUES = Object.freeze({ hobnight: "Hobnight" });
+export const QUANTITY_HINT = "The size gives a quantity: choose Food if this is food";
+
 /**
- * The category an offer suggests: { id, basis }. Clothing when a title word
- * clearly names clothing. Food when a title word names food, when the offer
- * is an Open Prices observation (Open Prices comes from Open Food Facts, a
- * food database) or when its size or title gives a food quantity (g, kg, ml,
- * l). Otherwise general. The estimate keeps the suggested category's rules
- * unless the request names another category and, when that drops any of the
- * suggested rules, gives a reason (categoryDecision).
+ * The category an offer suggests: { id, basis, hint? }. Clothing when a
+ * title word clearly names clothing. Food when a title word names food, when
+ * the offer is an Open Prices observation (Open Prices comes from Open Food
+ * Facts, a food database), or when a food catalogue source (Hobnight) gives
+ * a quantity (g, kg, ml, cl, l) in the size or title. A quantity alone from
+ * any other source is not a food signal (a 1.7 l kettle, a 500 ml flask, a
+ * 250 ml shampoo): it suggests General with hint QUANTITY_HINT. Otherwise
+ * general. The estimate keeps the suggested category's rules unless the
+ * request names another category and, when that drops any of the suggested
+ * rules, gives a reason (categoryDecision). Choosing Food for a General
+ * suggestion is stricter, so it needs no reason.
  */
 export function suggestCategory(offer) {
   const title = String(offer?.title ?? "").toLowerCase();
@@ -143,10 +155,19 @@ export function suggestCategory(offer) {
   if (offer?.provider === OPEN_PRICES || offer?.origin === "observations")
     return { id: "food", basis: "Open Prices records come from Open Food Facts, a food database" };
   const sized = foodQuantity(offer?.size);
-  if (sized) return { id: "food", basis: `The size "${String(offer.size).trim()}" is a food quantity` };
   const titled = foodQuantity(offer?.title);
-  if (titled) return { id: "food", basis: `The title gives a food quantity ("${titled}")` };
-  return { id: "general", basis: "The title does not clearly name clothing or food" };
+  const provider = String(offer?.provider ?? "").toLowerCase();
+  const name = Object.hasOwn(FOOD_CATALOGUES, provider) ? FOOD_CATALOGUES[provider] : null;
+  if (name && (sized || titled)) {
+    return {
+      id: "food",
+      basis: sized
+        ? `${name} is a supermarket catalogue and the size "${String(offer.size).trim()}" is a food quantity`
+        : `${name} is a supermarket catalogue and the title gives a food quantity ("${titled}")`,
+    };
+  }
+  const general = { id: "general", basis: "The title does not clearly name clothing or food" };
+  return sized || titled ? { ...general, hint: QUANTITY_HINT } : general;
 }
 
 // What each category's rules check, in plain words, so a downgrade can name
@@ -473,6 +494,105 @@ export function findOffer(db, provider, sourceId, now = new Date().toISOString()
   return offer;
 }
 
+// Shop names and places compare without case or extra spaces.
+const shopText = (value) =>
+  value === null || value === undefined ? "" : String(value).trim().replace(/\s+/g, " ").toLowerCase();
+// Open Prices order: the later day first, then the higher price id on the
+// same day (Open Prices numbers prices as they are added). No day is oldest.
+const observationOrder = (a, b) =>
+  String(a.day ?? "").localeCompare(String(b.day ?? "")) || Number(a.id) - Number(b.id);
+
+/**
+ * The current shelf price at the shop of an Open Prices observation: the
+ * newest per-item observation of the same barcode at the same shop dated at
+ * or after it (R3M3). The same shop is the same OpenStreetMap id, or the
+ * same retailer (store) and place, both stated (compared without case).
+ * Newest is the latest day, then the highest price id on that day.
+ * Observations dated after today in London, priced per kilogram or litre or
+ * without a positive price are left out.
+ *
+ * sourceId is the Open Prices price id (text or number). Returns null when
+ * it is not a per-item Open Prices observation with a valid barcode, else
+ * { sourceId, price, regularPrice, promotion, observed, newer, chosen, offer }:
+ * price, regularPrice (or null), promotion (observationPromotion) and
+ * observed (YYYY-MM-DD) of the newest observation, newer true when that is
+ * a later observation than sourceId, chosen { sourceId, price, observed } of
+ * sourceId itself, and offer the newest observation as findOffer shapes it.
+ * With nothing newer, the result describes sourceId itself (newer false).
+ *
+ * The bounty checks call this to read the current same-shop price; the
+ * estimate costs at it (estimateFromEvidence, candidatesFor).
+ */
+export function currentShopPrice(db, sourceId, { now = new Date().toISOString() } = {}) {
+  if (!/^\d{1,15}$/.test(String(sourceId ?? "")) || !tableExists(db, "observations")) return null;
+  ensureFunctions(db);
+  const columns = `${OBSERVATION_OFFER_COLUMNS}, id, osm_id, store, place, day`;
+  const chosen = plain(db.prepare(`SELECT ${columns} FROM observations WHERE id = ? AND ${PER_ITEM}`).get(Number(sourceId)));
+  const gtin = chosen ? normaliseBarcode(chosen.barcode) : null;
+  if (!chosen || !gtin || !(Number.isSafeInteger(chosen.price) && chosen.price > 0)) return null;
+  const osm = shopText(chosen.osm_id);
+  const store = shopText(chosen.store);
+  const place = shopText(chosen.place);
+  const today = Number.isFinite(Date.parse(now)) ? londonDate(now) : null;
+  const sameShop = (r) =>
+    (osm !== "" && shopText(r.osm_id) === osm) ||
+    (store !== "" && place !== "" && shopText(r.store) === store && shopText(r.place) === place);
+  const core = gtin.replace(/^0+/, "");
+  const digits = "ltrim(replace(replace(trim(barcode), ' ', ''), '-', ''), '0')";
+  const later = db
+    .prepare(
+      `SELECT ${columns} FROM observations
+ WHERE barcode IS NOT NULL AND ${digits} = ? AND price > 0 AND ${PER_ITEM} AND id != ?
+ ORDER BY day DESC NULLS LAST, id DESC LIMIT 500`,
+    )
+    .all(core, chosen.id)
+    .map(plain)
+    .filter(
+      (r) =>
+        normaliseBarcode(r.barcode) === gtin &&
+        Number.isSafeInteger(r.price) &&
+        sameShop(r) &&
+        observationOrder(r, chosen) > 0 &&
+        (r.day === null || today === null || String(r.day) <= today),
+    );
+  const newest = later.reduce((best, r) => (observationOrder(r, best) > 0 ? r : best), chosen);
+  const offer = toOffer(newest, now);
+  return {
+    sourceId: String(newest.id),
+    price: newest.price,
+    regularPrice: offer.regularPrice,
+    promotion: offer.promotion,
+    observed: newest.day ?? null,
+    newer: newest.id !== chosen.id,
+    chosen: { sourceId: String(chosen.id), price: chosen.price, observed: chosen.day ?? null },
+    offer,
+  };
+}
+
+/**
+ * The offer the figures use for (provider, sourceId): findOffer's, except
+ * that an Open Prices observation with a newer one at the same shop is
+ * replaced by the newest (currentShopPrice), so the trip is costed at the
+ * current shelf price, never at an older and possibly lower one. Returns
+ * { offer, shopPrice } where shopPrice is null, or { chosen, used, change }
+ * when the newer observation is used: chosen and used are { sourceId,
+ * price, observed } and change is "rose", "fell" or "same". options.pin
+ * true keeps the chosen observation (for a record judged as it stood, such
+ * as an audited item).
+ */
+export function currentOffer(db, provider, sourceId, now = new Date().toISOString(), { pin = false } = {}) {
+  const chosen = findOffer(db, provider, sourceId, now);
+  if (pin || chosen.provider !== OPEN_PRICES) return { offer: chosen, shopPrice: null };
+  const current = currentShopPrice(db, chosen.sourceId, { now });
+  if (!current?.newer) return { offer: chosen, shopPrice: null };
+  const used = { sourceId: current.sourceId, price: current.price, observed: current.observed };
+  const change = used.price > current.chosen.price ? "rose" : used.price < current.chosen.price ? "fell" : "same";
+  return {
+    offer: { ...current.offer, chosenOffer: current.chosen },
+    shopPrice: { chosen: current.chosen, used, change },
+  };
+}
+
 /**
  * Candidate evidence for an offer from the research table: every row whose
  * canonical barcode equals the offer's (any kind, so other classes can be
@@ -522,16 +642,18 @@ export function findCandidates(db, offer) {
  * offerAttributes: operator-confirmed attributes (validateOfferAttributes)
  *   fill only what the source left blank; offerAttributes in the result lists
  *   the ones applied and the ones ignored because the source states a value.
+ * offer is the one the estimate costs (currentOffer): a newer Open Prices
+ *   price at the same shop replaces the chosen one, and shopPrice says so.
  */
 export function candidatesFor(
   db,
   { provider, sourceId, now = new Date().toISOString(), offerAttributes = {} },
 ) {
   ensureFunctions(db);
-  const attributes = applyOfferAttributes(
-    findOffer(db, provider, sourceId, now),
-    validateOfferAttributes(offerAttributes),
-  );
+  // The same offer the estimate costs: a newer Open Prices price at the same
+  // shop replaces the chosen one (currentOffer).
+  const resolved = currentOffer(db, provider, sourceId, now);
+  const attributes = applyOfferAttributes(resolved.offer, validateOfferAttributes(offerAttributes));
   const offer = attributes.offer;
   const rows = findCandidates(db, offer);
   const describe = (row) => ({ row, sample: isSampleRecord(row), ...compare(offer, row) });
@@ -560,6 +682,7 @@ export function candidatesFor(
     other,
     competition: { ...listed, lookup, competingListings: known },
     offerAttributes: { applied: attributes.applied, ignored: attributes.ignored },
+    shopPrice: resolved.shopPrice,
   };
 }
 
@@ -1177,11 +1300,117 @@ export function demandFor({ rate, competition: resale, lookup }) {
   return { units, salesPerWeek: shownRate, competingListings, sellWindowWeeks: weeks, note };
 }
 
+const LONDON_TIME = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/London",
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+/** A date and time for people in UK time: "31 Oct 2026, 21:22". */
+export const ukTime = (value) =>
+  Number.isFinite(Date.parse(value)) ? LONDON_TIME.format(new Date(Date.parse(value))) : "an unknown time";
+
+/**
+ * Units on the branch shelf now, counted the way a bounty card counts them
+ * (bounties.mjs shelfUnitsNow) so Research and the card agree (R3Q6). The
+ * bounty tables are read directly, each behind a tableExists guard, because
+ * importing bounties.mjs here would close an import cycle.
+ *
+ * The count is the newer of the availability check given (stockStatus's
+ * check) and the latest stock report from the last CHECK_VALID_DAYS days on
+ * a live (not sample) bounty for the same barcode, retailer and locality
+ * that the operator did not mark inaccurate, less the units members marked
+ * as bought through those bounties after that count. A check that found
+ * none counts 0; one that found stock without a count leaves units null.
+ *
+ * Returns { units, seen, source: "stock check" | "stock report" | null, at,
+ * boughtSince, report, note }: seen is the count before purchases, at its
+ * time (ISO), report the newest such report ({ at, unitsSeen, verified }) or
+ * null, note the count in words or null.
+ */
+export function branchShelf(db, { barcode, retailer, locality, check = null, now = new Date().toISOString() }) {
+  const gtin = normaliseBarcode(barcode);
+  const at = Date.parse(now);
+  const shop = shopText(retailer);
+  const place = shopText(locality);
+  const checkAt = Date.parse(check?.checked_at);
+  const checkUnits = !check
+    ? null
+    : check.in_stock !== 1
+      ? 0
+      : Number.isSafeInteger(check.units_seen) && check.units_seen > 0
+        ? check.units_seen
+        : null;
+  let ids = [];
+  if (gtin && shop && place && Number.isFinite(at) && tableExists(db, "bounties")) {
+    ensureFunctions(db);
+    ids = db
+      .prepare("SELECT id, retailer, locality FROM bounties WHERE sample = 0 AND bounty_gtin(barcode) = ?")
+      .all(gtin)
+      .filter((b) => shopText(b.retailer) === shop && shopText(b.locality) === place)
+      .map((b) => b.id);
+  }
+  const marks = ids.map(() => "?").join(", ");
+  let report = null;
+  if (ids.length && tableExists(db, "stock_reports")) {
+    const since = at - CHECK_VALID_DAYS * DAY;
+    report =
+      db
+        .prepare(
+          `SELECT units_seen, observed_at, verified FROM stock_reports
+ WHERE bounty_id IN (${marks}) AND (verified IS NULL OR verified != 'inaccurate')`,
+        )
+        .all(...ids)
+        .filter((r) => {
+          const t = Date.parse(r.observed_at);
+          return Number.isFinite(t) && t >= since && t <= at && Number.isSafeInteger(r.units_seen);
+        })
+        .sort((a, b) => Date.parse(b.observed_at) - Date.parse(a.observed_at))
+        .map((r) => ({ at: r.observed_at, unitsSeen: r.units_seen, verified: r.verified ?? null }))[0] ?? null;
+  }
+  let seen = null;
+  let source = null;
+  let countAt = null;
+  if (report && (!Number.isFinite(checkAt) || Date.parse(report.at) >= checkAt)) {
+    seen = report.unitsSeen;
+    source = "stock report";
+    countAt = report.at;
+  } else if (Number.isFinite(checkAt)) {
+    seen = checkUnits;
+    source = "stock check";
+    countAt = new Date(checkAt).toISOString();
+  }
+  let boughtSince = 0;
+  if (seen !== null && ids.length && tableExists(db, "claims")) {
+    const from = Date.parse(countAt);
+    boughtSince = db
+      .prepare(`SELECT units, ended_at FROM claims WHERE bounty_id IN (${marks}) AND status = 'completed'`)
+      .all(...ids)
+      .filter((c) => {
+        const t = Date.parse(c.ended_at);
+        return Number.isFinite(t) && t > from && t <= at && Number.isSafeInteger(c.units) && c.units > 0;
+      })
+      .reduce((n, c) => n + c.units, 0);
+  }
+  const units = seen === null ? null : Math.max(0, seen - boughtSince);
+  const what = source === "stock report" ? "a member's stock report" : "the branch check";
+  const note =
+    seen === null
+      ? null
+      : boughtSince > 0
+        ? `${plural(seen, "unit")} seen in ${what} at ${ukTime(countAt)}, less ${plural(boughtSince, "unit")} members have bought through bounties since, leaves about ${units}`
+        : `${plural(seen, "unit")} seen in ${what} at ${ukTime(countAt)}`;
+  return { units, seen, source, at: countAt, boughtSince, report, note };
+}
+
 /**
  * The one thing most likely to make the estimate wrong, in plain words,
  * checked in order of how badly it would mislead.
  */
-function mainUncertainty({ sampleData, economics, match, offer, missing, stock, demand, sample }) {
+function mainUncertainty({ sampleData, economics, match, offer, missing, stock, demand, sample, units = 1 }) {
   if (sampleData) return "Sample figures: illustrative only, never observed evidence";
   if (!economics)
     return match === "research"
@@ -1192,8 +1421,12 @@ function mainUncertainty({ sampleData, economics, match, offer, missing, stock, 
       ? "The offer price has no observation date, so it may have changed"
       : `The offer price was last seen ${plural(offer.ageDays ?? 0, "day")} ago and may have changed`;
   if (missing.length) return `${andList(missing)} not entered, so profit and earnings per hour are not known`.replace(/^./, (c) => c.toUpperCase());
+  if (!stock.confirmed && stock.check?.in_stock === 1 && stock.shelf?.units === 0)
+    return "The shelf may be empty: members have bought the units seen, or reported none, since the latest branch check";
   if (stock.availability === "out_of_stock") return "The latest branch check found none on the shelf";
   if (!stock.confirmed) return "Branch stock has not been confirmed by a recent check in this locality";
+  if (Number.isSafeInteger(stock.shelf?.units) && stock.shelf.units < units)
+    return `Only about ${plural(stock.shelf.units, "unit")} likely left on the shelf for the ${plural(units, "unit")} planned`;
   if (demand.units === null) return demand.note;
   if (sample.independent < ALERT_RULES.minIndependentSales)
     return `Only ${plural(sample.independent, "independent seller")} in the confirmed sales`;
@@ -1206,7 +1439,10 @@ function mainUncertainty({ sampleData, economics, match, offer, missing, stock, 
  * options.now overrides request.now; the HTTP route passes the server clock
  * so a client cannot make an expired offer look fresh. options.lookup (an
  * asking-price lookup { provider, fetched } or null) overrides the lookup
- * read from the cache (askingLookup).
+ * read from the cache (askingLookup). options.pinOffer true costs the
+ * chosen offer exactly as stored, even when a newer Open Prices price at the
+ * same shop exists (for judging a record as it stood, such as an audit
+ * item); otherwise the newest same-shop price is used (currentOffer).
  *
  * Request additions beyond the architecture contract:
  *  weightKg  weight of one unit in kilograms; null or missing means unknown,
@@ -1239,9 +1475,18 @@ function mainUncertainty({ sampleData, economics, match, offer, missing, stock, 
  * prices (priceComparison), category (categoryDecision plus the rule, the
  * returns rate and the failures), journey, missingInputs, access
  * ({ needs, carryKg, carrySource }), checked ({ price, stock }),
- * mainUncertainty, offerAttributes, inputs, assumptions and warnings.
- * economics is null unless at least one confirmed exact sale qualifies.
- * competition carries the lookup used and the known competingListings.
+ * mainUncertainty, offerAttributes, shopPrice, inputs, assumptions and
+ * warnings. economics is null unless at least one confirmed exact sale
+ * qualifies. competition carries the lookup used and the known
+ * competingListings.
+ *
+ * offer is the offer the figures use: for an Open Prices observation with a
+ * newer one at the same shop it is the newest (currentOffer), with
+ * offer.chosenOffer and shopPrice ({ chosen, used, change }) saying so and a
+ * warning naming both prices when they differ. stock is stockStatus's result
+ * plus shelf (branchShelf): units members bought through bounties since the
+ * count are subtracted, a newer stock report sets the count as on the bounty
+ * card, and a count that has fallen to none leaves stock unconfirmed.
  *
  * opportunity is classifyOpportunity(...) from opportunity.mjs (tier,
  * reasons, unitProfit, returnOnCost, targetPrice, meetsThresholds,
@@ -1263,10 +1508,12 @@ export function estimateFromEvidence(db, request, options = {}) {
   const now = options.now ?? input.now ?? new Date().toISOString();
   if (!Number.isFinite(Date.parse(now))) fail("now must be a date and time");
   ensureFunctions(db);
-  const attributes = applyOfferAttributes(
-    findOffer(db, input.offer.provider, input.offer.sourceId, now),
-    input.offerAttributes,
-  );
+  // An Open Prices observation with a newer one at the same shop is costed
+  // at the newest (currentOffer): the trip pays today's shelf price.
+  const resolved = currentOffer(db, input.offer.provider, input.offer.sourceId, now, {
+    pin: options.pinOffer === true,
+  });
+  const attributes = applyOfferAttributes(resolved.offer, input.offerAttributes);
   const offer = attributes.offer;
   const rows = findCandidates(db, offer);
   const confirmed = new Set(input.sales.map((s) => `${s.provider}|${s.sourceId}`));
@@ -1338,12 +1585,33 @@ export function estimateFromEvidence(db, request, options = {}) {
         ? "research"
         : "none";
 
-  const stock = stockStatus(db, {
+  const checked = stockStatus(db, {
     barcode: offer.gtin,
     retailer: offer.retailer,
     locality: input.locality,
     now,
   });
+  // The shelf as a bounty card counts it: a newer stock report and units
+  // members have bought through bounties since change the count (R3Q6). A
+  // count that has fallen to none no longer confirms stock. availability
+  // stays what the check found (a bounty reads "out_of_stock" as a check
+  // that found none and words its notices that way).
+  const shelf = branchShelf(db, {
+    barcode: offer.gtin,
+    retailer: offer.retailer,
+    locality: input.locality,
+    check: checked.check,
+    now,
+  });
+  const emptied =
+    checked.confirmed && shelf.units === 0
+      ? shelf.boughtSince > 0
+        ? `Members have bought ${plural(shelf.boughtSince, "unit")} through bounties since ${shelf.source === "stock report" ? "a member's stock report" : "the branch check"} at ${ukTime(shelf.at)}, which saw ${shelf.seen}, so the shelf may be empty: record a new check`
+        : `A member reported none on the shelf at ${ukTime(shelf.at)}, after the latest branch check${shelf.report?.verified === "accurate" ? "" : " (not verified yet)"}: record a new check`
+      : null;
+  const stock = emptied
+    ? { ...checked, confirmed: false, reason: emptied, shelf }
+    : { ...checked, shelf };
   const permission = displayPermission(db, offer);
   const sampleData = offer.sample || sample.used.some(isSampleRecord);
   // Calendar days from today in London to the cash date.
@@ -1385,6 +1653,9 @@ export function estimateFromEvidence(db, request, options = {}) {
     now,
     localStockConfirmed: stock.confirmed,
     availability: stock.availability,
+    // Units likely left on the shelf (the newest count less units bought
+    // through bounties since); the gate fails when more are planned.
+    shelfUnits: stock.confirmed && Number.isSafeInteger(stock.shelf?.units) ? stock.shelf.units : null,
     promotion: offer.promotion,
     promotionEligible: input.promotionEligible,
     costedAtRegularPrice,
@@ -1455,6 +1726,16 @@ export function estimateFromEvidence(db, request, options = {}) {
   );
 
   if (sampleData) warnings.push("Sample data: illustrative only and never a buy alert");
+  // A newer Open Prices price at the same shop is what the trip pays (R3M3).
+  const shopPrice = resolved.shopPrice;
+  if (shopPrice && shopPrice.change !== "same")
+    warnings.push(
+      `A newer price at this shop is ${gbp(shopPrice.used.price)} (${ukDate(shopPrice.used.observed)}). Figures use ${gbp(shopPrice.used.price)}, not the ${gbp(shopPrice.chosen.price)} you chose (${ukDate(shopPrice.chosen.observed)})`,
+    );
+  else if (shopPrice)
+    assumptions.push(
+      `A newer Open Prices observation at this shop (${ukDate(shopPrice.used.observed)}) gives the same ${gbp(shopPrice.used.price)}, so the figures use its date`,
+    );
   if (decision.warning) warnings.push(decision.warning);
   if (input.weightKg === null)
     warnings.push("Unit weight not entered: an item of unknown weight is rejected by the buying thresholds");
@@ -1479,6 +1760,18 @@ export function estimateFromEvidence(db, request, options = {}) {
     warnings.push(
       stock.reason ??
         `Branch stock is not confirmed: record an availability check from the last ${CHECK_VALID_DAYS} days`,
+    );
+  else if (shelf.boughtSince > 0)
+    warnings.push(
+      `Members have bought ${plural(shelf.boughtSince, "unit")} through bounties since ${shelf.source === "stock report" ? "the stock report" : "the branch check"} at ${ukTime(shelf.at)}, so about ${plural(shelf.units, "unit")} of the ${shelf.seen} seen ${shelf.units === 1 ? "is" : "are"} left`,
+    );
+  if (stock.confirmed && shelf.source === "stock report" && shelf.report && shelf.report.verified !== "accurate")
+    warnings.push(
+      `A member reported ${shelf.report.unitsSeen} on the shelf at ${ukTime(shelf.report.at)}, after the latest branch check (not verified yet): the shelf count uses it, as the bounty does`,
+    );
+  if (stock.confirmed && Number.isSafeInteger(shelf.units) && shelf.units < input.units)
+    warnings.push(
+      `Only about ${plural(shelf.units, "unit")} likely left on the shelf, fewer than the ${plural(input.units, "unit")} planned: figures for ${plural(input.units, "unit")} overstate what this trip can earn, so plan for no more than ${shelf.units}`,
     );
   if (input.defaulted.includes("postage"))
     warnings.push("No parcel cost entered: profit cannot be judged until you enter what you pay to post one unit");
@@ -1563,8 +1856,9 @@ export function estimateFromEvidence(db, request, options = {}) {
     needs: accessNeeds(
       {
         weight: input.weightKg,
-        stock: Number.isSafeInteger(stock.check?.units_seen) ? stock.check.units_seen : stock.check?.in_stock === 0 ? 0 : null,
-        stockChecked: stock.check?.checked_at ?? null,
+        // Units left after purchases since the count, as the bounty card has it.
+        stock: shelf.units,
+        stockChecked: shelf.at ?? stock.check?.checked_at ?? null,
         storageNeeds: null,
       },
       { carry: carryKg },
@@ -1623,8 +1917,12 @@ export function estimateFromEvidence(db, request, options = {}) {
       stock,
       demand,
       sample,
+      units: input.units,
     }),
     offerAttributes: { applied: attributes.applied, ignored: attributes.ignored },
+    // Set when a newer Open Prices price at the same shop replaced the
+    // chosen observation (currentOffer): { chosen, used, change }.
+    shopPrice,
     inputs,
     assumptions,
     warnings,

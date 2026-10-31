@@ -77,7 +77,11 @@ export type Offer = {
   stockNote: string;
   branchStockEstablished: boolean;
   sample: boolean;
-  suggestedCategory?: { id: CategoryId; basis: string };
+  // hint: set when the size gives a quantity but nothing else says food.
+  suggestedCategory?: { id: CategoryId; basis: string; hint?: string };
+  // Set when a newer Open Prices price at the same shop replaced the
+  // observation you chose (server/estimate.mjs currentOffer).
+  chosenOffer?: { sourceId: string; price: number; observed: string | null };
   // Present once operator-confirmed attributes were applied by the server.
   attributeSource?: Record<AttrKey, AttrSource>;
   operatorConfirmed?: AttrKey[];
@@ -280,6 +284,18 @@ type Demand = {
   note: string;
 };
 type AccessNeed = { id: string; label: string; detail: string };
+// Units on the shelf now: the newer of the branch check and a member's stock
+// report, less units members bought through bounties since that count.
+type Shelf = {
+  units: number | null;
+  seen: number | null;
+  source: "stock check" | "stock report" | null;
+  at: string | null;
+  boughtSince: number;
+  report: { at: string; unitsSeen: number; verified: string | null } | null;
+  note: string | null;
+};
+type PricePick = { sourceId: string; price: number; observed: string | null };
 type Estimate = {
   offer: Offer;
   sample: {
@@ -300,7 +316,14 @@ type Estimate = {
   opportunity: Opportunity;
   thresholds: Thresholds;
   alert: { eligible: boolean; reasons: string[]; checks: AlertCheck[] };
-  stock: { check: StockCheck | null; confirmed: boolean; availability: string };
+  stock: {
+    check: StockCheck | null;
+    confirmed: boolean;
+    availability: string;
+    reason?: string | null;
+    // The shelf as the bounty card counts it (server/estimate.mjs branchShelf).
+    shelf?: Shelf;
+  };
   permission: { permitted: boolean; basis: string };
   unitCost: number;
   cashNeededDays: number | null;
@@ -332,6 +355,8 @@ type Estimate = {
   checked?: { price: string | null; stock: string | null; locality: string | null };
   mainUncertainty?: string;
   offerAttributes?: AttributeResult;
+  // A newer Open Prices price at the same shop that the figures use.
+  shopPrice?: { chosen: PricePick; used: PricePick; change: "rose" | "fell" | "same" } | null;
   inputs?: { defaulted: string[]; costs: Record<string, number> };
   assumptions: string[];
   warnings: string[];
@@ -434,11 +459,18 @@ const STATUS_CLASS: Record<Status, string> = {
   none: "warn",
 };
 
+// "today", "1 day ago", "3 days ago": never "0 d ago".
+const daysAgo = (n: number) => (n === 0 ? "today" : n === 1 ? "1 day ago" : n + " days ago");
 function freshnessBadge(offer: Offer) {
+  const age = offer.ageDays;
   if (offer.freshness === "fresh")
-    return <span className="badge ok">Observed {offer.ageDays} d ago</span>;
+    return <span className="badge ok">Observed {age === null ? "recently" : daysAgo(age)}</span>;
   if (offer.freshness === "expired")
-    return <span className="badge warn">Expired · {offer.ageDays} d old</span>;
+    return (
+      <span className="badge warn">
+        Expired{age === null ? "" : ": " + age + (age === 1 ? " day" : " days") + " old"}
+      </span>
+    );
   if (offer.freshness === "future")
     return <span className="badge warn">Dated in the future</span>;
   return <span className="badge warn">Date unknown</span>;
@@ -508,6 +540,14 @@ const REQUIRED_FIELDS = new Set<keyof Inputs>([
   "journeyMinutes",
   "handlingMinutes",
 ]);
+// The same plain labels the server lists in missingInputs.
+const REQUIRED_LABELS: Partial<Record<keyof Inputs, string>> = {
+  postage: "parcel cost",
+  packaging: "packaging cost",
+  journeyCost: "return journey cost",
+  journeyMinutes: "journey time",
+  handlingMinutes: "handling time",
+};
 type FieldKind = "pounds" | "percent" | "minutes" | "count" | "kg";
 const FIELDS: [keyof Inputs, string, FieldKind, string?][] = [
   ["units", "Units to buy", "count", "A first purchase is a small trial batch"],
@@ -977,9 +1017,16 @@ export function ResearchCalculator({
   const stale = estimate !== null && current === null;
   const offer = estimate?.offer ?? candidates?.offer ?? selected;
 
+  // A trip is tracked only once every required cost and time is entered: a
+  // prediction with a blank counted as nothing would overstate the forecast.
+  const blankRequired = [...REQUIRED_FIELDS]
+    .filter((f) => String(inputs[f]).trim() === "")
+    .map((f) => REQUIRED_LABELS[f] ?? String(f));
+  const notEntered = [...new Set([...(current?.missingInputs ?? []), ...blankRequired])];
+
   async function trackInLedger() {
     const e = current?.economics;
-    if (!current || !e) return;
+    if (!current || !e || notEntered.length) return;
     const o = current.offer;
     // The same rule as the server: a sample offer or any sample sale in the
     // sold sample makes the whole estimate sample data.
@@ -1379,13 +1426,20 @@ export function ResearchCalculator({
               offer={estimate.offer}
               locality={inputs.locality}
               latest={estimate.stock.check}
+              shelf={estimate.stock.shelf ?? null}
+              estimateLocality={estimate.checked?.locality ?? null}
               onSaved={() => setRefresh((n) => n + 1)}
             />
           )}
 
           {estimate && (
             <div className="actions">
-              <button type="button" onClick={trackInLedger} disabled={!current?.economics}>
+              <button
+                type="button"
+                onClick={trackInLedger}
+                disabled={!current?.economics || notEntered.length > 0}
+                aria-describedby={notEntered.length ? "track-needs-costs" : undefined}
+              >
                 Track in ledger
               </button>
               <button type="button" onClick={draftBounty} disabled={!current}>
@@ -1401,6 +1455,12 @@ export function ResearchCalculator({
           {stale && (
             <p className="muted">
               The estimate is updating for your latest changes, so these actions wait for it.
+            </p>
+          )}
+          {estimate && notEntered.length > 0 && (
+            <p className="muted" id="track-needs-costs">
+              Enter every cost before tracking this trip: {listText(notEntered)}{" "}
+              {notEntered.length === 1 ? "is" : "are"} not entered yet.
             </p>
           )}
           {!stale && estimate && !estimate.economics && (
@@ -1617,7 +1677,7 @@ function CategoryPanel({
   failures,
   warning,
 }: {
-  suggestion: { id: CategoryId; basis: string } | null;
+  suggestion: { id: CategoryId; basis: string; hint?: string } | null;
   chosen: "" | CategoryId;
   id: CategoryId;
   looser: boolean;
@@ -1649,6 +1709,9 @@ function CategoryPanel({
               ? "Chosen by you. Suggested: " + CATEGORY_NAME[suggested] + ". " + (suggestion?.basis ?? "")
               : (suggestion?.basis ?? "No clear category in the title") + ". Change it if that is wrong"}
           </span>
+          {suggestion?.hint && chosen !== "food" && (
+            <span className="warn">{suggestion.hint}.</span>
+          )}
         </label>
         {looser && (
           <label>
@@ -2063,6 +2126,15 @@ function OfferSummary({ offer }: { offer: Offer }) {
         {offer.sample && <span className="badge sample">Sample</span>}
         <span className="badge warn">Branch stock not established</span>
       </span>
+      {offer.chosenOffer && (
+        <p className={"notice" + (offer.price > offer.chosenOffer.price ? " warn" : "")} role="status">
+          {offer.price === offer.chosenOffer.price
+            ? "A newer price at this shop (" + day(offer.observed) + ") gives the same " + money(offer.price) + ", so the figures use its date."
+            : "A newer price at this shop is " + money(offer.price) + " (" + day(offer.observed) + "). Figures use " +
+              money(offer.price) + ", not the " + money(offer.chosenOffer.price) + " you chose (" +
+              day(offer.chosenOffer.observed) + ")."}
+        </p>
+      )}
       <dl>
         <dt>Offer price</dt>
         <dd>
@@ -2089,9 +2161,7 @@ function OfferSummary({ offer }: { offer: Offer }) {
         <dt>Observed</dt>
         <dd>
           {dateTime(offer.observed)}
-          {offer.ageDays !== null
-            ? " (" + offer.ageDays + (offer.ageDays === 1 ? " day" : " days") + " ago)"
-            : ""}
+          {offer.ageDays !== null && offer.ageDays >= 0 ? " (" + daysAgo(offer.ageDays) + ")" : ""}
         </dd>
         <dt>Imported</dt>
         <dd>{dateTime(offer.imported)}</dd>
@@ -2233,6 +2303,24 @@ function AccessLabels({ needs }: { needs: AccessNeed[] }) {
   );
 }
 
+// What has changed on the shelf since the check, as the bounty card counts
+// it: a member's newer stock report, and units bought through bounties.
+function shelfText(shelf: Shelf | undefined) {
+  if (!shelf || shelf.seen === null || shelf.at === null) return "";
+  const what = shelf.source === "stock report" ? "report" : "check";
+  const report =
+    shelf.source === "stock report"
+      ? "; a member's stock report at " + dateTime(shelf.at) + " saw " + shelf.seen +
+        (shelf.report?.verified === "accurate" ? "" : " (not verified yet)")
+      : "";
+  const bought =
+    shelf.boughtSince > 0
+      ? ". Members have bought " + shelf.boughtSince + " through bounties since this " + what + ", so about " +
+        shelf.units + " " + (shelf.units === 1 ? "is" : "are") + " left of the " + shelf.seen + " seen"
+      : "";
+  return report + bought;
+}
+
 /** When the price and stock were last checked, and the main uncertainty. */
 function CheckedLine({ estimate }: { estimate: Estimate }) {
   const c = estimate.checked;
@@ -2243,15 +2331,14 @@ function CheckedLine({ estimate }: { estimate: Estimate }) {
       {c && (
         <>
           <b className="inline">Price checked:</b>{" "}
-          {c.price
-            ? dateTime(c.price) + (age !== null && age >= 0 ? " (" + (age === 0 ? "today" : plural(age, "day") + " ago") + ")" : "")
-            : "never"}
+          {c.price ? dateTime(c.price) + (age !== null && age >= 0 ? " (" + daysAgo(age) + ")" : "") : "never"}
           . <b className="inline">Stock checked:</b>{" "}
           {c.stock
             ? dateTime(c.stock) + (c.locality ? " in " + c.locality : "")
             : c.locality
               ? "no usable check in " + c.locality + " from the last 2 days"
               : "not known, because no locality is entered"}
+          {shelfText(estimate.stock.shelf)}
           .{" "}
         </>
       )}
@@ -2457,36 +2544,81 @@ const METHODS: [string, string][] = [
   ["phone", "Phoned the branch"],
   ["retailer_branch_page", "Retailer's branch stock page"],
 ];
-const localNow = () => {
-  const d = new Date();
-  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
-  return d.toISOString().slice(0, 16);
-};
+// Shop and place names compare without case or extra spaces, as the server
+// compares them.
+const sameText = (a: string | null | undefined, b: string | null | undefined) =>
+  (a ?? "").trim().replace(/\s+/g, " ").toLowerCase() === (b ?? "").trim().replace(/\s+/g, " ").toLowerCase();
 
+// What the server says back about a saved check (server/audit.mjs
+// recordCheck): the stored row, plus, when known, whether the time was
+// stamped by the server and a warning that a newer check or report still
+// decides the shelf.
+type SavedCheck = StockCheck & { checkedAtStamped?: boolean; olderWarning?: string | null };
+
+/**
+ * Records a branch check. "Checked at" starts empty: a blank time is the
+ * time the server saves it, so a check made just now is never back-dated to
+ * when the page was opened. A time typed in is for a check made earlier;
+ * when it is older than the newest check or member's stock report for the
+ * same branch the form says so before saving, because the newer one still
+ * decides what the bounty and the estimate show. After each save the time,
+ * units and note are cleared again.
+ */
 function StockCheckForm({
   offer,
   locality,
   latest,
+  shelf,
+  estimateLocality,
   onSaved,
 }: {
   offer: Offer;
   locality: string;
   latest: StockCheck | null;
+  // The shelf the estimate worked out for its own retailer and locality.
+  shelf: Shelf | null;
+  estimateLocality: string | null;
   onSaved: () => void;
 }) {
   const [checks, setChecks] = useState<StockCheck[]>([]);
-  const [message, setMessage] = useState("");
+  const [message, setMessage] = useState<{ text: string; warn: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [version, setVersion] = useState(0);
+  const [retailer, setRetailer] = useState(offer.retailer || "");
+  // null until edited: the form follows the estimate's locality until then.
+  const [place, setPlace] = useState<string | null>(null);
+  const [method, setMethod] = useState("in_store");
+  const [inStock, setInStock] = useState("yes");
+  const [unitsSeen, setUnitsSeen] = useState("");
+  const [checkedAt, setCheckedAt] = useState("");
+  const [note, setNote] = useState("");
+  const branch = place ?? locality;
   useEffect(() => {
     let active = true;
     api<{ rows: StockCheck[] }>("research/checks?barcode=" + encodeURIComponent(offer.gtin))
       .then((d) => active && setChecks(d.rows))
-      .catch((e: Error) => active && setMessage(e.message));
+      .catch((e: Error) => active && setMessage({ text: e.message, warn: true }));
     return () => {
       active = false;
     };
   }, [offer.gtin, version]);
+
+  // The newest check or member's stock report for the branch in the form.
+  // Reports are known for the estimate's own branch only.
+  const newestCheck = checks
+    .filter((c) => sameText(c.retailer, retailer) && sameText(c.locality, branch))
+    .reduce<StockCheck | null>((a, c) => (!a || Date.parse(c.checked_at) > Date.parse(a.checked_at) ? c : a), null);
+  const report =
+    shelf?.report && sameText(retailer, offer.retailer) && sameText(branch, estimateLocality) ? shelf.report : null;
+  const newest =
+    report && (!newestCheck || Date.parse(report.at) > Date.parse(newestCheck.checked_at))
+      ? { kind: "a member's stock report", at: report.at }
+      : newestCheck
+        ? { kind: "a branch check", at: newestCheck.checked_at }
+        : null;
+  const typed = checkedAt ? Date.parse(new Date(checkedAt).toISOString()) : NaN;
+  const older = newest !== null && Number.isFinite(typed) && typed < Date.parse(newest.at);
+
   return (
     <fieldset className="stock-check">
       <legend>7. Branch availability check</legend>
@@ -2504,33 +2636,46 @@ function StockCheckForm({
             latest.locality +
             " on " +
             dateTime(latest.checked_at) +
+            shelfText(shelf ?? undefined) +
             "."
           : " No usable check yet."}
       </p>
       <form
         onSubmit={async (ev) => {
           ev.preventDefault();
-          const f = new FormData(ev.currentTarget);
-          const units = String(f.get("unitsSeen") || "").trim();
-          const at = String(f.get("checkedAt") || "");
+          const units = unitsSeen.trim();
           setBusy(true);
-          setMessage("");
+          setMessage(null);
           try {
-            await api("research/checks", {
+            const saved = await api<SavedCheck>("research/checks", {
               barcode: offer.gtin,
-              retailer: String(f.get("retailer") || ""),
-              locality: String(f.get("locality") || ""),
-              method: String(f.get("method")),
-              inStock: f.get("inStock") === "yes",
+              retailer: retailer.trim(),
+              locality: branch.trim(),
+              method,
+              inStock: inStock === "yes",
               ...(units ? { unitsSeen: Math.round(Number(units)) } : {}),
-              ...(at ? { checkedAt: new Date(at).toISOString() } : {}),
-              ...(String(f.get("note") || "").trim() ? { note: String(f.get("note")).trim() } : {}),
+              // Blank: the server records the time it saves the check.
+              ...(checkedAt ? { checkedAt: new Date(checkedAt).toISOString() } : {}),
+              ...(note.trim() ? { note: note.trim() } : {}),
             });
-            setMessage("Check saved.");
+            setMessage(
+              saved?.olderWarning
+                ? { text: "Check saved. " + saved.olderWarning, warn: true }
+                : {
+                    text:
+                      "Check saved for " +
+                      dateTime(saved?.checked_at) +
+                      (checkedAt ? "." : ", the time you saved it."),
+                    warn: false,
+                  },
+            );
+            setCheckedAt("");
+            setUnitsSeen("");
+            setNote("");
             setVersion((n) => n + 1);
             onSaved();
           } catch (err) {
-            setMessage((err as Error).message);
+            setMessage({ text: (err as Error).message, warn: true });
           } finally {
             setBusy(false);
           }
@@ -2539,15 +2684,27 @@ function StockCheckForm({
         <div className="grid2">
           <label>
             Retailer
-            <input name="retailer" required defaultValue={offer.retailer || ""} maxLength={120} />
+            <input
+              name="retailer"
+              required
+              value={retailer}
+              maxLength={120}
+              onChange={(ev) => setRetailer(ev.target.value)}
+            />
           </label>
           <label>
             Locality
-            <input name="locality" required defaultValue={locality} maxLength={120} />
+            <input
+              name="locality"
+              required
+              value={branch}
+              maxLength={120}
+              onChange={(ev) => setPlace(ev.target.value)}
+            />
           </label>
           <label>
             How you checked
-            <select name="method" defaultValue="in_store">
+            <select name="method" value={method} onChange={(ev) => setMethod(ev.target.value)}>
               {METHODS.map(([v, l]) => (
                 <option key={v} value={v}>
                   {l}
@@ -2557,27 +2714,52 @@ function StockCheckForm({
           </label>
           <label>
             Result
-            <select name="inStock" defaultValue="yes">
+            <select name="inStock" value={inStock} onChange={(ev) => setInStock(ev.target.value)}>
               <option value="yes">In stock</option>
               <option value="no">None found</option>
             </select>
           </label>
           <label>
             Units seen (optional)
-            <input name="unitsSeen" type="number" min={0} max={10000} step={1} />
+            <input
+              name="unitsSeen"
+              type="number"
+              min={0}
+              max={10000}
+              step={1}
+              value={unitsSeen}
+              onChange={(ev) => setUnitsSeen(ev.target.value)}
+            />
           </label>
           <label>
             Checked at (your local time)
-            <input name="checkedAt" type="datetime-local" defaultValue={localNow()} />
+            <input
+              name="checkedAt"
+              type="datetime-local"
+              value={checkedAt}
+              aria-invalid={older}
+              aria-describedby="checked-at-hint"
+              onChange={(ev) => setCheckedAt(ev.target.value)}
+            />
+            <span className={older ? "warn" : "muted"} id="checked-at-hint">
+              {older && newest
+                ? "This check is older than " + newest.kind + " at " + dateTime(newest.at) +
+                  " and will not change the bounty or this estimate: the newer one still decides the shelf. Clear the time if you checked just now."
+                : "Leave blank if you checked just now: the time you save it is recorded. Enter a time only for a check made earlier."}
+            </span>
           </label>
         </div>
         <label>
           Note (optional)
-          <input name="note" maxLength={500} />
+          <input name="note" maxLength={500} value={note} onChange={(ev) => setNote(ev.target.value)} />
         </label>
-        <button disabled={busy}>Record check</button>
+        <button disabled={busy}>{older ? "Record this older check anyway" : "Record check"}</button>
       </form>
-      {message && <p role="status">{message}</p>}
+      {message && (
+        <p role="status" className={message.warn ? "warn" : ""}>
+          {message.text}
+        </p>
+      )}
       {checks.length > 0 && (
         <div className="scroll">
           <table>

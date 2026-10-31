@@ -276,7 +276,7 @@ function ObservationRow({ o }: { o: Observation }) {
         <b>{o.title}</b>
         <small>{place}</small>
         <small>
-          Observed {o.day} · Imported {dateTime(o.imported)}
+          Observed {dateTime(o.day)} · Imported {dateTime(o.imported)}
           {o.quantity && " · Quantity " + o.quantity}
           {o.barcode && " · Barcode " + o.barcode}
           {o.proof_id && " · Proof #" + o.proof_id}

@@ -286,6 +286,9 @@ test("a member's stricter return is used to the tenth of a percent", async () =>
   const { effectiveRules } = await import("./opportunity.mjs");
   assert.equal(effectiveRules({ minReturn: 0.355 }).minReturn, 0.355);
   assert.equal(meetsReturn(354, 1000, 0.355), false);
+  // 0.57 × 10000 is 5699.999... in floating point: it must count as 57%.
+  assert.equal(meetsReturn(5699, 10000, 0.57), false);
+  assert.equal(meetsReturn(5700, 10000, 0.57), true);
   assert.equal(meetsReturn(355, 1000, 0.355), true);
   assert.equal(meetsReturn(354, 1000), true);
 });

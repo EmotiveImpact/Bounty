@@ -209,15 +209,32 @@ export function parseArgs(argv) {
 // After new evidence lands, open bounties for the same items are re-checked
 // at once, so a price rise or a removed offer stops the trip for members who
 // were alerted or hold a claim, even if none of them opens the app.
+// The estimate, cap, demand and every claim holder's own figures are worked
+// out again for each open bounty (refreshOpenBounties), not only the
+// blockers; a bounty that cannot be worked out again fails closed.
 async function recheckBounties(db) {
-  const { recheckOpenBounties } = await import("./bounties.mjs");
-  const out = recheckOpenBounties(db, { now: new Date().toISOString() });
+  let out;
+  try {
+    const { refreshOpenBounties } = await import("./routes-bounties.mjs");
+    out = await refreshOpenBounties(db, { now: new Date().toISOString() });
+  } catch (error) {
+    // The evidence is saved; say plainly that open bounties were not re-checked.
+    console.error(`The evidence was saved, but open bounties could not be re-checked: ${error.message}`);
+    process.exitCode = 1;
+    return;
+  }
   if (out.stopped.length)
     console.log(
       `${out.stopped.length} open ${out.stopped.length === 1 ? "bounty was" : "bounties were"} stopped by the new evidence, and members were told not to make the trip.`,
     );
   if (out.reopened.length)
     console.log(`${out.reopened.length} paused ${out.reopened.length === 1 ? "bounty is" : "bounties are"} open for trips again.`);
+  if (out.heldBack.length)
+    console.log(
+      `${out.heldBack.length} open ${out.heldBack.length === 1 ? "bounty has" : "bounties have"} claim holders who were told not to make the trip.`,
+    );
+  if (out.failed.length)
+    console.log(`${out.failed.length} open ${out.failed.length === 1 ? "bounty" : "bounties"} could not be worked out again.`);
 }
 
 async function main() {

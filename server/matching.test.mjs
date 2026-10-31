@@ -331,9 +331,18 @@ test("only listings seen within the window count; older ones make competition un
   assert.equal(stale.olderListings, 1);
   assert.equal(stale.checkedAt, "2026-05-04T00:00:00.000Z");
   assert.equal(stale.note, "Competing listings last checked 4 May 2026: run an asking-price lookup before sharing");
-  // Seven whole days is still current; eight is not.
-  assert.equal(competition(offer, [ask("d7", "2026-10-24")], { now }).activeListings, 1);
+  // Current means seen within 7 x 24 hours by elapsed time (R3M9): exactly
+  // seven days still counts, a millisecond more does not, and 7.5 or 7.99
+  // days is never rounded down to seven.
+  assert.equal(competition(offer, [ask("d7", "2026-10-24T12:00:00Z")], { now }).activeListings, 1);
+  assert.equal(competition(offer, [ask("d7+", "2026-10-24T11:59:59.999Z")], { now }).activeListings, null);
+  assert.equal(competition(offer, [ask("d6.9", "2026-10-24T14:24:00Z")], { now }).activeListings, 1);
+  assert.equal(competition(offer, [ask("d7.5", "2026-10-24")], { now }).activeListings, null);
+  assert.equal(competition(offer, [ask("d7.99", "2026-10-23T12:14:24Z")], { now }).activeListings, null);
   assert.equal(competition(offer, [ask("d8", "2026-10-23")], { now }).activeListings, null);
+  // A lookup follows the same rule.
+  assert.equal(competition(offer, [], { now, lookup: { fetched: "2026-10-24T12:00:00Z" } }).activeListings, 0);
+  assert.equal(competition(offer, [], { now, lookup: { fetched: "2026-10-24T11:00:00Z" } }).activeListings, null);
   // A listing dated after now, or with no date, is never current.
   assert.equal(competition(offer, [ask("future", "2026-11-03")], { now }).activeListings, null);
   const undated = competition(offer, [ask("undated", null)], { now });
@@ -358,7 +367,8 @@ test("only listings seen within the window count; older ones make competition un
   assert.equal(competition(offer, [], { now }).activeListings, 0);
   // The window can be set, and now can be a Date.
   assert.equal(competition(offer, [ask("d3", "2026-10-28")], { now: new Date(now), maxAgeDays: 2 }).activeListings, null);
-  assert.equal(competition(offer, [ask("d3", "2026-10-28")], { now: new Date(now), maxAgeDays: 3 }).activeListings, 1);
+  assert.equal(competition(offer, [ask("d3", "2026-10-28T12:00:00Z")], { now: new Date(now), maxAgeDays: 3 }).activeListings, 1);
+  assert.equal(competition(offer, [ask("d3.5", "2026-10-28")], { now: new Date(now), maxAgeDays: 3 }).activeListings, null);
   // Two arguments still work and judge age against the current time.
   const recent = new Date(Date.now() - 3600000).toISOString();
   assert.equal(competition(offer, [ask("r", recent)]).activeListings, 1);

@@ -9,11 +9,19 @@ export const ALERT_RULES = Object.freeze({
   minIndependentSales: 3, // distinct named sellers with recent sales; a listing id is not a seller
 });
 
+import { londonDate } from "./http.mjs";
+
 const DAY = 86400000;
+const CALENDAR = /^\d{4}-\d{2}-\d{2}$/;
 export function ageDays(date, now) {
   const then = Date.parse(date);
   const at = Date.parse(now);
   if (!Number.isFinite(then) || !Number.isFinite(at)) return null;
+  // A calendar date (an offer seen on 24 July, a sale on 3 May) is a UK date,
+  // so its age is counted in UK days: just after midnight in summer time it
+  // is already a day older than the UTC clock says.
+  if (typeof date === "string" && CALENDAR.test(date))
+    return Math.round((Date.parse(londonDate(new Date(at)) + "T00:00:00Z") - then) / DAY);
   return Math.floor((at - then) / DAY);
 }
 
@@ -52,6 +60,9 @@ export function ageDays(date, now) {
 //  displayPermitted    licence or programme permits showing this offer
 //  meetsThresholds     classifyOpportunity(...).meetsThresholds
 //  units, trialUnits   units planned and the trial batch size (default 3)
+//  shelfUnits          units likely left on the shelf from the newest branch
+//                      check that counted them (less units bought through
+//                      bounties since), or null when the shelf was not counted
 //  demandUnits         units the evidence supports selling within the sell
 //                      window (opportunity.demandUnits); null when unknown
 //  sellWindowWeeks     the window demandUnits was worked out for
@@ -130,6 +141,21 @@ export function evaluateAlert(input = {}, rules = ALERT_RULES) {
     input.availability === "out_of_stock"
       ? "Latest branch check found none on the shelf"
       : "No branch check has found stock",
+  );
+  // A branch check that counted the shelf caps the units a trip can buy.
+  // Planning more than are likely left (the count less units already bought
+  // through bounties) would send someone for stock that is not there, so it
+  // fails. An uncounted shelf leaves this to the availability check.
+  const shelfCounted = Number.isSafeInteger(input.shelfUnits) && input.shelfUnits >= 0;
+  add(
+    "shelf-units",
+    !shelfCounted || (Number.isInteger(input.units) && input.units <= input.shelfUnits),
+    shelfCounted
+      ? "About " + input.shelfUnits + " left on the shelf, enough for the units planned"
+      : "Shelf not counted",
+    Number.isInteger(input.units)
+      ? "Only about " + input.shelfUnits + " likely left on the shelf, fewer than the " + input.units + " planned"
+      : "Units planned not known, so they cannot be checked against the " + input.shelfUnits + " left on the shelf",
   );
   add(
     "promotion",

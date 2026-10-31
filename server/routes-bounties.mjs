@@ -39,6 +39,7 @@ import {
   planForInput,
   promotionStanding,
   recheckOpenBounties,
+  openBountyIds,
   createBounty,
   createMember,
   dispatchAlerts,
@@ -58,6 +59,9 @@ import {
   verifyReport,
   withdrawBounty,
 } from "./bounties.mjs";
+// A member's own trip check: their hourly floor and cash date, the units
+// already claimed on the bounty, and trip blockers ahead of the figures.
+import { blockedTripCheck, claimTerms, memberTermsInput, sharedDemand } from "./bounties.mjs";
 
 // A 5 MB photo is about 6.7 million base64 characters.
 const REPORT_BODY_LIMIT = 7_200_000;
@@ -152,39 +156,127 @@ function rechecker(db, { estimate, askingLookup }) {
     } catch (error) {
       result = { error: error.message };
     }
-    return refreshBounty(db, bounty.id, result, now, { lookup });
+    // Every active claim is checked again on the same evidence (R3M2).
+    const claimChecks = await recheckClaims(db, bounty, { estimate, now });
+    return refreshBounty(db, bounty.id, result, now, { lookup, claimChecks });
   }
   return { recheck, lookupFor };
 }
 
 /**
+ * Each active claim's own trip check worked out again on the evidence now
+ * (R3M2), with its stored units, journey and promotion answer and the
+ * member's rules (memberRequest, memberTripCheck; neither is changed).
+ * Demand is shared in claim order: the units bought on the bounty and the
+ * units of claims made before this one count as competing units. A claim's
+ * own hourly floor and cash date are used when the claim stores them (a
+ * terms column); otherwise the operator's floor and no cash date. A claim
+ * with no stored journey (made before journeys were kept) cannot be worked
+ * out again and is left as it is. Returns [{ claimId, check }] for
+ * refreshBounty, which stores each check on its claim.
+ */
+async function recheckClaims(db, bounty, { estimate, now }) {
+  if (bounty.sample) return [];
+  const at = new Date(Date.parse(now)).toISOString();
+  const rows = db
+    .prepare("SELECT * FROM claims WHERE bounty_id = ? AND status = 'active' AND expires_at > ? ORDER BY created, id")
+    .all(bounty.id, at);
+  const bought = db.prepare("SELECT member_id, units FROM claims WHERE bounty_id = ? AND status = 'completed'").all(bounty.id);
+  const boughtUnits = bought.reduce((n, c) => n + (Number.isSafeInteger(c.units) ? c.units : 0), 0);
+  const out = [];
+  let ahead = 0;
+  for (const c of rows) {
+    const units = c.units;
+    const journey = { cost: c.journey_cost, minutes: c.journey_minutes };
+    let member = null;
+    try {
+      member = requireMember(db, c.member_id);
+    } catch {
+      member = null;
+    }
+    if (member && Number.isSafeInteger(journey.cost) && Number.isSafeInteger(journey.minutes)) {
+      let terms = null;
+      try {
+        terms = typeof c.terms === "string" && c.terms ? JSON.parse(c.terms) : null;
+      } catch {
+        terms = null;
+      }
+      const mine = bought.filter((r) => r.member_id === c.member_id).reduce((n, r) => n + r.units, 0);
+      const shared = { ...sharedDemand(db, bounty, member, now), committed: boughtUnits + ahead, mine };
+      const request = memberRequest(bounty, member, { units, journey, qualifies: c.promotion_confirmed === 1, terms });
+      let result;
+      try {
+        if (!request) throw Error("no stored estimate request");
+        result = await estimate(db, request, { now });
+      } catch (error) {
+        result = { error: error.message };
+      }
+      out.push({ claimId: c.id, check: memberTripCheck(result, { units, journey, shared, terms: claimTerms(bounty, terms) }) });
+    }
+    ahead += Number.isSafeInteger(units) ? units : 0;
+  }
+  return out;
+}
+
+/**
  * Re-runs the estimate for every open live bounty for a barcode (all of
- * them when none is given), optionally only at one retailer, then
- * re-evaluates them (recheckOpenBounties), so "Don't make the trip" and
- * reopen notices go out before it returns. Call it after a branch
- * availability check is recorded and after an import changes offers or
- * sales. options: now (ISO), estimate and askingLookup (the defaults are
- * estimateFromEvidence and the eBay lookup cache). Returns { rechecked:
- * [bountyId], checked, stopped, reopened } (recheckOpenBounties).
+ * them when none is given), optionally only at one retailer: the cap,
+ * demand, competition and figures are worked out again (recheck, with every
+ * active claim's own figures, R3M2), then the blocker pass runs
+ * (recheckOpenBounties), so "Don't make the trip" and reopen notices go out
+ * before it returns. Call it after a branch availability check is recorded
+ * and after an import changes offers or sales (R3B1). There is no blocker
+ * pass before the re-runs, so a trip the new evidence reopens is not
+ * stopped and reopened in one go. A bounty whose re-run throws is listed in
+ * failed and still gets the blocker pass. options: now (ISO), estimate and
+ * askingLookup (the defaults are estimateFromEvidence and the eBay lookup
+ * cache). Returns { rechecked: [bountyId], checked, bountyIds, stopped,
+ * reopened, heldBack, failed }: stopped as recheckOpenBounties (the
+ * bounties a blocker stops); reopened the bounties that reopened, as
+ * { bountyId, title, noticesSent }; noticesSent counts the notices of that
+ * kind this call sent; heldBack lists open bounties where some claim holders
+ * were told to stop (beyond the units on the shelf, or their own figures
+ * fail), as { bountyId, title, noticesSent }.
  */
 export async function refreshOpenBounties(
   db,
   { barcode = null, retailer = null, now = new Date().toISOString(), estimate = defaultEstimate, askingLookup = defaultAskingLookup } = {},
 ) {
   const { recheck } = rechecker(db, { estimate, askingLookup });
-  const stops = (bountyId) =>
-    db.prepare("SELECT COUNT(*) AS n FROM notices WHERE bounty_id = ? AND kind = 'stop'").get(bountyId).n;
-  // Members hear about what the evidence already shows before the re-runs.
-  const first = recheckOpenBounties(db, { barcode, retailer, now });
-  const before = new Map();
-  for (const bountyId of first.bountyIds) before.set(bountyId, stops(bountyId) - (first.stopped.find((b) => b.bountyId === bountyId)?.noticesSent ?? 0));
-  for (const bountyId of first.bountyIds) await recheck(bountyId, now);
+  const ids = openBountyIds(db, { barcode, retailer, now });
+  const lastNotice = (bountyId) =>
+    db.prepare("SELECT COALESCE(MAX(id), 0) AS n FROM notices WHERE bounty_id = ?").get(bountyId).n;
+  const since = new Map(ids.map((bountyId) => [bountyId, lastNotice(bountyId)]));
+  const failed = [];
+  for (const bountyId of ids) {
+    try {
+      await recheck(bountyId, now);
+    } catch (error) {
+      failed.push({ bountyId, error: error.message });
+    }
+  }
   const after = recheckOpenBounties(db, { barcode, retailer, now });
+  // Notices this call sent (during the re-runs or the blocker pass).
+  const added = (bountyId, kind, reason = null) =>
+    db
+      .prepare(`SELECT COUNT(*) AS n FROM notices WHERE bounty_id = ? AND id > ? AND kind = ?${reason ? " AND reason = ?" : ""}`)
+      .get(bountyId, since.get(bountyId) ?? 0, kind, ...(reason ? [reason] : [])).n;
+  const stoppedIds = new Set(after.stopped.map((b) => b.bountyId));
+  const titles = new Map(
+    after.bountyIds.map((bountyId) => [bountyId, db.prepare("SELECT title FROM bounties WHERE id = ?").get(bountyId)?.title ?? null]),
+  );
   return {
-    rechecked: first.bountyIds,
+    rechecked: ids,
     checked: after.checked,
-    stopped: after.stopped.map((b) => ({ ...b, noticesSent: stops(b.bountyId) - (before.get(b.bountyId) ?? 0) })),
-    reopened: after.reopened,
+    bountyIds: after.bountyIds,
+    stopped: after.stopped.map((b) => ({ ...b, noticesSent: added(b.bountyId, "stop") })),
+    reopened: after.bountyIds
+      .filter((bountyId) => !stoppedIds.has(bountyId) && added(bountyId, "reopen", "reopened") > 0)
+      .map((bountyId) => ({ bountyId, title: titles.get(bountyId), noticesSent: added(bountyId, "reopen", "reopened") })),
+    heldBack: after.bountyIds
+      .filter((bountyId) => !stoppedIds.has(bountyId) && added(bountyId, "stop") > 0)
+      .map((bountyId) => ({ bountyId, title: titles.get(bountyId), noticesSent: added(bountyId, "stop") })),
+    failed,
   };
 }
 
@@ -198,11 +290,11 @@ export function routes(db, options = {}) {
 
   /**
    * The estimate re-run for one member's own trip on a bounty, at the units
-   * they claim with their own journey and thresholds (memberRequest), and
-   * the check of it (memberTripCheck). A failed run fails closed.
+   * they claim with their own journey, thresholds, hourly floor and cash
+   * date (memberRequest), for memberTripCheck. A failed run fails closed.
    */
-  async function memberCheck(bounty, member, { units, journey, qualifies }) {
-    const request = memberRequest(bounty, member, { units, journey, qualifies });
+  async function memberCheck(bounty, member, { units, journey, qualifies, terms = null }) {
+    const request = memberRequest(bounty, member, { units, journey, qualifies, terms });
     let result;
     try {
       if (!request) throw Error("no stored estimate request");
@@ -373,14 +465,21 @@ export function routes(db, options = {}) {
         const member = requireMember(db, input.memberId);
         const units = claimUnits(input.units);
         const journey = journeyInput(input);
+        // The member's own hourly floor and cash date (optional).
+        const terms = memberTermsInput(input, { now });
         const qualifies = input.qualifiesForPromotion;
         if (qualifies !== undefined && qualifies !== null) bool(qualifies, "qualifiesForPromotion");
+        // A price they said they do not qualify for, or a first-order offer
+        // they used here, is refused whatever qualifiesForPromotion says.
+        const said = promotionStanding(db, requireBounty(db, bountyId), member);
+        if (said?.declined) fail(said.refusal, 409);
         const fresh = await recheck(bountyId, now);
         const blockers = tripBlockers(db, fresh, now);
         if (blockers.length) fail(blockers.join(". ") + ".", 409);
         const standing = promotionStanding(db, fresh, member);
         const confirmed = qualifies === true || standing?.confirmed === true;
-        const check = await memberCheck(fresh, member, { units, journey, qualifies: confirmed });
+        const check = await memberCheck(fresh, member, { units, journey, qualifies: confirmed, terms });
+        const shared = sharedDemand(db, fresh, member, now);
         const made = claim(db, {
           bountyId,
           memberId: member.id,
@@ -388,9 +487,10 @@ export function routes(db, options = {}) {
           journey,
           check,
           qualifiesForPromotion: qualifies === true,
+          terms,
           now,
         });
-        const own = memberTripCheck(check, { units, journey });
+        const own = memberTripCheck(check, { units, journey, shared, terms: claimTerms(fresh, terms) });
         const bounty = requireBounty(db, bountyId);
         return reply(201, {
           claim: made,
@@ -408,24 +508,43 @@ export function routes(db, options = {}) {
       "/api/bounties/:id/claim-check",
       async ({ params, body }) => {
         // A member's own figures for a trip before they claim: the estimate
-        // re-run at their units with their journey and thresholds. Nothing
-        // is stored.
+        // re-run at their units with their journey, thresholds, hourly
+        // floor and cash date, beside the units already claimed on the
+        // bounty. Nothing is stored. While the trip is blocked (or nothing is
+        // left under the cap) the check is never ok and leads with the
+        // "Don't make the trip" line.
+        const now = clock();
         const input = body0(body);
         const bountyId = pathId(params.id, "Bounty");
         const member = requireMember(db, input.memberId);
         const units = claimUnits(input.units);
         const journey = journeyInput(input);
+        const terms = memberTermsInput(input, { now });
         const bounty = requireBounty(db, bountyId);
         if (bounty.sample) fail("Sample bounty: illustrative figures only, so there is no trip to check", 409);
-        const view = bountyView(db, bounty, { viewer: { kind: "member", member }, now: clock() });
+        const view = bountyView(db, bounty, { viewer: { kind: "member", member }, now });
         if (view.display.hidden) fail("The source does not permit showing this offer's figures", 409);
         const standing = promotionStanding(db, bounty, member);
+        if (standing?.declined) fail(standing.refusal, 409);
         if (standing && !standing.confirmed)
           fail(`Say whether you qualify for this price ("${standing.condition}") first: the figures depend on it`, 409);
-        const check = memberTripCheck(await memberCheck(bounty, member, { units, journey, qualifies: Boolean(standing?.confirmed) }), {
+        const result = await memberCheck(bounty, member, { units, journey, qualifies: Boolean(standing?.confirmed), terms });
+        const own = memberTripCheck(result, {
           units,
           journey,
+          shared: sharedDemand(db, bounty, member, now),
+          terms: claimTerms(bounty, terms),
         });
+        const blockers = [...view.claimBlockers];
+        let headline = blockers.length ? view.trip.headline : null;
+        if (!blockers.length && view.remaining <= 0) {
+          headline =
+            view.cap === 0
+              ? "Nothing is left to claim: the distribution cap is 0, so the evidence leaves no units to share"
+              : "Nothing is left to claim: the distribution cap for this bounty is fully claimed";
+          blockers.push(headline);
+        }
+        const check = blockers.length ? blockedTripCheck(own, { blockers, headline }) : own;
         return { check, message: memberTripText(check), blockers: view.claimBlockers };
       },
     ],
@@ -433,8 +552,9 @@ export function routes(db, options = {}) {
       "POST",
       "/api/bounties/:id/eligibility",
       ({ params, body }) => {
-        // A member's answer to a promotion question: "qualifies", "not", or
-        // "used" (already used a first-order offer at this retailer).
+        // A member's answer to a promotion question: "qualifies", "not",
+        // "used" (already used a first-order offer at this retailer), or
+        // "undo" (an answer given by mistake: the question is asked again).
         const now = clock();
         const input = body0(body);
         const bountyId = pathId(params.id, "Bounty");
@@ -443,15 +563,18 @@ export function routes(db, options = {}) {
         // Saying they qualify turns an eligibility question into the alert.
         const dispatched = standing.confirmed ? dispatchAlerts(db, bountyId, now, { memberId: member.id }) : null;
         const bounty = requireBounty(db, bountyId);
+        const unlisted = standing.declined && standing.firstOrder ? ", and this bounty is no longer listed for you" : "";
         return {
           eligibility: standing,
           alerted: Boolean(dispatched?.sent.length),
           bounty: bountyView(db, bounty, { viewer: { kind: "member", member }, now }),
           message: standing.confirmed
             ? `Thanks: you said you qualify for "${standing.condition}". The figures are shown on the card${dispatched?.sent.length ? " and the alert is in your inbox" : ""}. You still confirm it when you claim.`
-            : standing.usedHere
-              ? `Thanks: first-order offers at ${bounty.retailer} will not be sent to you again.`
-              : "Thanks: you will not be alerted for this bounty.",
+            : input.answer === "undo"
+              ? "Your answer was removed. Answer the question again when you are ready: nothing is claimed by answering."
+              : standing.usedHere
+                ? `Thanks: first-order offers at ${bounty.retailer} will not be sent to you again${unlisted}.`
+                : `Thanks: you will not be alerted for this bounty${unlisted}.`,
         };
       },
     ],
@@ -475,9 +598,12 @@ export function routes(db, options = {}) {
           unitsBought: input.units,
           now: clock(),
         });
+        const used = done.promotionUsed
+          ? ` You bought at a first-order price, so the first-order offer at ${requireBounty(db, done.bounty_id).retailer} is now recorded as used and its price will not be offered to you again.`
+          : "";
         return {
           claim: done,
-          message: `Marked as bought: ${done.units} unit${done.units === 1 ? "" : "s"}. You own this stock and carry the risk. ${TERMS.verified}`,
+          message: `Marked as bought: ${done.units} unit${done.units === 1 ? "" : "s"}. You own this stock and carry the risk.${used} ${TERMS.verified}`,
         };
       },
     ],

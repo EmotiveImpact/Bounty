@@ -6,10 +6,12 @@ import {
   CashTiming,
   Checked,
   Costs,
+  FARE_UNKNOWN,
   Opportunity,
   Payout,
   Thresholds,
   TierBadge,
+  byMode,
   cashSentence,
   checkedText,
   paymentText,
@@ -92,7 +94,9 @@ type Basket = {
     hourly: number | null;
     unsoldLoss: number;
   };
-  downside: { nothingSells: number; halfSells: number };
+  // halfSellsUnits: units sold in the half-sold case (half of each item's
+  // units, rounded down), so the label matches the figure.
+  downside: { nothingSells: number; halfSells: number; halfSellsUnits?: number };
   timing: BasketTiming;
   reasons: string[];
   recommended: boolean;
@@ -119,7 +123,9 @@ type BasketResponse = {
   baskets: Basket[];
   bestSingle: Basket | null;
   recommended: string | null;
-  excluded: { sku: string; name: string; shop: string; reason: string; rejected?: boolean }[];
+  // rejected: outside the buying thresholds; fareNeeded: waits for a
+  // public transport fare (a blank fare is never counted as free).
+  excluded: { sku: string; name: string; shop: string; reason: string; rejected?: boolean; fareNeeded?: boolean }[];
   searched: number;
   truncated: boolean;
   timing: BasketTiming; // for one unit; each basket carries its own
@@ -195,6 +201,14 @@ const londonToday = () =>
 function thisMonth() {
   const d = new Date();
   return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
+}
+
+/** "October 2026" for "2026-10", as people write a month. */
+const monthFormat = new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
+function monthText(month: string) {
+  const m = /^(\d{4})-(\d{2})$/.exec(month);
+  const ms = m ? Date.UTC(Number(m[1]), Number(m[2]) - 1, 15) : NaN;
+  return Number.isFinite(ms) ? monthFormat.format(new Date(ms)) : "the month chosen";
 }
 
 /** The draft as the API expects it, or a plain-language problem. */
@@ -494,7 +508,7 @@ function BasketPlan({ plan }: { plan: BasketResponse }) {
         <dt>Load limit</dt>
         <dd>
           {c.carry} kg
-          {c.carry !== c.carryEntered ? ` (your ${c.carryEntered} kg, by ${c.transport.toLowerCase()})` : ""}
+          {c.carry !== c.carryEntered ? ` (your ${c.carryEntered} kg, ${byMode(c.transport)})` : ""}
         </dd>
         <dt>Units on one trip</dt>
         <dd>
@@ -532,8 +546,10 @@ function BasketPlan({ plan }: { plan: BasketResponse }) {
       </p>
       {c.fareMissing && (
         <p className="notice warn">
-          No public transport fare is entered in the Planner, so the journey is costed as free and no
-          basket is recommended. Enter your fare (or tick that your travel is free) in the Planner.
+          No public transport fare is entered in the Planner. A blank fare is never counted as free:
+          each item's profit per unit, the basket's contribution and its earnings per hour are{" "}
+          {FARE_UNKNOWN}, so nothing is put in a basket. Enter your return fare (or tick that your
+          travel is free) in the Planner, then recalculate.
         </p>
       )}
       {plan.timing.cash.status === "late" && (
@@ -547,11 +563,20 @@ function BasketPlan({ plan }: { plan: BasketResponse }) {
           Best fit for your profile: {basketTitle(pick)}. This is sample data and still not a buy
           alert.
         </p>
+      ) : c.fareMissing && plan.excluded.some((e) => e.fareNeeded) ? (
+        <p className="warn">
+          Enter your return fare in the Planner to see whether these trips meet your thresholds:{" "}
+          {plan.excluded
+            .filter((e) => e.fareNeeded)
+            .map((e) => e.name)
+            .join(", ")}
+          .
+        </p>
       ) : plan.baskets.length ? (
         <p className="warn">
           No basket meets every condition (positive contribution, your hourly target, your buying
-          thresholds, the trial batch, a fare when travelling by public transport and the cash
-          date), so none is recommended. The closest options are shown with the reasons.
+          thresholds, the trial batch and the cash date), so none is recommended. The closest
+          options are shown with the reasons.
         </p>
       ) : (
         <p className="warn">
@@ -565,7 +590,7 @@ function BasketPlan({ plan }: { plan: BasketResponse }) {
           may exist.
         </p>
       )}
-      <h3>Top baskets</h3>
+      {plan.baskets.length > 0 && <h3>Top baskets</h3>}
       {plan.baskets.map((b, i) => (
         <BasketCard key={b.id} basket={b} rank={i + 1} />
       ))}
@@ -601,12 +626,30 @@ function BasketPlan({ plan }: { plan: BasketResponse }) {
           </ul>
         </>
       )}
-      {plan.excluded.some((e) => !e.rejected) && (
+      {plan.excluded.some((e) => e.fareNeeded) && (
+        <>
+          <h3>Waiting for your public transport fare</h3>
+          <p className="muted">
+            These clear your buying thresholds before travel. With your fare as their share of the
+            journey they may not, so they are not in any basket until you enter it.
+          </p>
+          <ul>
+            {plan.excluded
+              .filter((e) => e.fareNeeded)
+              .map((e) => (
+                <li key={e.sku}>
+                  {e.name} at {e.shop}: {e.reason}.
+                </li>
+              ))}
+          </ul>
+        </>
+      )}
+      {plan.excluded.some((e) => !e.rejected && !e.fareNeeded) && (
         <>
           <h3>Not in any basket</h3>
           <ul>
             {plan.excluded
-              .filter((e) => !e.rejected)
+              .filter((e) => !e.rejected && !e.fareNeeded)
               .map((e) => (
                 <li key={e.sku}>
                   {e.name} at {e.shop}: {e.reason}.
@@ -638,7 +681,7 @@ function BasketCard({ basket: b, rank }: { basket: Basket; rank?: number }) {
       </p>
       <h3>{basketTitle(b)}</h3>
       <p className="muted">
-        One trip to {b.shops.join(" and ")} by {b.journey.mode.toLowerCase()}: {b.journey.miles}{" "}
+        One trip to {b.shops.join(" and ")} {byMode(b.journey.mode)}: {b.journey.miles}{" "}
         miles there and back, {b.journey.minutes} minutes travelling
         {b.journey.extraShops
           ? `, including ${b.journey.extraShops} extra shop${b.journey.extraShops === 1 ? "" : "s"}`
@@ -729,7 +772,11 @@ function BasketCard({ basket: b, rank }: { basket: Basket; rank?: number }) {
           <dd>{e.hourly === null ? "not known" : money(e.hourly) + " an hour"}</dd>
           <dt>Loss if nothing sells</dt>
           <dd>{money(b.downside.nothingSells)}</dd>
-          <dt>If only half sell</dt>
+          <dt>
+            {typeof b.downside.halfSellsUnits === "number"
+              ? `If only ${b.downside.halfSellsUnits} of ${b.units} sell`
+              : "If only half of each item sells"}
+          </dt>
           <dd>{money(b.downside.halfSells)}</dd>
           <dt>Days until the last unit sells</dt>
           <dd>
@@ -788,7 +835,7 @@ function Progress({ summary: s, goals }: { summary: Summary; goals: Goals | null
           <progress className="planner-progress" max={target} value={Math.min(target, Math.max(0, realised))} />
           <p>
             {money(realised)} of {money(target)} {savings ? "household savings" : "realised earnings"}{" "}
-            in {s.month} ({percent(share)} of your target).
+            in {monthText(s.month)} ({percent(share)} of your target).
           </p>
         </>
       ) : (

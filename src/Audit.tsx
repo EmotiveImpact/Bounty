@@ -8,7 +8,13 @@ import "./Research.css";
 // against retailer and actual sold evidence. An item passes only on stored
 // evidence: the offer in the database, the sales confirmed in Research and
 // the estimate built from them. What the operator types is their own
-// reading, compared with that evidence.
+// reading, compared with that evidence. Each item is judged on the offer as
+// it was audited (the server keeps a copy), and a later change to the live
+// offer is shown beside it.
+//
+// A sign-off records that the operator reviewed the result. It does not
+// make the figures proven: members always see the pass count on bounty cards
+// and alerts in the locality.
 
 type SaleKey = { provider: string; sourceId: string };
 // Extra fields a Research estimate can hand over with its draft: the sales
@@ -70,6 +76,11 @@ type Evidence = {
   tierReasons: string[];
   // Required costs and times the Research estimate left blank.
   missingInputs?: string[] | null;
+  // The copy of the offer the item is judged on (null for an item saved
+  // before copies were kept, until the server migrates it).
+  offerCopy?: { price: number; observed: string | null; retailer: string | null; copiedAt: string; migrated: boolean } | null;
+  // How the live offer differs from that copy, or null.
+  offerChange?: { changed: string[]; note: string | null } | null;
 };
 type AuditItem = {
   id: number;
@@ -93,6 +104,9 @@ type AuditItem = {
   updated: string;
   check: StockCheck | null;
   evidence?: Evidence;
+  // Whether the item counts towards the 30, and why not.
+  evidenced?: boolean;
+  evidenceGaps?: string[];
   outcome: { passed: boolean; reasons: string[]; checks: AuditCheck[]; contradictions?: Contradiction[] };
 };
 type SignOff = {
@@ -104,23 +118,44 @@ type SignOff = {
   evidenced: number;
   passed: number;
   note: string | null;
+  // The line members see on cards and alerts, for example "Pilot audit in
+  // Camden signed off on 31 Oct 2026: 12 of 30 items passed."
+  summary?: string;
 };
 type Progress = {
   locality: string;
   target: number;
+  // The fewest passed items a sign-off accepts (an open decision).
+  minPassedToSignOff?: number;
   audited: number;
-  // Items with a recorded offer whose stored evidence could be read (not
-  // sample data). Only these count towards the 30.
+  // Items with a recorded offer, a confirmed exact sale and a branch check
+  // in the locality, whose stored evidence could be read (not sample data).
+  // Only these count towards the 30.
   evidenced: number;
   withoutEvidence: number;
+  withoutEvidenceReasons?: Record<string, number>;
   passed: number;
   failed: number;
   remaining: number;
   complete: boolean;
+  // Why a sign-off would be refused now, or null.
+  signOffBlocked?: string | null;
   signedOff: SignOff | null;
   signOffLapsed: { at: string; passed: number; evidenced: number; reason: string } | null;
   failures: Record<string, number>;
 };
+
+// A date for people, in UK time: "31 Oct 2026".
+const dayFormat = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/London",
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+});
+const day = (iso: string) => (Number.isFinite(Date.parse(iso)) ? dayFormat.format(new Date(Date.parse(iso))) : "an unknown date");
+const memberLine = (locality: string, at: string, passed: number, evidenced: number) =>
+  `Pilot audit in ${locality} signed off on ${day(at)}: ${passed} of ${evidenced} items passed.`;
+const lowerFirst = (s: string) => s.charAt(0).toLowerCase() + s.slice(1);
 
 // Required costs and times the estimate needs (a blank is never zero). The
 // parcel cost is the form's own field.
@@ -258,6 +293,13 @@ function EvidenceSummary({ item }: { item: AuditItem }) {
         {s ? ` · days to sell ${shown(s.daysToSell)}` : ""} · match {shown(ev.match)} · display{" "}
         {ev.permission?.permitted ? "permitted" : "not permitted"} · estimate {ev.tier ?? "not run"}.
       </p>
+      {ev.offerChange?.note && <p className="notice">{ev.offerChange.note}</p>}
+      {ev.offerCopy?.migrated && (
+        <p className="muted">
+          This item was saved before the audit kept its own copy of the offer, so the copy was taken
+          on {dateTime(ev.offerCopy.copiedAt)} from the offer as it stood then.
+        </p>
+      )}
       {ev.missingInputs && ev.missingInputs.length > 0 && (
         <p className="warn">
           Not entered in Research: {listed(ev.missingInputs)}. A blank is never counted as zero, so
@@ -426,6 +468,14 @@ export default function Audit({ draft }: { draft?: AuditHandover | null }) {
         an estimate of Priority 1 or 2. Promotion eligibility and the parcel
         cost come from you. Anything unknown fails.
       </p>
+      <p className="muted">
+        An item counts towards the 30 only when it has a retailer offer from the
+        database, at least one completed sale you confirmed as the exact item and
+        a branch check in the pilot locality, and its evidence is not sample data.
+        Each item is judged on the offer as it was when you saved it, so a later
+        feed import does not change the result; a changed offer is shown beside
+        the item.
+      </p>
       <label>
         Pilot locality
         <input
@@ -465,20 +515,40 @@ export default function Audit({ draft }: { draft?: AuditHandover | null }) {
               : `${plural(progress.remaining, "more item")} with stored evidence needed`}
           </p>
           {progress.withoutEvidence > 0 && (
-            <p className="muted">
-              {plural(progress.withoutEvidence, "recorded item")} {progress.withoutEvidence === 1 ? "has" : "have"} no
-              stored evidence (no retailer offer from the database, an offer that can no longer be read, or
-              sample data), so {progress.withoutEvidence === 1 ? "it does" : "they do"} not count towards the{" "}
-              {progress.target}.
-            </p>
+            <div className="muted">
+              <p>
+                {plural(progress.withoutEvidence, "recorded item")} {progress.withoutEvidence === 1 ? "does" : "do"} not
+                count towards the {progress.target}:
+              </p>
+              <ul className="reasons">
+                {Object.entries(progress.withoutEvidenceReasons ?? {})
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([gap, count]) => (
+                    <li key={gap}>
+                      {gap}: {plural(count, "item")}
+                    </li>
+                  ))}
+              </ul>
+            </div>
           )}
           {progress.signedOff ? (
-            <p className="notice" role="status">
-              Signed off on {dateTime(progress.signedOff.at)}: {progress.signedOff.passed} of{" "}
-              {progress.signedOff.evidenced} items passed. Bounties in {progress.locality} no longer
-              show the pilot warning.
-              {progress.signedOff.note ? ` Your note: ${progress.signedOff.note}` : ""}
-            </p>
+            <div className="notice" role="status">
+              <p>
+                <b>
+                  Signed off on {dateTime(progress.signedOff.at)}: {progress.signedOff.passed} of{" "}
+                  {progress.signedOff.evidenced} items passed.
+                </b>
+                {progress.signedOff.note ? ` Your note: ${progress.signedOff.note}` : ""}
+              </p>
+              <p>
+                Bounty cards and alerts in {progress.locality} now say “
+                {progress.signedOff.summary ??
+                  memberLine(progress.locality, progress.signedOff.at, progress.signedOff.passed, progress.signedOff.evidenced)}
+                ”
+                in place of the caution, so members always see the result. The sign-off records that you
+                reviewed it; it does not make the figures proven.
+              </p>
+            </div>
           ) : progress.complete ? (
             <div className="notice">
               <p>
@@ -495,18 +565,31 @@ export default function Audit({ draft }: { draft?: AuditHandover | null }) {
                   {progress.signOffLapsed.reason}.
                 </p>
               )}
-              <form onSubmit={signOff}>
-                <label className="inline">
-                  <input type="checkbox" checked={accept} onChange={(e) => setAccept(e.target.checked)} />
-                  I have reviewed this audit and accept it: {progress.passed} of {progress.evidenced} items
-                  passed
-                </label>
-                <label>
-                  Note (optional)
-                  <input value={signNote} onChange={(e) => setSignNote(e.target.value)} maxLength={500} />
-                </label>
-                <button disabled={busy || !accept}>Sign off the audit</button>
-              </form>
+              {progress.signOffBlocked ? (
+                <p className="warn">
+                  {progress.signOffBlocked}. How many items must pass before the pilot can be signed off
+                  is still to be agreed.
+                </p>
+              ) : (
+                <form onSubmit={signOff}>
+                  <p className="muted">
+                    Signing off records that you have reviewed this result. It does not mean the figures are
+                    proven: bounty cards and alerts in {progress.locality} will say “
+                    {memberLine(progress.locality, new Date().toISOString(), progress.passed, progress.evidenced)}”
+                    so members always see how many passed.
+                  </p>
+                  <label className="inline">
+                    <input type="checkbox" checked={accept} onChange={(e) => setAccept(e.target.checked)} />
+                    I have reviewed this audit and accept it: {progress.passed} of {progress.evidenced} items
+                    passed
+                  </label>
+                  <label>
+                    Note (optional)
+                    <input value={signNote} onChange={(e) => setSignNote(e.target.value)} maxLength={500} />
+                  </label>
+                  <button disabled={busy || !accept}>Sign off the audit</button>
+                </form>
+              )}
             </div>
           ) : (
             <p className="notice">
@@ -669,6 +752,13 @@ export default function Audit({ draft }: { draft?: AuditHandover | null }) {
                     {item.shipping === null ? "unknown" : money(item.shipping)} · updated{" "}
                     {dateTime(item.updated)}
                   </small>
+                  {item.evidenced !== undefined && (
+                    <p className={item.evidenced ? "muted" : "warn"}>
+                      {item.evidenced
+                        ? `Counts towards the ${progress?.target ?? 30}.`
+                        : `Does not count towards the ${progress?.target ?? 30}: ${(item.evidenceGaps ?? []).map(lowerFirst).join("; ")}.`}
+                    </p>
+                  )}
                   <EvidenceSummary item={item} />
                   {contradictions.length > 0 && (
                     <ul className="warnings">

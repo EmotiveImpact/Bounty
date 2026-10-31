@@ -32,11 +32,17 @@ import {
   salesPerWeek,
   suggestCategory,
   thresholdsFor,
+  QUANTITY_HINT,
+  branchShelf,
+  currentOffer,
+  currentShopPrice,
+  ukTime,
   ukDate,
   validateEstimateRequest,
 } from "./estimate.mjs";
 import { CATEGORY_RULES, OPPORTUNITY_RULES } from "./opportunity.mjs";
 import * as researchRoutes from "./routes-research.mjs";
+import { schema as bountiesSchema } from "./bounties.mjs";
 
 // Evidence tables straight from the contract, so these tests do not depend
 // on the evidence module.
@@ -1631,8 +1637,13 @@ test("a looser category keeps the suggested rules unless a reason is given, and 
 test("Open Prices observations and food quantities suggest Food (R2Q12)", () => {
   assert.equal(suggestCategory({ title: "Celebrations Box", provider: "openprices" }).id, "food");
   assert.match(suggestCategory({ title: "Celebrations Box", provider: "openprices" }).basis, /Open Food Facts/);
-  assert.deepEqual(suggestCategory({ title: "Oat drink", size: "1 l" }), { id: "food", basis: 'The size "1 l" is a food quantity' });
-  assert.equal(suggestCategory({ title: "Celebrations 320g" }).id, "food");
+  // A quantity suggests Food only from a food catalogue (R3P5, R3B8).
+  assert.deepEqual(suggestCategory({ title: "Oat drink", size: "1 l", provider: "hobnight" }), {
+    id: "food",
+    basis: 'Hobnight is a supermarket catalogue and the size "1 l" is a food quantity',
+  });
+  assert.equal(suggestCategory({ title: "Celebrations 320g", provider: "hobnight" }).id, "food");
+  assert.match(suggestCategory({ title: "Celebrations 320g", provider: "hobnight" }).basis, /title gives a food quantity \("320g"\)/);
   assert.equal(suggestCategory({ title: "Galaxy A15 5G phone" }).id, "general");
   assert.equal(suggestCategory({ title: "Tefal Ingenio frying pan 28cm", size: "28cm" }).id, "general");
   // A clothing word still wins over a quantity.
@@ -1647,6 +1658,41 @@ test("Open Prices observations and food quantities suggest Food (R2Q12)", () => 
   const r = estimateFromEvidence(db, request({ offer: { provider: "openprices", sourceId: "90" }, sales: [] }));
   assert.equal(r.category.applied, "food");
   assert.ok(r.category.failures.some((f) => /packaging not checked/.test(f)));
+});
+
+test("a volume or weight alone suggests General with a hint, never Food (R3P5, R3B8)", () => {
+  const general = (offer) => {
+    const s = suggestCategory(offer);
+    assert.equal(s.id, "general", JSON.stringify(offer));
+    return s;
+  };
+  // A kettle, a flask and a shampoo with a volume, from a feed or by hand.
+  const kettle = general({ title: "Travel kettle white TK-5", size: "0.5 l", provider: "awin" });
+  assert.equal(kettle.hint, QUANTITY_HINT);
+  assert.equal(QUANTITY_HINT, "The size gives a quantity: choose Food if this is food");
+  assert.equal(general({ title: "Steel kettle", size: "1.7l", provider: "awin" }).hint, QUANTITY_HINT);
+  assert.equal(general({ title: "Stainless steel flask 500 ml", provider: "awin" }).hint, QUANTITY_HINT);
+  assert.equal(general({ title: "Shampoo 250ml", provider: "manual" }).hint, QUANTITY_HINT);
+  assert.equal(general({ title: "Hex dumbbell", size: "500g" }).hint, QUANTITY_HINT);
+  // No quantity, no hint.
+  assert.equal(general({ title: "Travel kettle white TK-5", size: "compact" }).hint, undefined);
+  // Food words and the food catalogues still suggest Food.
+  assert.equal(suggestCategory({ title: "Manuka honey 500ml", provider: "awin" }).id, "food");
+  assert.equal(suggestCategory({ title: "Shampoo 250ml", provider: "openprices" }).id, "food");
+
+  // The kettle costs as General with no reason and no dropped-checks warning.
+  const db = fixture();
+  db.prepare("UPDATE research SET title = 'Travel kettle white TK-5', size = '0.5 l' WHERE source_id = 'offer-1'").run();
+  db.prepare("UPDATE research SET size = '0.5 l', title = 'Travel kettle TK-5' WHERE kind = ?").run(KIND.SOLD);
+  const r = estimateFromEvidence(db, request());
+  assert.equal(r.offer.suggestedCategory.id, "general");
+  assert.equal(r.offer.suggestedCategory.hint, QUANTITY_HINT);
+  assert.deepEqual([r.category.applied, r.category.warning], ["general", null]);
+  assert.deepEqual(r.category.failures, []);
+  assert.ok(!r.warnings.some((w) => /best-before|food/i.test(w)));
+  // Food is stricter, so choosing it needs no reason.
+  const food = estimateFromEvidence(db, request({ category: "food" }));
+  assert.deepEqual([food.category.applied, food.category.warning], ["food", null]);
 });
 
 test("retailers and merchants named Example are sample data, wherever the file came from (R2M9)", () => {
@@ -1759,4 +1805,244 @@ test("results carry access needs, when the price and stock were checked and the 
   assert.equal(unchecked.access.needs.find((n) => n.id === "limited-stock").detail, "Shelf stock unknown");
   assert.match(unchecked.mainUncertainty, /Branch stock has not been confirmed/);
   assert.equal(estimateFromEvidence(db, request({ sales: [] })).mainUncertainty, "No confirmed completed sale of this exact item yet, so what buyers pay is not known");
+});
+
+// ---------------------------------------------------------------------------
+// A newer Open Prices price at the same shop (R3M3).
+
+const HONEY = "5012345678443";
+function honeyShop({ now = NOW } = {}) {
+  const db = memoryDb(evidenceTables, auditSchema);
+  const add = db.prepare(
+    `INSERT INTO observations(id, title, store, place, city, osm_id, price, day, unit, quantity, barcode)
+ VALUES(?, 'Manuka honey MGO 263+', ?, ?, 'London', ?, ?, ?, ?, '250 g', ?)`,
+  );
+  const today = new Date(Date.parse(now)).toISOString().slice(0, 10);
+  // The chosen observation, then a newer one at the same shop the same day.
+  add.run(990001, "Sainsbury's", "NW1 7DL", null, 1500, daysBefore(1, now), null, HONEY);
+  add.run(990003, " sainsbury's ", "nw1  7dl", null, 1900, today, null, HONEY);
+  // Not this shop, older than the chosen one, priced per kilogram or dated
+  // in the future: none of these is the current price.
+  add.run(990004, "Tesco", "NW1 7DL", null, 2500, today, null, HONEY);
+  add.run(990005, "Sainsbury's", "SE1 9SG", null, 2600, today, null, HONEY);
+  add.run(990000, "Sainsbury's", "NW1 7DL", null, 1000, daysBefore(5, now), null, HONEY);
+  add.run(990006, "Sainsbury's", "NW1 7DL", null, 6000, today, "KILOGRAM", HONEY);
+  add.run(990007, "Sainsbury's", "NW1 7DL", null, 2900, "2026-11-02", null, HONEY);
+  return db;
+}
+
+test("the current shop price is the newest same-shop observation at or after the chosen one", () => {
+  const db = honeyShop();
+  const current = currentShopPrice(db, "990001", { now: NOW });
+  assert.deepEqual(
+    { ...current, offer: undefined },
+    {
+      sourceId: "990003",
+      price: 1900,
+      regularPrice: null,
+      promotion: null,
+      observed: "2026-10-31",
+      newer: true,
+      chosen: { sourceId: "990001", price: 1500, observed: "2026-10-30" },
+      offer: undefined,
+    },
+  );
+  assert.equal(current.offer.provider, "openprices");
+  assert.equal(current.offer.sourceId, "990003");
+  // The newest is its own current price; numbers work as ids too.
+  assert.equal(currentShopPrice(db, 990003, { now: NOW }).newer, false);
+  assert.equal(currentShopPrice(db, "990003", { now: NOW }).price, 1900);
+  // On the same day the later price id is the newer one, never the earlier.
+  db.prepare("UPDATE observations SET day = ? WHERE id = 990001").run("2026-10-31");
+  assert.equal(currentShopPrice(db, "990001", { now: NOW }).sourceId, "990003");
+  db.prepare("INSERT INTO observations(id, title, store, place, price, day, barcode) VALUES(989999, 'Manuka', 'Sainsbury''s', 'NW1 7DL', 1200, '2026-10-31', ?)").run(HONEY);
+  assert.equal(currentShopPrice(db, "990001", { now: NOW }).sourceId, "990003");
+  assert.equal(currentShopPrice(db, "989999", { now: NOW }).sourceId, "990003");
+  // Unknown, per-kilogram or not Open Prices: null.
+  assert.equal(currentShopPrice(db, "123", { now: NOW }), null);
+  assert.equal(currentShopPrice(db, "990006", { now: NOW }), null);
+  assert.equal(currentShopPrice(db, "abc", { now: NOW }), null);
+  assert.equal(currentShopPrice(memoryDb(), "990001", { now: NOW }), null);
+});
+
+test("the same shop is the same OpenStreetMap id, or the same retailer and place", () => {
+  const db = memoryDb(evidenceTables, auditSchema);
+  const add = db.prepare(
+    "INSERT INTO observations(id, title, store, place, osm_id, price, day, barcode) VALUES(?, 'Manuka honey', ?, ?, ?, ?, ?, ?)",
+  );
+  add.run(1, "Sainsbury's", "", "node/42", 1500, daysBefore(2), HONEY);
+  add.run(2, "Sainsbury's Local", "Camden", "node/42", 1700, daysBefore(1), HONEY);
+  add.run(3, "Sainsbury's", "", "node/43", 2500, NOW.slice(0, 10), HONEY);
+  assert.equal(currentShopPrice(db, "1", { now: NOW }).sourceId, "2");
+  // A store name alone, with no place or map id, never identifies the shop.
+  add.run(4, "Lidl", null, null, 900, daysBefore(2), HONEY);
+  add.run(5, "Lidl", null, null, 1400, daysBefore(1), HONEY);
+  assert.equal(currentShopPrice(db, "4", { now: NOW }).newer, false);
+});
+
+test("an estimate costs at the newer same-shop price and says which price it used (R3M3)", () => {
+  const db = honeyShop();
+  const honeySale = (id) =>
+    saleRow(id, { barcode: HONEY, title: "Manuka honey MGO 263+ 250g", size: "250g", model: null, price: 3000 });
+  SALES.forEach((id) => insert(db, honeySale(id)));
+  const req = request({
+    offer: { provider: "openprices", sourceId: "990001" },
+    category: "food",
+    packagingChecked: true,
+    bestBefore: "2027-06-01",
+    offerAttributes: { pack: "1", model: "none" },
+    locality: null,
+  });
+  const r = estimateFromEvidence(db, req);
+  assert.equal(r.offer.sourceId, "990003");
+  assert.deepEqual(r.offer.chosenOffer, { sourceId: "990001", price: 1500, observed: "2026-10-30" });
+  assert.equal(r.unitCost, 1900);
+  assert.equal(r.economics.unitCost, 1900);
+  assert.deepEqual(r.shopPrice, {
+    chosen: { sourceId: "990001", price: 1500, observed: "2026-10-30" },
+    used: { sourceId: "990003", price: 1900, observed: "2026-10-31" },
+    change: "rose",
+  });
+  assert.ok(
+    r.warnings.includes("A newer price at this shop is £19.00 (31 Oct 2026). Figures use £19.00, not the £15.00 you chose (30 Oct 2026)"),
+    r.warnings.join("\n"),
+  );
+  // £30 lower median at £15 clears the thresholds; at £19 it does not.
+  db.prepare("DELETE FROM observations WHERE id = 990003").run();
+  const old = estimateFromEvidence(db, req);
+  assert.equal(old.unitCost, 1500);
+  assert.equal(old.shopPrice, null);
+  assert.ok(old.opportunity.unitProfit > r.opportunity.unitProfit);
+  // The prices panel marks the observation the figures use.
+  assert.equal(r.prices.observed.points.find((p) => p.chosen).sourceId, "990003");
+  // The candidates view uses the same offer.
+  const fresh = honeyShop();
+  const c = candidatesFor(fresh, { provider: "openprices", sourceId: "990001", now: NOW });
+  assert.equal(c.offer.sourceId, "990003");
+  assert.equal(c.shopPrice.change, "rose");
+  // A newer, lower price is the current price too; the same price only
+  // moves the date.
+  fresh.prepare("UPDATE observations SET price = 1300 WHERE id = 990003").run();
+  assert.equal(currentOffer(fresh, "openprices", "990001", NOW).shopPrice.change, "fell");
+  fresh.prepare("UPDATE observations SET price = 1500 WHERE id = 990003").run();
+  const same = estimateFromEvidence(fresh, { ...req, sales: [] });
+  assert.equal(same.shopPrice.change, "same");
+  assert.ok(!same.warnings.some((w) => /newer price/.test(w)));
+  assert.ok(same.assumptions.some((a) => /newer Open Prices observation at this shop \(31 Oct 2026\) gives the same £15\.00/.test(a)));
+  // A record judged as it stood (an audit item) can pin the chosen price.
+  const pinned = estimateFromEvidence(honeyShop(), { ...req, sales: [] }, { pinOffer: true });
+  assert.deepEqual([pinned.offer.sourceId, pinned.unitCost, pinned.shopPrice], ["990001", 1500, null]);
+  // Other offers are never replaced.
+  assert.equal(currentOffer(fixture(), "awin", "offer-1", NOW).shopPrice, null);
+});
+
+// ---------------------------------------------------------------------------
+// The shelf as the bounty card counts it (R3Q6).
+
+function shelfFixture() {
+  const db = fixture();
+  bountiesSchema(db);
+  db.prepare("INSERT INTO members(id, name) VALUES(1, 'Dana'), (2, 'Erin')").run();
+  const bounty = db.prepare(
+    `INSERT INTO bounties(title, barcode, retailer, locality, available_units, sales_per_week, sell_window_weeks, expires_at, sample)
+ VALUES('Tefal pan', ?, ?, ?, 6, 1.6, 2, '2026-11-07T12:00:00.000Z', ?)`,
+  );
+  bounty.run("05012345678900", "Argos", "Leeds", 0); // 1
+  bounty.run("05012345678900", "Argos", "York", 0); // 2: another branch
+  bounty.run("05012345678900", " argos ", "leeds", 1); // 3: a sample
+  return db;
+}
+const minutesBefore = (n) => new Date(Date.parse(NOW) - n * 60000).toISOString();
+function bought(db, bountyId, units, minutesAgo, status = "completed") {
+  db.prepare(
+    "INSERT INTO claims(bounty_id, member_id, units, status, created, expires_at, ended_at) VALUES(?, 1, ?, ?, ?, ?, ?)",
+  ).run(bountyId, units, status, minutesBefore(minutesAgo + 30), minutesBefore(minutesAgo - 60), minutesBefore(minutesAgo));
+}
+function reported(db, unitsSeen, minutesAgo, verified = null) {
+  db.prepare(
+    "INSERT INTO stock_reports(bounty_id, member_id, units_seen, observed_at, verified) VALUES(1, 2, ?, ?, ?)",
+  ).run(unitsSeen, minutesBefore(minutesAgo), verified);
+}
+
+test("Research's shelf count subtracts units members bought through bounties since the check (R3Q6)", () => {
+  const db = shelfFixture();
+  // The check (6 seen) was an hour ago. Bought since: 3 here; not counted:
+  // before the check, another branch, a sample, a claim still active.
+  bought(db, 1, 3, 30);
+  bought(db, 1, 2, 90);
+  bought(db, 2, 4, 20);
+  bought(db, 3, 5, 20);
+  bought(db, 1, 1, 10, "active");
+  const r = estimateFromEvidence(db, request());
+  assert.deepEqual(
+    { ...r.stock.shelf, note: undefined },
+    { units: 3, seen: 6, source: "stock check", at: minutesBefore(60), boughtSince: 3, report: null, note: undefined },
+  );
+  assert.equal(r.stock.shelf.note, "6 units seen in the branch check at 31 Oct 2026, 11:00, less 3 units members have bought through bounties since, leaves about 3");
+  assert.equal(r.stock.confirmed, true);
+  assert.ok(r.warnings.includes("Members have bought 3 units through bounties since the branch check at 31 Oct 2026, 11:00, so about 3 units of the 6 seen are left"));
+  assert.equal(r.access.needs.find((n) => n.id === "limited-stock").detail, "3 on the shelf");
+  assert.deepEqual(failing(r), []);
+
+  // More units planned than are left: said plainly, and the main uncertainty.
+  const four = estimateFromEvidence(db, request({ units: 3, cashNeededDays: 30 }));
+  bought(db, 1, 1, 5);
+  const more = estimateFromEvidence(db, request({ units: 3, cashNeededDays: 30 }));
+  assert.equal(more.stock.shelf.units, 2);
+  assert.ok(more.warnings.some((w) => w.startsWith("Only about 2 units likely left on the shelf, fewer than the 3 units planned")));
+  assert.equal(more.mainUncertainty, "Only about 2 units likely left on the shelf for the 3 units planned");
+  assert.ok(!four.warnings.some((w) => /^Only about/.test(w)));
+  // The gate fails too: a trip for more units than are left is never a go.
+  assert.ok(failing(more).includes("shelf-units"));
+  assert.equal(more.alert.eligible, false);
+  assert.match(more.alert.reasons.join(" "), /Only about 2 likely left on the shelf, fewer than the 3 planned/);
+  assert.ok(!failing(four).includes("shelf-units"));
+  assert.ok(!failing(estimateFromEvidence(db, request({ units: 2, cashNeededDays: 30 }))).includes("shelf-units"));
+
+  // Every unit seen has been bought: stock is no longer confirmed.
+  bought(db, 1, 2, 1);
+  const gone = estimateFromEvidence(db, request());
+  assert.equal(gone.stock.shelf.units, 0);
+  assert.equal(gone.stock.confirmed, false);
+  // availability stays what the check found: a bounty reads out_of_stock as
+  // a check that found none.
+  assert.equal(gone.stock.availability, "in_stock");
+  assert.equal(gone.stock.reason, "Members have bought 6 units through bounties since the branch check at 31 Oct 2026, 11:00, which saw 6, so the shelf may be empty: record a new check");
+  assert.ok(gone.warnings.includes(gone.stock.reason));
+  assert.equal(gone.alert.eligible, false);
+  assert.deepEqual(failing(gone), ["local-stock"]);
+  assert.ok(gone.opportunity.reasons.includes("Branch stock not confirmed"));
+  assert.notEqual(gone.opportunity.tier, "Priority 1");
+  assert.match(gone.mainUncertainty, /^The shelf may be empty/);
+  // Without the bounty tables nothing changes.
+  assert.equal(estimateFromEvidence(fixture(), request()).stock.shelf.boughtSince, 0);
+  assert.equal(branchShelf(fixture(), { barcode: BARCODE, retailer: "Argos", locality: "Leeds", check: null, now: NOW }).units, null);
+});
+
+test("a newer stock report sets the shelf count, as on the bounty card; inaccurate ones never do (R3Q6)", () => {
+  const db = shelfFixture();
+  reported(db, 9, 40, "inaccurate");
+  assert.equal(estimateFromEvidence(db, request()).stock.shelf.source, "stock check");
+  reported(db, 2, 30);
+  const r = estimateFromEvidence(db, request());
+  assert.deepEqual([r.stock.shelf.units, r.stock.shelf.source, r.stock.shelf.at], [2, "stock report", minutesBefore(30)]);
+  assert.deepEqual(r.stock.shelf.report, { at: minutesBefore(30), unitsSeen: 2, verified: null });
+  assert.ok(r.warnings.includes("A member reported 2 on the shelf at 31 Oct 2026, 11:30, after the latest branch check (not verified yet): the shelf count uses it, as the bounty does"));
+  assert.equal(r.stock.confirmed, true);
+  // Bought after the report counts against the report.
+  bought(db, 1, 1, 20);
+  assert.equal(estimateFromEvidence(db, request()).stock.shelf.units, 1);
+  // A newer report of none stops the stock confirmation.
+  reported(db, 0, 10);
+  const none = estimateFromEvidence(db, request());
+  assert.equal(none.stock.confirmed, false);
+  assert.equal(none.stock.reason, "A member reported none on the shelf at 31 Oct 2026, 11:50, after the latest branch check (not verified yet): record a new check");
+  assert.equal(none.alert.eligible, false);
+  // A newer branch check wins again.
+  recordCheck(db, { barcode: BARCODE, retailer: "Argos", locality: "Leeds", method: "phone", inStock: true, unitsSeen: 5, checkedAt: minutesBefore(5) }, { now: NOW });
+  const again = estimateFromEvidence(db, request());
+  assert.deepEqual([again.stock.confirmed, again.stock.shelf.units, again.stock.shelf.source], [true, 5, "stock check"]);
+  assert.deepEqual(again.stock.shelf.report, { at: minutesBefore(10), unitsSeen: 0, verified: null });
+  assert.equal(ukTime("2026-10-31T21:22:00Z"), "31 Oct 2026, 21:22");
+  assert.equal(ukTime("2026-07-01T20:22:00Z"), "1 Jul 2026, 21:22");
 });

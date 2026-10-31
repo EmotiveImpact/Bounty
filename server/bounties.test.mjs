@@ -1040,7 +1040,9 @@ test("before the locality's 30-item validation is complete, cards and alerts say
     "Pilot audit in Camden: 27 of 30 items passed, not yet signed off. Treat these figures with care.",
   );
   const signed = validationFrom("Camden", { ...progress, signedOff: { at: at(-60), passed: 27, evidenced: 30 } });
-  assert.equal(signed.warning, null);
+  // After a sign-off the line shows the result, with no caution (R3B4).
+  assert.equal(signed.warning, "Pilot audit in Camden signed off on 2 Nov 2026: 27 of 30 items passed.");
+  assert.equal(signed.caution, false);
   assert.equal(signed.signedOffAt, at(-60));
   assert.match(validationFrom("Camden", { ...progress, signedOff: undefined }).warning, /not yet signed off/);
   assert.match(validationFrom("Camden", { audited: 30, passed: 30, complete: true, signedOff: { at: T0 } }).warning, /^Pilot not validated in Camden: 0 of 30/);
@@ -1206,7 +1208,8 @@ test("routes: a bounty is created from a server-run estimate and validated", asy
     const b = res.body.bounty;
     assert.equal(b.cap, 3);
     assert.equal(b.alert.eligible, true);
-    assert.equal(b.opportunity.tier, "Priority 2");
+    // Worked out again with the pressure now (none yet) and 1 listing (R3P4).
+    assert.equal(b.opportunity.tier, "Priority 1");
     assert.equal(b.sponsored, false);
     assert.match(res.body.message, /you buy and own the stock and carry the risk/);
     const dup = await api.call("POST", "/api/bounties", { ...bountyInput(), estimate: request });
@@ -1386,7 +1389,7 @@ test("routes: honest creation messages, asking-price lookups, re-checks and memb
     assert.equal(rechecked.status, 200);
     assert.equal(calls.length, before + 1);
     assert.equal(rechecked.body.bounty.cap, 4);
-    assert.match(rechecked.body.message, /^Evidence re-checked \(Priority 2\) with a cap of 4 units/);
+    assert.match(rechecked.body.message, /^Evidence re-checked \(Priority 1\) with a cap of 4 units/);
     const b = rechecked.body.bounty;
 
     // Member thresholds: tighten only.
@@ -1423,7 +1426,8 @@ test("routes: honest creation messages, asking-price lookups, re-checks and memb
     const n = calls.length;
     const verified = await api.call("POST", `/api/reports/${neg.body.reportId}/verify`, { accurate: true });
     assert.equal(verified.status, 200);
-    assert.equal(calls.length, n + 1);
+    // The operator's figures and Ann's own claim, worked out again (R3M2).
+    assert.equal(calls.length, n + 2);
 
     // A sample bounty's report never promises points.
     const sample = (await api.call("POST", "/api/bounties", bountyInput({ sample: true, competingListings: 1, competingSellers: 1 }))).body.bounty;
@@ -1720,8 +1724,10 @@ test("tier reasons follow the card's current pressure and competition (R2Q8)", (
   const b = liveBounty(db, {}, fakeEstimate({ opportunity: { reasons: ["Resale competition high or unknown", "Sourcing pressure high or unknown"] } }));
   const view = bountyView(db, b, { now: T0 });
   assert.equal(view.pressure.sourcing.ratio, 0);
-  assert.match(view.opportunity.reasons[1], /^Sourcing pressure is 0 now, within the 0.5 Priority 1 allows/);
-  assert.doesNotMatch(view.opportunity.reasons.join(" "), /high or unknown/);
+  // Both now within the Priority 1 limits, so the tier is worked out again (R3P4).
+  assert.equal(view.opportunity.tier, "Priority 1");
+  assert.match(view.opportunity.reasons[0], /^Strong sold evidence, confirmed stock and low pressure now: about 0\.5 weeks of resale supply listed and sourcing pressure 0$/);
+  assert.doesNotMatch(view.opportunity.reasons.join(" "), /high or unknown|re-check works it out/);
 });
 
 test("promotion answers: a first-order offer already used at a retailer is never alerted there again (P2)", async () => {

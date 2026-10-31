@@ -322,3 +322,37 @@ label.inline {
 .alert-list li > small.muted {
   display: block;
 }
+/* Round three. Muted text inside the red and green notices is darker than
+   the shared muted colour, so it keeps at least 4.5:1 contrast there
+   (#4f6158: 5.7:1 on #fbeae6, 5.6:1 on #e3f0e4, 5.1:1 on #f8dcd6). */
+.stop-notices .muted,
+.own-figures .muted,
+.stop .muted,
+.eligibility.declined .muted {
+  color: #4f6158;
+}
+.own-figures .checks {
+  margin: 4px 0;
+}
+/* "This bounty is not for you", with the small undo link. */
+.eligibility.declined {
+  border-left-color: #5f7268;
+}
+.link-button {
+  justify-self: start;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: #1d4939;
+  font: inherit;
+  font-size: 13px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.link-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.alert-list li.declined > b {
+  font-weight: 600;
+}

@@ -952,6 +952,13 @@ test("migration: tables from the previous schema get AUTOINCREMENT ids and keep 
   // New rows continue after the highest id kept; deleted ones are never handed out again.
   const next = addEntry(db, a, { type: "expense", amount: 300, occurred: "2026-10-13" }, clock);
   assert.ok(next > Math.max(...before.entries.map((e) => e.id)));
+  // Ids deleted before the upgrade (doomed, doomedProof) are not handed out.
+  const keptEntry = Math.max(...before.entries.map((e) => e.id));
+  const keptProof = Math.max(...before.proofs.map((p) => p.id));
+  assert.equal(next, keptEntry + 1001, "new entry ids start 1,000 past the highest kept");
+  assert.ok(next > doomed);
+  assert.equal(db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'ledger_proofs'").get().seq, keptProof + 1000);
+  assert.ok(keptProof + 1000 >= doomedProof);
   db.prepare("DELETE FROM ledger_entries WHERE id = ?").run(next);
   assert.ok(addEntry(db, a, { type: "expense", amount: 300, occurred: "2026-10-13" }, clock) > next);
   const p1 = recordProof(db, { tripId: b, entryId: null, label: "new", sha256: "6".repeat(64), bytes: 1, mediaType: "image/png" }, clock).proof.id;

@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   ACCESS_NEEDS,
   CAR_BOOT_KG,
+  FARE_NEEDED,
+  FARE_UNKNOWN,
   HAND_CARRY_KG,
   REASONS,
   defaults,
@@ -24,7 +26,7 @@ import { OPPORTUNITY_RULES, demandUnits } from "./opportunity.mjs";
 
 const NOW = "2026-10-31T12:00:00Z"; // a Saturday
 const bySku = Object.fromEntries(offers.map((o) => [o.sku, o]));
-const { knit, baby, pot, jacket } = bySku;
+const { knit, baby, pot, jacket, bottle } = bySku;
 const run = (offer, over = {}, opts = {}) => plan(offer, { ...defaults, ...over }, { now: NOW, ...opts });
 const check = (trip, id) => trip.alert.checks.find((c) => c.id === id);
 const goals = (over = {}) => ({ ...DEFAULT_GOALS, dispatchDays: [1, 2, 3, 4, 5], ...over });
@@ -55,7 +57,8 @@ const strong = Object.freeze({
 const roomy = Object.freeze({ ...knit, sku: "roomy", provenItem: true, salesPerWeek: 50, competingListings: 0 });
 
 test("fixtures are labelled sample data with categories and modelled demand", () => {
-  assert.equal(offers.length, 4);
+  assert.equal(offers.length, 5);
+  assert.deepEqual(offers.map((o) => o.sku), ["knit", "baby", "pot", "jacket", "bottle"]);
   for (const o of offers) {
     assert.equal(o.sample, true);
     assert.ok(o.sales.length > 0);
@@ -67,6 +70,11 @@ test("fixtures are labelled sample data with categories and modelled demand", ()
   }
   assert.equal(jacket.category, "clothing");
   assert.equal(jacket.size, "Age 5 to 6");
+  // The second item inside every threshold: £6 to £15, under 1 kg, demand
+  // for at least two units in the sell window.
+  assert.equal(bottle.category, "general");
+  assert.ok(bottle.buy >= 600 && bottle.buy <= 1500 && bottle.weight < 1);
+  assert.ok(offerDemand(bottle) >= 2);
 });
 
 test("clothing is costed with at least a 15% returns allowance and passes its category checks", () => {
@@ -259,7 +267,6 @@ test("the profile defaults to no public transport fare entered", () => {
 test("public transport with no fare entered is never called fitting", () => {
   const missing = run(jacket, { transport: "Public transport", fare: null });
   assert.equal(missing.fareMissing, true);
-  assert.equal(missing.economics.costs.travel, 0);
   assert.equal(missing.reason, REASONS.FARE);
   assert.equal(missing.fits, false);
   // A fare of 0 that was entered (free travel) is accepted.
@@ -271,10 +278,116 @@ test("public transport with no fare entered is never called fitting", () => {
   // The route accepts null as "not entered" but not other non-numbers.
   assert.equal(readProfile({ ...defaults, fare: null }).fare, null);
   assert.throws(() => readProfile({ ...defaults, fare: "" }), HttpError);
-  // Drivers comparing with public transport are told the fare is missing.
+  // Drivers comparing with public transport are told the figures are not known.
   const c = run(jacket, { transport: "Car", fare: null }).compare;
-  assert.ok(c.assumptions.some((a) => a.includes("No public transport fare is entered")));
+  assert.ok(c.assumptions.some((a) => a.includes("No public transport fare is entered") && a.includes(FARE_UNKNOWN)));
+  assert.ok(!c.assumptions.some((a) => /free/.test(a) && !/tick/.test(a)), "never says the journey shows as free");
   assert.equal(c.alternative.reason === REASONS.FITS, false);
+});
+
+test("a blank public transport fare is never zero: every figure that needs the journey is unknown", () => {
+  const bus = { transport: "Public transport", fare: null };
+  const t = run(jacket, bus);
+  const free = run(jacket, { transport: "Public transport", fare: 0 });
+  // The units and the parts that do not depend on the fare are kept.
+  assert.equal(t.units, free.units);
+  assert.equal(t.economics.proceeds, free.economics.proceeds);
+  assert.equal(t.economics.costs.stock, free.economics.costs.stock);
+  assert.equal(t.economics.activeMinutes, free.economics.activeMinutes);
+  assert.equal(t.journey.minutes, free.journey.minutes);
+  // Everything built on the journey cost is null, never the free-journey figure.
+  for (const k of ["contribution", "unitContribution", "cashRequired", "journeyPerUnit", "hourly", "unsoldLoss", "breakEvenSale", "totalCosts"])
+    assert.equal(t.economics[k], null, k);
+  assert.equal(t.economics.costs.travel, null);
+  assert.equal(t.economics.journeyKnown, false);
+  assert.equal(t.journey.cost, null);
+  assert.equal(t.downside.nothingSells, null);
+  assert.equal(t.downside.halfSells, null);
+  // The threshold verdict waits for the fare: not ok, no profit per unit.
+  assert.equal(t.thresholds.ok, false);
+  assert.equal(t.thresholds.fareNeeded, true);
+  assert.equal(t.thresholds.unitProfit, null);
+  assert.equal(t.thresholds.returnOnCost, null);
+  assert.deepEqual(t.thresholds.failures, [FARE_NEEDED]);
+  assert.equal(t.opportunity.unitProfit, null, "never a profit of 0");
+  assert.equal(t.opportunity.returnOnCost, null);
+  // The alert checks that need the journey say so in the same words.
+  const detail = (id) => check(t, id).detail;
+  assert.equal(check(t, "positive-contribution").ok, false);
+  assert.match(detail("positive-contribution"), /not known until you enter your fare/);
+  assert.match(detail("hourly-floor"), /not known until you enter your fare/);
+  assert.match(detail("journey"), /not known until you enter your fare/);
+  assert.match(detail("inputs-entered"), /public transport fare/);
+  // An offer that fails even with a free journey fails with "at most" figures.
+  const jumper = run(knit, bus);
+  assert.equal(jumper.thresholds.fareNeeded, false);
+  assert.deepEqual(jumper.thresholds.failures, ["Profit per unit of at most £2.42 is below £5.00, even before your public transport fare"]);
+  // Its reason is a definite failure (here the hourly target, checked first), never the fare.
+  assert.equal(jumper.reason, REASONS.HOURLY);
+  // A hard filter is never told to wait for the fare.
+  assert.equal(run(baby, bus).thresholds.failures[0], "Purchase price outside £5 to £50 per unit");
+  assert.ok(!run(baby, bus).thresholds.failures.includes(FARE_NEEDED));
+  assert.equal(run(baby, bus).thresholds.fareNeeded, false);
+  // Even a hard-filtered offer whose best case clears the profit floor is not told to wait.
+  const dear = run({ ...jacket, sku: "dear", buy: 6000, sales: [20000] }, bus);
+  assert.deepEqual(dear.thresholds.failures, ["Purchase price outside £5 to £50 per unit"]);
+  assert.equal(dear.thresholds.fareNeeded, false);
+  // Entering a fare brings every figure back; ticking free counts as £0.
+  const fare = run(jacket, { transport: "Public transport", fare: 450 });
+  assert.equal(fare.economics.costs.travel, 450);
+  assert.ok(Number.isFinite(fare.economics.contribution) && Number.isFinite(fare.thresholds.unitProfit));
+  assert.equal(free.thresholds.ok, true);
+  assert.equal(free.economics.costs.travel, 0);
+  // Walking, cycling and driving are unaffected by a blank fare.
+  for (const transport of ["Walk", "Bicycle", "Car", "Van"]) {
+    const other = run(jacket, { transport, fare: null });
+    assert.equal(other.fareMissing, false, transport);
+    assert.ok(Number.isFinite(other.economics.contribution), transport);
+    assert.ok(Number.isFinite(other.thresholds.unitProfit), transport);
+    assert.equal(other.thresholds.fareNeeded, false, transport);
+  }
+});
+
+test("with a blank fare nothing is shortlisted and each offer says why", () => {
+  const r = planTrips({ ...defaults, transport: "Public transport", fare: null }, { now: NOW });
+  assert.deepEqual(r.trips, []);
+  const rows = Object.fromEntries(r.rejected.map((x) => [x.sku, x]));
+  assert.deepEqual(Object.keys(rows).sort(), ["baby", "bottle", "jacket", "knit", "pot"]);
+  for (const sku of ["jacket", "bottle"]) {
+    assert.deepEqual(rows[sku].reasons, [FARE_NEEDED], sku);
+    assert.equal(rows[sku].fareNeeded, true, sku);
+    assert.equal(rows[sku].unitProfit, null, sku);
+    assert.equal(rows[sku].tier, "Review", "nothing was measured to reject");
+  }
+  assert.equal(rows.knit.fareNeeded, false);
+  assert.equal(rows.knit.tier, "Reject", "it fails even before its fare");
+  assert.deepEqual(rows.pot.reasons, ["Unit weighs 2 kg or more"]);
+  // The comparison by car still lists what fits by car, and says the
+  // current side waits for the fare.
+  assert.equal(r.drive.currentFareMissing, true);
+  assert.equal(r.drive.alternativeFareMissing, false);
+  assert.deepEqual(r.drive.extra.map((x) => x.sku).sort(), ["bottle", "jacket"]);
+  for (const x of r.drive.extra) assert.ok(Number.isFinite(x.contribution), x.sku);
+  // Ticking free (fare 0) shortlists the same two again.
+  const free = planTrips({ ...defaults, transport: "Public transport", fare: 0 }, { now: NOW });
+  assert.deepEqual(free.trips.map((t) => t.sku).sort(), ["bottle", "jacket"]);
+  // A driver with no fare: the public transport side waits for the fare,
+  // so those trips are not called lost by public transport.
+  const car = planTrips({ ...defaults, transport: "Car", fare: null }, { now: NOW });
+  assert.equal(car.drive.alternativeFareMissing, true);
+  assert.deepEqual(car.drive.lost, []);
+  assert.deepEqual(car.drive.fareNeeded.map((x) => x.sku).sort(), ["bottle", "jacket"]);
+  const cmp = car.trips[0].compare;
+  assert.equal(cmp.alternative.contribution, null);
+  assert.equal(cmp.alternative.hourly, null);
+  assert.equal(cmp.alternative.travelCost, null);
+  assert.equal(cmp.difference.contribution, null, "not comparable");
+  assert.equal(cmp.difference.cashRequired, null);
+  // A walker's plan is the same with or without a fare.
+  assert.deepEqual(
+    planTrips({ ...defaults, fare: null }, { now: NOW }).trips.map((t) => [t.sku, t.economics.contribution]),
+    planTrips({ ...defaults, fare: 450 }, { now: NOW }).trips.map((t) => [t.sku, t.economics.contribution]),
+  );
 });
 
 test("the journey is shared across units, not charged per unit", () => {
@@ -512,9 +625,11 @@ test("the comparison shows mileage, parking, total load and time saved", () => {
 test("the shortlist leaves out every offer failing a buying threshold", () => {
   const { trips, rejected, sample } = planTrips({ ...defaults }, { now: NOW });
   assert.equal(sample, true);
-  // The jumper makes £2.42 a unit, under the £5 minimum, so only the jacket
-  // is shortlisted.
-  assert.deepEqual(trips.map((t) => t.sku), ["jacket"]);
+  // The jumper makes £2.42 a unit, under the £5 minimum, so only the bottle
+  // (£5.72, 71.5%) and the jacket (£7.13, 71.3%) are shortlisted, the
+  // bottle first for its earnings per hour.
+  assert.deepEqual(trips.map((t) => t.sku), ["bottle", "jacket"]);
+  assert.deepEqual(trips.map((t) => t.thresholds.unitProfit), [572, 713]);
   assert.ok(trips.every((t) => t.thresholds.ok));
   assert.deepEqual(rejected.map((r) => r.sku).sort(), ["baby", "knit", "pot"]);
   const reasons = Object.fromEntries(rejected.map((r) => [r.sku, r.reasons]));
@@ -531,15 +646,17 @@ test("the shortlist leaves out every offer failing a buying threshold", () => {
       assert.equal(t.thresholds.ok, true, t.sku + " " + JSON.stringify(over));
   // A member's stricter price floor moves the jumper out for its price too.
   const strict = planTrips({ ...defaults, rules: { minUnitPrice: 700 } }, { now: NOW });
-  assert.deepEqual(strict.trips.map((t) => t.sku), ["jacket"]);
+  assert.deepEqual(strict.trips.map((t) => t.sku), ["bottle", "jacket"]);
   assert.ok(strict.rejected.find((r) => r.sku === "knit").reasons.includes("Purchase price outside £7 to £50 per unit"));
-  // Stricter profit or return rules move the jacket out as well (£7.13, 71.3%).
+  // Stricter profit or return rules move the jacket and the bottle out as well.
   const profit = planTrips({ ...defaults, rules: { minUnitProfit: 800 } }, { now: NOW });
   assert.deepEqual(profit.trips, []);
   assert.deepEqual(profit.rejected.find((r) => r.sku === "jacket").reasons, ["Profit per unit of £7.13 is below £8.00"]);
+  assert.deepEqual(profit.rejected.find((r) => r.sku === "bottle").reasons, ["Profit per unit of £5.72 is below £8.00"]);
   const ret = planTrips({ ...defaults, rules: { minReturn: 0.75 } }, { now: NOW });
   assert.deepEqual(ret.trips, []);
   assert.deepEqual(ret.rejected.find((r) => r.sku === "jacket").reasons, ["Return of 71.3% is below 75% of the purchase price"]);
+  assert.deepEqual(ret.rejected.find((r) => r.sku === "bottle").reasons, ["Return of 71.5% is below 75% of the purchase price"]);
   // An offer where no unit fits cannot show its profit, so it is not shortlisted either.
   const none = planTrips({ ...defaults, storage: 0 }, { now: NOW });
   assert.deepEqual(none.trips, []);
@@ -550,26 +667,29 @@ test("the shortlist leaves out every offer failing a buying threshold", () => {
 });
 
 test("the drive summary lists opportunities that only fit by car", () => {
-  // At £20 an hour the jacket is too slow on foot but fits by car.
+  // At £20 an hour the jacket and the bottle are too slow on foot but fit by car.
   const r = planTrips({ ...defaults, target: 2000 }, { now: NOW });
   assert.equal(r.drive.current, "Walk");
   assert.equal(r.drive.alternative, "Car");
-  assert.deepEqual(r.drive.extra.map((t) => t.sku), ["jacket"]);
-  const extra = r.drive.extra[0];
-  assert.equal(extra.reason, REASONS.FITS);
-  assert.equal(extra.units, 3);
+  assert.deepEqual(r.drive.extra.map((t) => t.sku), ["jacket", "bottle"]);
+  for (const extra of r.drive.extra) {
+    assert.equal(extra.reason, REASONS.FITS);
+    assert.equal(extra.units, 3);
+  }
   assert.equal(r.drive.lost.length, 0);
+  assert.equal(r.drive.currentFareMissing, false);
+  assert.equal(r.drive.alternativeFareMissing, false);
   // Offers outside the price or weight limits are never offered as extra opportunities.
   const hard = ["baby", "pot"];
   assert.ok(r.drive.extra.every((t) => !hard.includes(t.sku)));
   // At the default target the jacket already fits on foot, so nothing is extra.
   assert.deepEqual(planTrips({ ...defaults }, { now: NOW }).drive.extra, []);
-  // With a 0.3 kg carry limit no jacket fits on foot, so it is not
-  // shortlisted, but by car it fits every threshold and is an extra.
+  // With a 0.3 kg carry limit no jacket or bottle fits on foot, so neither
+  // is shortlisted, but by car both fit every threshold and are extras.
   const light = planTrips({ ...defaults, carry: 0.3 }, { now: NOW });
   assert.ok(light.rejected.some((x) => x.sku === "jacket"));
-  assert.deepEqual(light.drive.extra.map((t) => t.sku), ["jacket"]);
-  assert.equal(light.drive.extra[0].reason, REASONS.FITS);
+  assert.deepEqual(light.drive.extra.map((t) => t.sku), ["jacket", "bottle"]);
+  assert.ok(light.drive.extra.every((t) => t.reason === REASONS.FITS));
 });
 
 test("access needs are labelled for each offer and this member", () => {
@@ -664,9 +784,10 @@ test("several units are paid out only once the sales rate can sell them all", ()
 test("trips rank fitting first, then by earnings per hour", () => {
   const { trips: shortlisted, rules } = planTrips({ ...defaults, target: 0 }, { now: NOW });
   assert.deepEqual(rules.effective.minUnitPrice, OPPORTUNITY_RULES.minUnitPrice);
-  assert.equal(shortlisted[0].sku, "jacket");
-  // Only the jacket clears the thresholds among the fixtures, so rank test
-  // offers that all clear them: one that fits, a faster one that does not.
+  // Both fixtures inside the thresholds fit; the bottle earns more an hour.
+  assert.deepEqual(shortlisted.map((t) => t.sku), ["bottle", "jacket"]);
+  assert.ok(shortlisted[0].economics.hourly > shortlisted[1].economics.hourly);
+  // Rank test offers too: one that fits, a faster one that does not.
   const trips = [
     run({ ...strong, sku: "slow", handlingMinutes: 60 }, { target: 0 }),
     run({ ...strong, sku: "quick" }, { target: 0 }),

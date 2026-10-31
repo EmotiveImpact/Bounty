@@ -507,8 +507,10 @@ const timeOf = (value) =>
 /**
  * Resale competition for an offer: Active asking price rows with the same
  * valid barcode as the offer (exact matches included) that were seen within
- * maxAgeDays of now (observed is when the asking price was seen). Never
- * touches the sold sample.
+ * maxAgeDays x 24 hours of now, by elapsed time (observed is when the asking
+ * price was seen; a date without a time is midnight UTC). Exactly 7 x 24
+ * hours old still counts; a millisecond more does not. A lookup counts as
+ * current by the same rule. Never touches the sold sample.
  *
  * options: { now (Date or ISO, default the current time), maxAgeDays
  * (default ASKING_MAX_AGE_DAYS), lookup ({ fetched } of the latest
@@ -541,13 +543,12 @@ export function competition(offer, rows, { now = new Date(), maxAgeDays = ASKING
           r.price > 0,
       )
     : [];
-  // Whole days since a time, as offerFreshness counts them; null when either
-  // time is unusable. A time in the future is never current.
-  const age = (t) => (Number.isFinite(t) && Number.isFinite(at) ? Math.floor((at - t) / DAY) : null);
-  const current = (t) => {
-    const days = age(t);
-    return days !== null && days >= 0 && days <= windowDays;
-  };
+  // Current means seen at most windowDays x 24 hours before now, measured as
+  // elapsed time: "the last 7 days" is 7 days, never 7 days and 23 hours (a
+  // count of whole days would round 7.99 days down to 7). A time in the
+  // future, or an unusable time, is never current.
+  const current = (t) =>
+    Number.isFinite(t) && Number.isFinite(at) && t <= at && at - t <= windowDays * DAY;
   const listings = all.filter((r) => current(timeOf(r.observed)));
   const lookupAt = timeOf(lookup?.fetched ?? lookup);
   const seen = [...all.map((r) => timeOf(r.observed)), lookupAt].filter(
