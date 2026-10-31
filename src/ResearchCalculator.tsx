@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  barcodeText,
   dateTime,
   hours,
   loadMemberRules,
@@ -1169,7 +1170,7 @@ export function ResearchCalculator({
                   {o.promotion && <span className="badge">Promotion</span>}
                 </span>
                 <em>
-                  Barcode {o.barcode} · Source date {dateTime(o.observed)} ·{" "}
+                  Barcode {barcodeText(o.barcode)} · Source date {dateTime(o.observed)} ·{" "}
                   {o.stockNote}
                 </em>
               </span>
@@ -2166,7 +2167,7 @@ function OfferSummary({ offer }: { offer: Offer }) {
         <dt>Imported</dt>
         <dd>{dateTime(offer.imported)}</dd>
         <dt>Barcode</dt>
-        <dd>{offer.barcode}</dd>
+        <dd>{barcodeText(offer.barcode)}</dd>
         <dt>Variant</dt>
         <dd>
           {attributesText(offer, offer.attributeSource)}

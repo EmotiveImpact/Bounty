@@ -210,3 +210,11 @@ export function saveMemberRules(rules: MemberRules) {
     /* storage unavailable: the thresholds last for this visit only */
   }
 }
+
+// The barcode as it is printed and entered (EAN-13, or EAN-8), not the
+// 14-digit form the server stores for matching. A UPC-A code keeps its
+// leading zero, as EAN-13 prints it.
+export const barcodeText = (code: string | null | undefined): string => {
+  const text = typeof code === "string" ? code : "";
+  return /^0{6}\d{8}$/.test(text) ? text.slice(6) : /^0\d{13}$/.test(text) ? text.slice(1) : text;
+};

@@ -182,8 +182,34 @@ label.inline {
 .alert-list .stop {
   margin: 6px 0;
 }
+/* "Your claim stands": why a holder among the first claims may still go.
+   The same green as a reopen notice (#1d4939 on #e3f0e4). */
+.go-note {
+  display: block;
+  border-left: 4px solid #1d4939;
+  background: #e3f0e4;
+  color: #1d4939;
+  padding: 8px 12px;
+  margin: 8px 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.alert-list .go-note {
+  margin: 6px 0;
+}
+/* The pilot audit line while it is a caution (not validated, or not yet
+   signed off). */
 .prevalidation {
   border-left: 4px solid #8a6d10;
+}
+/* After a sign-off that stands, the same line is a plain result: neutral,
+   neither a caution nor a go (#19372f on #eceee8). */
+.validation-result {
+  border-left: 4px solid #8d9a92;
+  background: #eceee8;
+  padding: 8px 12px;
+  margin: 8px 0;
+  font-size: 14px;
 }
 .claim-form {
   display: grid;

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { api, dateTime, loadMemberRules, money, toPence, type MemberRules, type RuleKey } from "./api";
+import { api, barcodeText, dateTime, loadMemberRules, money, toPence, type MemberRules, type RuleKey } from "./api";
 import "./Bounties.css";
 
 // Shapes returned by server/routes-bounties.mjs. Money is integer pence.
@@ -124,8 +124,9 @@ type TripCheck = {
   ownReasons?: string[];
 };
 type Check = { id: string; ok: boolean; detail: string };
-// kind "stop" ("Don't make the trip") or "reopen"; superseded marks a stop
-// notice a later reopen replaced.
+// kind "stop" ("Don't make the trip") or "reopen" (reason "claim-stands"
+// when a holder's claim stands); superseded marks a notice a newer one
+// replaced, since only the latest notice on a bounty is current.
 type Notice = {
   id: number;
   bountyId: number;
@@ -135,12 +136,42 @@ type Notice = {
   created: string;
   superseded?: boolean;
 };
+// server/bounties.mjs tripState. "full" is go only for members holding a
+// claim: "Fully claimed", "Nothing to share: cap 0", or "Your claim stands"
+// (with note) for a holder among the first claims when more is claimed than
+// the shelf holds. "blocked" covers any other blocker, including "More
+// claimed than on the shelf", "Your figures no longer pass", "Competition
+// check out of date" and "Sales evidence out of date". A blocker's own label
+// replaces the state's.
 type TripState = {
   state: "go" | "full" | "paused" | "out-of-stock" | "stock-unconfirmed" | "blocked" | "sample" | "expired" | "withdrawn";
   go: boolean;
   label: string;
   headline: string | null;
+  // Why the trip cannot be made: the first blocker's id (for example
+  // "price-rose", "competition-lapsed" or "demand-aged"), "over-claimed",
+  // "own-figures", "sample", "expired" or "withdrawn". Null when it can.
+  reason?: TripReason | null;
+  // Why this holder's claim stands ("Your claim stands" only).
+  note?: string | null;
 };
+type TripReason =
+  | "shelf-empty"
+  | "out-of-stock"
+  | "stock-lapsed"
+  | "price-rose"
+  | "offer-gone"
+  | "offer-stale"
+  | "sales-aged"
+  | "competition-lapsed"
+  | "demand-aged"
+  | "over-claimed"
+  | "own-figures"
+  | "sample"
+  | "expired"
+  | "withdrawn"
+  // Any other blocker id (ineligible, display, cap and so on).
+  | (string & {});
 type Eligibility = {
   condition: string;
   firstOrder: boolean;
@@ -256,9 +287,30 @@ type Bounty = {
       note: string | null;
     };
   };
+  // The latest stock report that was not marked inaccurate.
   shelf: { state: "unknown" | "seen" | "none"; paused: boolean; at: string | null; unitsSeen: number | null };
+  // Units on the shelf now: the newest of the figures' stock check, a newer
+  // branch check and the latest stock report, less units members bought
+  // since (server/bounties.mjs shelfUnitsNow). source "stock check" is any
+  // branch check; units is null when that count recorded none.
+  shelfUnits?: {
+    units: number | null;
+    source: "stock check" | "stock report" | "sample" | null;
+    at: string | null;
+    boughtSince: number;
+  } | null;
   display: { permitted: boolean; basis: string; hidden: boolean; label: string | null };
-  validation: { locality: string; complete: boolean; audited: number; target: number; warning: string | null } | null;
+  // warning is one line: after a pilot audit sign-off that stands, its plain
+  // result with caution false; otherwise the caution (caution true).
+  validation: {
+    locality: string;
+    complete: boolean;
+    audited: number;
+    target: number;
+    warning: string | null;
+    caution?: boolean;
+    signedOff?: boolean;
+  } | null;
   promotion: {
     condition: string;
     price: number | null;
@@ -384,13 +436,22 @@ const sentences = (parts: (string | null | undefined | false)[]) =>
     .filter((p): p is string => typeof p === "string" && p.trim() !== "")
     .map(sentence)
     .join(" ");
-// The barcode as it is printed and entered (EAN-13, or EAN-8), not the
-// 14-digit form the server stores for matching.
-const barcodeText = (code: string) =>
-  /^0{6}\d{8}$/.test(code) ? code.slice(6) : /^0\d{13}$/.test(code) ? code.slice(1) : code;
 // "Price seen 31 Oct 2026, 20:00. Stock checked ..." from the server's labels.
 const checkedText = (checked: { priceLabel: string | null; stockLabel: string | null } | null | undefined) =>
   checked ? sentences([checked.priceLabel, checked.stockLabel]) : "";
+/**
+ * Whether a trip reads as go (the green style). Only when the server says go
+ * and the state is one that sends someone: "go", or "full" for a member
+ * holding a claim ("Your claim stands" carries its note). Every other state,
+ * and any state or label this page does not know, reads as a stop.
+ */
+function tripGo(trip: TripState | null | undefined, holding = false) {
+  if (!trip || trip.go !== true) return false;
+  if (trip.state === "go") return true;
+  return trip.state === "full" && (holding || Boolean(trip.note));
+}
+// The evidence behind a shelf count in words, as the server names it.
+const countWord = (source: string | null | undefined) => (source === "stock report" ? "stock report" : "branch check");
 // Today in the viewer's time zone, as a date input value.
 function todayInput() {
   const d = new Date();
@@ -968,9 +1029,10 @@ function ReportForm({ bounty, memberId, onDone }: { bounty: Bounty; memberId: nu
 }
 
 /**
- * "Don't make the trip" and reopen notices. A stop notice a later reopen
- * replaced is kept for the record but folded away, so the list never leads
- * with a stop that no longer applies.
+ * "Don't make the trip" and reopen notices. Any newer notice on a bounty
+ * replaces the earlier ones (the server marks them superseded): they are
+ * kept for the record but folded away, so the list only leads with the
+ * notice that applies now.
  */
 function NoticeList({ notices }: { notices: Notice[] }) {
   if (!notices.length) return null;
@@ -990,7 +1052,9 @@ function NoticeList({ notices }: { notices: Notice[] }) {
       )}
       {old > 0 && (
         <small className="muted">
-          {old === 1 ? "1 earlier notice no longer applies" : `${old} earlier notices no longer apply`}: the bounty reopened after it.
+          {old === 1
+            ? "1 earlier notice no longer applies: a newer notice replaced it."
+            : `${old} earlier notices no longer apply: a newer notice replaced them.`}
         </small>
       )}
     </>
@@ -1515,16 +1579,48 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+/** The latest stock report on its own (a sample bounty, or no count at all). */
+function reportText(shelf: Bounty["shelf"]) {
+  if (shelf.state === "unknown") return "No stock reports yet";
+  if (shelf.state === "seen") return `${plural(shelf.unitsSeen ?? 0, "unit")} seen at ${when(shelf.at)}`;
+  return `None on the shelf at ${when(shelf.at)}: claims and alerts paused`;
+}
+
+/**
+ * The shelf line. A live bounty uses the server's count (shelfUnits): the
+ * newest branch check or stock report, less units members bought since, so
+ * the line never shows more on the shelf than that count. It says which
+ * evidence the count is, and when it is newer than the latest stock report.
+ */
 function shelfText(bounty: Bounty) {
-  if (bounty.shelf.state === "unknown") return "No stock reports yet";
-  if (bounty.shelf.state === "seen") return `${plural(bounty.shelf.unitsSeen ?? 0, "unit")} seen at ${when(bounty.shelf.at)}`;
-  return `None on the shelf at ${when(bounty.shelf.at)}: claims and alerts paused`;
+  const shelf = bounty.shelf;
+  const count = bounty.shelfUnits;
+  if (bounty.sample || !count || count.source === "sample" || !count.at) return reportText(shelf);
+  const word = countWord(count.source);
+  const at = when(count.at);
+  const by = word === "stock report" ? `in the stock report at ${at}` : `at the branch check at ${at}`;
+  const bought = count.boughtSince > 0 ? plural(count.boughtSince, "unit") : null;
+  const reportAt = shelf.state !== "unknown" && shelf.at ? Date.parse(shelf.at) : NaN;
+  // A report wins a tie with a check, so the same time is the report itself.
+  const isReport = Number.isFinite(reportAt) && reportAt === Date.parse(count.at);
+  let line: string;
+  if (count.units === null) line = `Units not counted ${by}`;
+  else if (bought)
+    line = `${count.units === 0 ? "None" : plural(count.units, "unit")} likely left: members have bought ${bought} since the ${word} at ${at}`;
+  else line = count.units === 0 ? `None on the shelf ${by}` : `${plural(count.units, "unit")} seen ${by}`;
+  if (isReport) return shelf.paused ? `${line}: claims and alerts paused` : line;
+  if (!Number.isFinite(reportAt)) return line;
+  // The count is newer than the latest stock report. A report of none still
+  // pauses claims and alerts until someone reports stock again.
+  return shelf.paused
+    ? `${line}. The latest stock report found none at ${when(shelf.at)}, so claims and alerts stay paused until someone reports stock again`
+    : `${line}, newer than the latest stock report (${when(shelf.at)})`;
 }
 
 function unitsOnShelf(s: Bounty["pressure"]["sourcing"]) {
   if (s.availableUnits === null) return "units on the shelf not known (no count recorded)";
-  const basis = s.unitsSource === "sample" ? "sample figure" : `${s.unitsSource ?? "evidence"} at ${when(s.unitsAt)}`;
-  const bought = s.boughtSince ? `, less ${plural(s.boughtSince, "unit")} bought since` : "";
+  const basis = s.unitsSource === "sample" ? "sample figure" : `${s.unitsSource ? countWord(s.unitsSource) : "evidence"} at ${when(s.unitsAt)}`;
+  const bought = s.boughtSince ? `, less ${plural(s.boughtSince, "unit")} members have bought since` : "";
   return s.availableUnits === 0
     ? `none on the shelf (${basis}${bought})`
     : `${plural(s.availableUnits, "unit")} on the shelf (${basis}${bought})`;
@@ -1560,6 +1656,10 @@ function BountyCard({
   const o = bounty.opportunity;
   const isOperator = acting === "operator";
   const trip = bounty.trip;
+  // Green only for a state that sends someone (tripGo): a "full" trip is go
+  // for this viewer only while they hold a claim.
+  const go = tripGo(trip, Boolean(bounty.viewer?.activeClaim));
+  const validation = bounty.validation;
   return (
     <article className={"bounty" + (bounty.status === "open" ? "" : " closed")}>
       <div className="bounty-head">
@@ -1568,7 +1668,7 @@ function BountyCard({
           {bounty.sample && <span className="badge sample">Sample</span>}
           {bounty.placement && <span className="badge sponsored">{bounty.placement}</span>}
           {!bounty.sample && tierBadge(o?.tier ?? null)}
-          <span className={"badge " + (trip.state === "go" ? "ok" : "warn")}>{trip.label}</span>
+          <span className={"badge " + (go ? "ok" : "warn")}>{trip.label}</span>
           {!bounty.sample && bounty.status === "open" && (
             <span className={"badge " + (bounty.alert.canSend ? "ok" : "warn")}>
               {bounty.alert.canSend ? "Alerts can be sent" : "No alerts"}
@@ -1582,12 +1682,21 @@ function BountyCard({
         </div>
       ) : null}
       <p className="terms">{bounty.sample ? bounty.terms.sample : bounty.terms.buyAndResell}</p>
-      {!trip.go && !bounty.sample && trip.headline && bounty.status === "open" && (
+      {!go && !bounty.sample && trip.headline && bounty.status === "open" && (
         <p className="stop" role="status">
           {trip.headline}
         </p>
       )}
-      {bounty.validation?.warning && <p className="notice prevalidation">{bounty.validation.warning}</p>}
+      {go && trip.note && bounty.status === "open" && (
+        <p className="go-note" role="status">
+          {sentence(trip.note)}
+        </p>
+      )}
+      {validation?.warning && (
+        // After a sign-off that stands (caution false) the line is a plain
+        // result; otherwise, or when the server does not say, a caution.
+        <p className={validation.caution === false ? "validation-result" : "notice prevalidation"}>{validation.warning}</p>
+      )}
       {bounty.display.label && <p className="notice">{bounty.display.label}</p>}
       {bounty.promotion?.note && <p className="notice">{bounty.promotion.note}</p>}
       {!bounty.sample && <CategoryLine category={bounty.category} />}
@@ -1602,7 +1711,7 @@ function BountyCard({
         <Fact label="Bought by members">{plural(bounty.completedUnits, "unit")}</Fact>
         <Fact label="Remaining under the cap">
           {plural(bounty.remaining, "unit")}
-          {!trip.go && bounty.status === "open" && bounty.remaining > 0 ? ", none claimable while " + trip.label.toLowerCase() : ""}
+          {!go && bounty.status === "open" && bounty.remaining > 0 ? ", none claimable while " + trip.label.toLowerCase() : ""}
         </Fact>
         <Fact label="Shelf">{shelfText(bounty)}</Fact>
         {bounty.checked && !bounty.sample && checkedText(bounty.checked) && (
@@ -1988,9 +2097,10 @@ function AlertInbox({ memberId, refresh, onChanged }: { memberId: number; refres
                 <b>{a.title}</b> {a.retailer ? `at ${a.retailer}, ` : "in "}
                 {a.locality}
                 {a.sponsored && <span className="badge sponsored">Sponsored by {a.sponsor}</span>}
-                <span className={"badge " + (a.trip.state === "go" ? "ok" : "warn")}>{a.trip.label}</span>
+                <span className={"badge " + (tripGo(a.trip) ? "ok" : "warn")}>{a.trip.label}</span>
                 {a.kind === "question" && <span className="badge warn">Question about the price</span>}
-                {a.trip.headline && !a.trip.go && <span className="stop">{a.trip.headline}</span>}
+                {a.trip.headline && !tripGo(a.trip) && <span className="stop">{a.trip.headline}</span>}
+                {tripGo(a.trip) && a.trip.note && <span className="go-note">{sentence(a.trip.note)}</span>}
                 {a.eligibility && !a.eligibility.confirmed && !a.eligibility.declined ? (
                   <EligibilityQuestion bountyId={a.bountyId} memberId={memberId} eligibility={a.eligibility} onDone={answered} />
                 ) : (

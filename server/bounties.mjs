@@ -3222,8 +3222,15 @@ export function claim(db, { bountyId, memberId, units, journey, check, qualifies
       fail(`units must be a whole number from 1 to ${max}: a claim is at most a trial batch until a verified trade exists`);
     const count = units;
     const member = requireMember(db, memberId);
-    const blockers = tripBlockers(db, bounty, now);
+    // The evidence read again, as the card reads it: the cap worked out now
+    // (capNow) and the units left on the shelf after the claims ahead
+    // (claimSeats), so a claim never goes beyond what the card offers.
+    const live = liveEvidence(db, bounty, now);
+    const blockers = tripBlockers(db, bounty, now, live);
     if (blockers.length) fail(blockers.join(". ") + ".", 409);
+    const liveCap = capNow(db, bounty, now, live);
+    applyCap(bounty, liveCap);
+    const seats = claimSeats(db, bounty, now, live, liveCap);
     const trip = journeyInput({ journeyCost: journey?.cost, journeyMinutes: journey?.minutes });
     const release = releaseFor(db, bounty, member, now);
     if (!release.open)
@@ -3256,13 +3263,21 @@ export function claim(db, { bountyId, memberId, units, journey, check, qualifies
         409,
       );
     const held = claimedUnits(db, bounty.id, now);
-    const remaining = Math.max(0, bounty.cap - held.committed);
+    const underCap = Math.max(0, bounty.cap - held.committed);
+    // Never more than the units left on the shelf after the claims ahead
+    // (R3M5), the same rule as bountyView's remaining.
+    const onShelf = Math.max(0, seats.room - held.active);
+    const remaining = Math.min(underCap, onShelf);
     if (count > remaining)
       fail(
-        remaining === 0
-          ? capFullMessage(bounty) +
-              " A claim reserves attention, not retailer stock, so the cap limits how many people are sent."
-          : `Only ${remaining} unit${remaining === 1 ? " remains" : "s remain"} under this bounty's distribution cap.`,
+        onShelf < underCap
+          ? remaining === 0
+            ? `Nothing is left to claim: ${seats.phrase}, and members have already claimed ${plural(held.active, "unit")}.`
+            : `Only ${plural(remaining, "unit")} can be claimed: ${seats.phrase}, and members have already claimed ${plural(held.active, "unit")}.`
+          : remaining === 0
+            ? capFullMessage(bounty) +
+                " A claim reserves attention, not retailer stock, so the cap limits how many people are sent."
+            : `Only ${remaining} unit${remaining === 1 ? " remains" : "s remain"} under this bounty's distribution cap.`,
         409,
       );
     const own = memberTripCheck(check, {

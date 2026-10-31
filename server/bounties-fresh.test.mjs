@@ -573,3 +573,26 @@ test("the branch-check route works each open bounty out again, not only its bloc
     await api.close();
   }
 });
+
+test("a claim made before anyone reads the card still stops at the units left on the shelf (R3M5)", () => {
+  const db = memoryDb(schema, auditSchema);
+  const b = liveBounty(db);
+  assert.equal(b.cap, 3);
+  const ann = diamond(db, "Ann");
+  const bob = diamond(db, "Bob");
+  claim(db, { bountyId: b.id, memberId: ann.id, units: 1, now: at(1) });
+  // A branch check sees 2, and nobody reads the bounty before Bob claims, so
+  // the stored cap is still 3. The claim uses the cap and shelf worked out now.
+  check(db, { unitsSeen: 2 });
+  assert.equal(requireBounty(db, b.id).cap, 3);
+  assert.throws(
+    () => claim(db, { bountyId: b.id, memberId: bob.id, units: 2, now: at(11) }),
+    (e) => e.status === 409 && /Only 1 unit remains|Only 1 unit can be claimed/.test(e.message),
+  );
+  const made = claim(db, { bountyId: b.id, memberId: bob.id, units: 1, now: at(12) });
+  assert.equal(made.units, 1);
+  // The card agrees: nothing is left, and both claims stand.
+  const op = viewAs(db, b.id, null, at(13));
+  assert.equal(op.remaining, 0);
+  assert.notEqual(op.trip.label, "More claimed than on the shelf");
+});

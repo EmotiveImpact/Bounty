@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { api, dateTime, initialProfile, money, toPence } from "./api";
+import { api, barcodeText, dateTime, initialProfile, money, toPence } from "./api";
 import type { AuditDraft, StockCheck } from "./ResearchCalculator";
 import "./Research.css";
 
@@ -748,7 +748,7 @@ export default function Audit({ draft }: { draft?: AuditHandover | null }) {
                   </span>
                   <b>{item.title}</b>
                   <small>
-                    {item.barcode} · {item.retailer} · parcel{" "}
+                    {barcodeText(item.barcode)} · {item.retailer} · parcel{" "}
                     {item.shipping === null ? "unknown" : money(item.shipping)} · updated{" "}
                     {dateTime(item.updated)}
                   </small>
