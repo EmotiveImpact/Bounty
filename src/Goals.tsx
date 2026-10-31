@@ -1,12 +1,19 @@
 import React, { useEffect, useState } from "react";
-import { api, hours, loadProfile, money, percent, toPence } from "./api";
+import { api, hours, loadMemberRules, loadProfile, money, percent, toPence } from "./api";
 import {
+  AccessBadges,
+  AccessNeed,
+  CashTiming,
+  Checked,
   Costs,
   Opportunity,
+  Payout,
   Thresholds,
   TierBadge,
-  loadRules,
+  checkedText,
+  paymentText,
   planProfile,
+  plural,
   pounds,
   profileProblem,
 } from "./Planner";
@@ -33,14 +40,7 @@ type Draft = {
   deliveryDays: string;
   payoutDelayDays: string;
 };
-type Payout = {
-  sold: string | null;
-  dispatch: string | null;
-  delivered: string | null;
-  date: string | null;
-  note: string;
-};
-type Timing = { status: "on time" | "late" | "unknown"; daysLate: number | null; note: string };
+type Timing = CashTiming;
 type BasketItem = {
   sku: string;
   name: string;
@@ -53,8 +53,12 @@ type BasketItem = {
   contribution: number;
   unitProfit: number | null;
   returnOnCost: number | null;
+  returnsRate: number;
   thresholds: Thresholds;
   opportunity: Opportunity;
+  accessNeeds: AccessNeed[];
+  checked: Checked;
+  mainUncertainty: string;
 };
 type Basket = {
   id: string;
@@ -62,6 +66,7 @@ type Basket = {
   shops: string[];
   journey: { mode: string; miles: number; cost: number; minutes: number; extraShops: number };
   units: number;
+  storage: { used: number; limit: number };
   weightKg: number;
   economics: {
     units: number;
@@ -76,7 +81,7 @@ type Basket = {
     unsoldLoss: number;
   };
   downside: { nothingSells: number; halfSells: number };
-  timing: { payout: Payout; cash: Timing };
+  timing: { payout: Payout; cash: Timing; payoutDays: number | null };
   reasons: string[];
   recommended: boolean;
 };
@@ -85,36 +90,62 @@ type BasketResponse = {
   constraints: {
     budget: number;
     carry: number;
+    carryEntered: number;
     storage: number;
     profileStorage: number;
     goalsStorage: number;
     quantity: number;
     unitCap: number;
+    trialUnits: number;
+    sellWindowWeeks: number;
     hourlyTarget: number;
     transport: string;
+    fareMissing: boolean;
     area: string;
   };
   approximation: string;
   baskets: Basket[];
   bestSingle: Basket | null;
   recommended: string | null;
-  excluded: { sku: string; name: string; shop: string; reason: string }[];
+  excluded: { sku: string; name: string; shop: string; reason: string; rejected?: boolean }[];
   searched: number;
   truncated: boolean;
-  timing: { payout: Payout; cash: Timing };
+  timing: { payout: Payout; cash: Timing; payoutDays: number | null };
   rules: { ignored: { key: string; label: string }[] };
 };
+// The ledger summary (server/ledger.mjs summary). Potential proceeds count
+// only live-evidence predictions; potentialProceedsLeftOut says how many
+// open trips were left out, sample trips among them.
 type Summary = {
   month: string;
   realisedEarnings: number;
   householdSavings: number;
+  householdSavingsGross?: number;
+  householdTripCosts?: number;
   pendingPayouts: number;
   potentialProceeds: number;
+  potentialProceedsLeftOut?: { sample?: number; basisUnknown?: number; nothingBought?: number };
   cashTiedUp?: number;
   unsoldUnits?: number;
   realisedMinutes?: number;
   realisedHourly?: number | null;
 };
+type Target = {
+  id: number;
+  name: string;
+  amount: number;
+  deadline: string | null;
+  start: string;
+  payouts: number;
+  costs: number;
+  received: number;
+  shared: number;
+  counted: number;
+  remaining: number;
+  status: "reached" | "in progress" | "missed";
+  daysLeft: number | null;
+};
+type Targets = { targets: Target[]; basis: string };
 
 // Monday first, as a UK week is usually shown. Values are JavaScript weekday
 // numbers (0 is Sunday).
@@ -209,7 +240,7 @@ export default function Goals() {
       setBasketError("Your Planner profile needs fixing first: " + problem);
       return;
     }
-    api<BasketResponse>("baskets", { profile: planProfile(profile, loadRules()) })
+    api<BasketResponse>("baskets", { profile: planProfile(profile, loadMemberRules()) })
       .then((r) => {
         if (!active) return;
         setBaskets(r);
@@ -383,8 +414,10 @@ export default function Goals() {
         )}
       </section>
 
+      <NamedGoals version={version} />
+
       <section>
-        <small>02 / BASKET PLAN</small>
+        <small>03 / BASKET PLAN</small>
         <h2>One shopping trip, one cash limit</h2>
         <p>
           Everything in a basket is bought on one shopping trip: one shared journey and one cash
@@ -403,7 +436,7 @@ export default function Goals() {
       </section>
 
       <section>
-        <small>03 / THIS MONTH</small>
+        <small>04 / THIS MONTH</small>
         <h2>Progress this month</h2>
         <label className="planner-month">
           Month
@@ -433,15 +466,23 @@ function BasketPlan({ plan }: { plan: BasketResponse }) {
       <dl className="planner-figures">
         <dt>Cash limit for the whole basket</dt>
         <dd>{money(c.budget)}</dd>
-        <dt>Carry limit</dt>
-        <dd>{c.carry} kg</dd>
+        <dt>Load limit</dt>
+        <dd>
+          {c.carry} kg
+          {c.carry !== c.carryEntered ? ` (your ${c.carryEntered} kg, by ${c.transport.toLowerCase()})` : ""}
+        </dd>
         <dt>Units on one trip</dt>
         <dd>
           up to {c.unitCap} (maximum units {c.quantity}, storage {c.storage})
         </dd>
-        <dt>Storage used</dt>
+        <dt>Each item, first purchase</dt>
         <dd>
-          {c.storage} units, the smaller of Planner {c.profileStorage} and goals {c.goalsStorage}
+          at most {plural(c.trialUnits, "unit")} (trial batch), and no more than its sales rate
+          supports in {plural(c.sellWindowWeeks, "week")}
+        </dd>
+        <dt>Storage limit</dt>
+        <dd>
+          {plural(c.storage, "unit")}, the smaller of Planner {c.profileStorage} and goals {c.goalsStorage}
         </dd>
         <dt>Transport</dt>
         <dd>{c.transport}</dd>
@@ -458,8 +499,15 @@ function BasketPlan({ plan }: { plan: BasketResponse }) {
       )}
       <p>
         <strong>Cash back:</strong> {plan.timing.payout.note}{" "}
-        <span className={plan.timing.cash.status === "late" ? "warn" : ""}>{plan.timing.cash.note}</span>
+        <span className={plan.timing.cash.status === "late" ? "warn" : ""}>{plan.timing.cash.note}</span>{" "}
+        Time until payment: {paymentText(plan.timing.payoutDays, plan.timing.payout.date)}.
       </p>
+      {c.fareMissing && (
+        <p className="notice warn">
+          No public transport fare is entered in the Planner, so the journey is costed as free and no
+          basket is recommended. Enter your fare (or tick that your travel is free) in the Planner.
+        </p>
+      )}
       {plan.timing.cash.status === "late" && (
         <p className="notice warn">
           Warning: the payout is expected after the date you need the cash, so no basket is
@@ -474,8 +522,8 @@ function BasketPlan({ plan }: { plan: BasketResponse }) {
       ) : plan.baskets.length ? (
         <p className="warn">
           No basket meets every condition (positive contribution, your hourly target, your buying
-          thresholds and the cash date), so none is recommended. The closest options are shown with
-          the reasons.
+          thresholds, the trial batch, a fare when travelling by public transport and the cash
+          date), so none is recommended. The closest options are shown with the reasons.
         </p>
       ) : (
         <p className="warn">No basket fits your cash, carrying, storage and unit limits.</p>
@@ -503,15 +551,31 @@ function BasketPlan({ plan }: { plan: BasketResponse }) {
           )}
         </>
       )}
-      {plan.excluded.length > 0 && (
+      {plan.excluded.some((e) => e.rejected) && (
+        <>
+          <h3>Rejected: outside the price or weight limits</h3>
+          <ul>
+            {plan.excluded
+              .filter((e) => e.rejected)
+              .map((e) => (
+                <li key={e.sku}>
+                  {e.name} at {e.shop}: {e.reason}.
+                </li>
+              ))}
+          </ul>
+        </>
+      )}
+      {plan.excluded.some((e) => !e.rejected) && (
         <>
           <h3>Not in any basket</h3>
           <ul>
-            {plan.excluded.map((e) => (
-              <li key={e.sku}>
-                {e.name} at {e.shop}: {e.reason}.
-              </li>
-            ))}
+            {plan.excluded
+              .filter((e) => !e.rejected)
+              .map((e) => (
+                <li key={e.sku}>
+                  {e.name} at {e.shop}: {e.reason}.
+                </li>
+              ))}
           </ul>
         </>
       )}
@@ -534,7 +598,7 @@ function BasketCard({ basket: b, rank }: { basket: Basket; rank?: number }) {
         ) : (
           <span className="badge warn">Not recommended</span>
         )}
-        {late && <span className="badge warn">Payout late by {b.timing.cash.daysLate} days</span>}
+        {late && <span className="badge warn">Payout late by {plural(b.timing.cash.daysLate ?? 0, "day")}</span>}
       </p>
       <h3>{basketTitle(b)}</h3>
       <p className="muted">
@@ -543,7 +607,8 @@ function BasketCard({ basket: b, rank }: { basket: Basket; rank?: number }) {
         {b.journey.extraShops
           ? `, including ${b.journey.extraShops} extra shop${b.journey.extraShops === 1 ? "" : "s"}`
           : ""}
-        . {b.units} units, {b.weightKg} kg.
+        . {plural(b.units, "unit")}, {b.weightKg} kg. Storage used: {b.storage.used} of{" "}
+        {plural(b.storage.limit, "unit")}.
       </p>
       <div className="scroll">
         <table>
@@ -574,6 +639,13 @@ function BasketCard({ basket: b, rank }: { basket: Basket; rank?: number }) {
                 <td>
                   {it.name}
                   <span className="muted"> at {it.shop}</span>
+                  <span className="planner-badges">
+                    <AccessBadges needs={it.accessNeeds} />
+                  </span>
+                  <span className="muted planner-cell-note">
+                    Price checked {checkedText(it.checked.price)}, stock checked{" "}
+                    {checkedText(it.checked.stock)}.
+                  </span>
                 </td>
                 <td className="num">{it.units}</td>
                 <td className="num">{money(it.cashRequired)}</td>
@@ -588,6 +660,9 @@ function BasketCard({ basket: b, rank }: { basket: Basket; rank?: number }) {
           </tbody>
         </table>
       </div>
+      <p className="muted">
+        Main uncertainty: {[...new Set(b.items.map((it) => it.mainUncertainty))].join("; ")}.
+      </p>
       <div className="grid2">
         <dl className="planner-figures">
           <dt>Cash required before payout</dt>
@@ -620,11 +695,13 @@ function BasketCard({ basket: b, rank }: { basket: Basket; rank?: number }) {
           <dd>{money(b.downside.nothingSells)}</dd>
           <dt>If only half sell</dt>
           <dd>{money(b.downside.halfSells)}</dd>
+          <dt>Time until payment</dt>
+          <dd>{paymentText(b.timing.payoutDays, b.timing.payout.date)}</dd>
           <dt>Cash back</dt>
           <dd className={late ? "warn" : ""}>
             {b.timing.payout.date ?? "cannot be scheduled"}
             {late
-              ? `, ${b.timing.cash.daysLate} days late`
+              ? `, ${plural(b.timing.cash.daysLate ?? 0, "day")} late`
               : b.timing.cash.status === "on time"
                 ? ", on time"
                 : b.timing.payout.date
@@ -651,6 +728,14 @@ function Progress({ summary: s, goals }: { summary: Summary; goals: Goals | null
   // savings for a household goal. Pending payouts and potential proceeds never do.
   const realised = savings ? s.householdSavings : s.realisedEarnings;
   const share = target > 0 ? Math.max(0, realised) / target : 0;
+  const leftOut = s.potentialProceedsLeftOut;
+  const leftOutText = [
+    leftOut?.sample ? plural(leftOut.sample, "sample trip") + " (illustrative figures)" : "",
+    leftOut?.basisUnknown ? plural(leftOut.basisUnknown, "open trip") + " with no record of live evidence" : "",
+    leftOut?.nothingBought ? plural(leftOut.nothingBought, "open trip") + " with nothing bought yet" : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
   return (
     <>
       {target > 0 ? (
@@ -667,11 +752,22 @@ function Progress({ summary: s, goals }: { summary: Summary; goals: Goals | null
       <dl className="planner-figures">
         <dt>Realised earnings</dt>
         <dd>{money(s.realisedEarnings)}</dd>
-        <dt>Household savings (not earnings)</dt>
+        <dt>Household savings after trip costs (not earnings)</dt>
         <dd>{money(s.householdSavings)}</dd>
+        {typeof s.householdSavingsGross === "number" && (
+          <>
+            <dt>Household savings before trip costs</dt>
+            <dd>{money(s.householdSavingsGross)}</dd>
+            <dt>Household trip costs</dt>
+            <dd>{money(s.householdTripCosts ?? 0)}</dd>
+          </>
+        )}
         <dt>Pending payouts (sold, not yet paid: not counted)</dt>
         <dd>{money(s.pendingPayouts)}</dd>
-        <dt>Potential proceeds (estimate: not counted)</dt>
+        <dt>
+          Potential proceeds from live-evidence trips (estimate: not counted)
+          {leftOutText && <span className="muted planner-cell-note">Left out: {leftOutText}.</span>}
+        </dt>
         <dd>{money(s.potentialProceeds)}</dd>
         {typeof s.cashTiedUp === "number" && (
           <>
@@ -681,10 +777,160 @@ function Progress({ summary: s, goals }: { summary: Summary; goals: Goals | null
         )}
       </dl>
       <p className="muted">
-        Only realised figures count toward progress: {savings ? "household savings you recorded" : "payouts received less recorded costs"}
-        . Pending payouts and potential proceeds are shown separately and are not counted until paid.
+        Only realised figures count towards progress:{" "}
+        {savings ? "household savings you recorded, less household trip costs" : "payouts received less recorded costs"}. Pending
+        payouts and potential proceeds are shown separately and are not counted until paid. Sample
+        trips never count in potential proceeds.
         {savings ? "" : " Household savings are never counted as earnings."}
       </p>
     </>
+  );
+}
+
+const STATUS_TEXT: Record<Target["status"], string> = {
+  reached: "Reached",
+  "in progress": "In progress",
+  missed: "Deadline passed",
+};
+
+/** Named goals: what the money is for, counting only cash received by the deadline. */
+function NamedGoals({ version }: { version: number }) {
+  const [data, setData] = useState<Targets | null>(null);
+  const [error, setError] = useState("");
+  const [draft, setDraft] = useState({ name: "", amount: "", deadline: "", start: "" });
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    api<Targets>("goals/targets")
+      .then((r) => {
+        if (!active) return;
+        setData(r);
+        setError("");
+      })
+      .catch((e) => active && setError((e as Error).message));
+    return () => {
+      active = false;
+    };
+  }, [version]);
+
+  async function add(ev: React.FormEvent) {
+    ev.preventDefault();
+    const amount = Number(draft.amount);
+    if (!draft.name.trim()) return setNotice("Say what the money is for.");
+    if (draft.amount.trim() === "" || !Number.isFinite(amount) || amount <= 0 || amount > 100000)
+      return setNotice("Amount must be between £0.01 and £100,000.");
+    setBusy(true);
+    try {
+      const r = await api<Targets & { id: number }>("goals/targets", {
+        name: draft.name.trim(),
+        amount: toPence(amount),
+        deadline: draft.deadline || null,
+        start: draft.start || null,
+      });
+      setData(r);
+      setDraft({ name: "", amount: "", deadline: "", start: "" });
+      setNotice("Goal added.");
+    } catch (e) {
+      setNotice("Could not add the goal: " + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(t: Target) {
+    setBusy(true);
+    try {
+      setData(await api<Targets>("goals/targets/" + t.id, {}, "DELETE"));
+      setNotice(`Removed "${t.name}".`);
+    } catch (e) {
+      setNotice("Could not remove the goal: " + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section>
+      <small>02 / WHAT THE MONEY IS FOR</small>
+      <h2>Named goals and deadlines</h2>
+      <p>
+        Name what the money is for, such as a hobby, fuel or a bill like car insurance. A goal with a
+        deadline counts only cash received by that date: payouts less what you spent, never sales
+        waiting to be paid or estimates. Fuel for a collection run is already a cost of that trip, so
+        it is not counted twice.
+      </p>
+      {error && <p role="alert">Could not load your named goals: {error}</p>}
+      {data && data.targets.length === 0 && <p className="muted">No named goals yet.</p>}
+      {data?.targets.map((t) => (
+        <article key={t.id} className="planner-target">
+          <p className="planner-badges">
+            <span className={"badge " + (t.status === "reached" ? "ok" : t.status === "missed" ? "warn" : "")}>
+              {STATUS_TEXT[t.status]}
+            </span>
+          </p>
+          <h3>{t.name}</h3>
+          <progress className="planner-progress" max={t.amount} value={Math.min(t.amount, t.counted)} />
+          <p>
+            {money(t.counted)} of {money(t.amount)} received
+            {t.deadline
+              ? t.daysLeft !== null && t.daysLeft >= 0
+                ? ` by ${t.deadline} (${plural(t.daysLeft, "day")} left)`
+                : ` by ${t.deadline}`
+              : " so far (no deadline)"}
+            . Still needed: {money(t.remaining)}.
+          </p>
+          <p className="muted">
+            Counting from {t.start}: payouts {money(t.payouts)}, less costs {money(t.costs)}.
+            {t.shared > 0 ? ` ${money(t.shared)} of that already counts towards an earlier goal.` : ""}
+          </p>
+          <button type="button" onClick={() => remove(t)} disabled={busy}>
+            Remove
+          </button>
+        </article>
+      ))}
+      <form onSubmit={add} className="planner-target-form">
+        <div className="grid2">
+          <label>
+            What the money is for
+            <input
+              value={draft.name}
+              maxLength={80}
+              placeholder="Car insurance"
+              onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+            />
+          </label>
+          <label>
+            Amount (£)
+            <input
+              type="number"
+              min={0}
+              step="any"
+              inputMode="decimal"
+              value={draft.amount}
+              onChange={(e) => setDraft({ ...draft, amount: e.target.value })}
+            />
+          </label>
+          <label>
+            Deadline
+            <input
+              type="date"
+              value={draft.deadline}
+              onChange={(e) => setDraft({ ...draft, deadline: e.target.value })}
+            />
+            <span className="muted">Leave empty if there is no date.</span>
+          </label>
+          <label>
+            Count cash received from
+            <input type="date" value={draft.start} onChange={(e) => setDraft({ ...draft, start: e.target.value })} />
+            <span className="muted">Leave empty to count from today.</span>
+          </label>
+        </div>
+        <button disabled={busy}>Add goal</button>
+        {notice && <p role="status">{notice}</p>}
+      </form>
+      {data && <p className="muted">{data.basis}</p>}
+    </section>
   );
 }

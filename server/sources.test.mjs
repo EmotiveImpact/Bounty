@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   awin,
+  claimedPence,
   sold,
   lookup,
   lookupRequest,
@@ -15,6 +16,9 @@ import {
   pence,
   redact,
   SourceError,
+  clean,
+  feedModel,
+  structuredPack,
 } from "./sources.mjs";
 import { KIND, LICENCE } from "./contract.mjs";
 
@@ -158,6 +162,11 @@ test("manual sales reject the whole file and name the record index", () => {
     [{ ...sale, barcode: "12345678" }, /index 1: barcode/],
     [{ ...sale, size: 42 }, /index 1: size must be text/],
     [{ ...sale, reference: "s0" }, /index 1: reference s0 appears twice/],
+    // A total of 0 would be skipped by the importer, so it is refused here
+    // and the whole file is rejected naming the record.
+    [{ ...sale, totalPence: 0 }, /index 1: totalPence must be a positive whole number/],
+    [{ ...sale, totalPence: -100 }, /index 1: totalPence must be a positive whole number/],
+    [{ ...sale, totalPence: "1000" }, /index 1: totalPence must be a positive whole number/],
   ];
   for (const [bad, message] of cases)
     assert.throws(() => sold([{ ...sale, reference: "s0" }, bad], NOW), message);
@@ -363,4 +372,120 @@ test("eBay normaliser accepts an empty result and rejects an unexpected shape", 
   assert.deepEqual(ebayBrowse({ total: 0 }), []);
   assert.throws(() => ebayBrowse({}), /Unexpected eBay Browse response/);
   assert.throws(() => hobnight({}), /Unexpected Hobnight response/);
+});
+
+test("credential values are redacted wherever they appear, not only after key=", () => {
+  const env = {
+    KEEPA_API_KEY: "kp-live-0123456789",
+    HOBNIGHT_API_KEY: "hob-live-abcdef",
+    EBAY_ACCESS_TOKEN: "v^1.1#i^1#token-value",
+  };
+  // An upstream that echoes the token in its message body, with no key= or
+  // Bearer prefix for the pattern rules to catch.
+  const echoed = redact(
+    "Invalid key kp-live-0123456789 for domain 2; hob-live-abcdef rejected; token v^1.1#i^1#token-value expired",
+    env,
+  );
+  for (const value of Object.values(env)) assert.ok(!echoed.includes(value), value);
+  assert.equal(echoed.split("[redacted]").length - 1, 3);
+  // Short values are not redacted by value (too likely to hit ordinary
+  // text), but the pattern rules still apply.
+  assert.equal(redact("abc ok", { KEEPA_API_KEY: "abc" }), "abc ok");
+  assert.equal(redact("?token=abc", { KEEPA_API_KEY: "abc" }), "?token=[redacted]");
+  assert.equal(redact({ toString: 1 }, env), "");
+  assert.equal(redact(null, env), "");
+});
+
+test("adapters store a pack or model only where the source gives one as data", () => {
+  // Awin has no pack column: the jumper's pack stays unknown even though
+  // the sale side might say 1, and a pack in the product name is never read.
+  const feed = awin(
+    "aw_product_id,product_name,currency,search_price,ean,model_number,mpn\n" +
+      '1,"Lager, 12 x 330ml",GBP,9.00,5012345678900,N/A,LGR-12\n' +
+      "2,Plain mug,GBP,4.00,5012345678900,none,\n",
+  );
+  assert.deepEqual(feed.map((r) => r.pack), [null, null]);
+  assert.equal(feed[0].model, "lgr-12", "a placeholder model number falls back to the mpn");
+  assert.equal(feed[1].model, null, "a feed's 'none' is a placeholder, not a confirmed no-model");
+  for (const row of awin(readFileSync(fixture("awin-sample.csv"), "utf8"))) assert.equal(row.pack, null);
+  // Hobnight gives a size and no pack or model.
+  const hob = hobnight(JSON.parse(readFileSync(fixture("hobnight-products.json"), "utf8")));
+  for (const row of hob) assert.deepEqual([row.pack, row.model], [null, null]);
+  // Keepa's packageQuantity is a structured count; 0 and -1 mean not given.
+  const product = (extra) => ({ asin: "B000000001", title: "Kettle", model: "KX-1", csv: [[1, 2000]], ...extra });
+  const [four] = keepa({ products: [product({ packageQuantity: 4 })] });
+  assert.deepEqual([four.pack, four.model], ["4", "kx-1"]);
+  for (const missing of [0, -1, null, undefined, "4", 2.5])
+    assert.equal(keepa({ products: [product({ packageQuantity: missing })] })[0].pack, null, String(missing));
+  assert.equal(keepa({ products: [product({ model: "N/A" })] })[0].model, null);
+  assert.equal(structuredPack(10001), null);
+  assert.equal(feedModel("Model: SX-500"), "model: sx-500");
+  // eBay Browse summaries carry no pack, size or model.
+  const ebay = ebayBrowse(JSON.parse(readFileSync(fixture("ebay-browse.json"), "utf8")));
+  for (const row of ebay) assert.deepEqual([row.pack, row.size, row.model], [null, null, null]);
+});
+
+test("adapters never throw on values that are not text", () => {
+  const hostile = { toString: 1 };
+  assert.equal(gtin(hostile), null);
+  assert.equal(gtin(["5012345678900"]), null);
+  assert.equal(clean(hostile), null);
+  assert.equal(clean(true), null);
+  assert.equal(clean(42), "42");
+  const rows = hobnight({
+    data: [{ id: hostile, gtin: hostile, name: hostile, size: hostile, price: hostile, currency: "GBP", url: hostile }],
+  });
+  assert.equal(rows.length, 1);
+  assert.deepEqual([rows[0].source_id, rows[0].barcode, rows[0].title, rows[0].size], [null, null, null, null]);
+  assert.ok(Number.isNaN(rows[0].price));
+  assert.deepEqual(
+    openPrices({
+      items: [
+        {
+          id: 9,
+          price: hostile,
+          currency: "GBP",
+          location: { osm_address_country_code: "GB", osm_id: hostile },
+          product: { product_quantity: hostile },
+          proof_id: hostile,
+        },
+      ],
+    }),
+    [],
+    "a price that is not a number is skipped",
+  );
+  const [op] = openPrices({
+    items: [
+      {
+        id: 10,
+        price: 1.5,
+        currency: "GBP",
+        date: "2026-10-30",
+        location: { osm_type: "NODE", osm_address_country_code: "GB", osm_id: hostile },
+        product: { product_quantity: hostile, product_quantity_unit: hostile },
+        proof_id: hostile,
+      },
+    ],
+  });
+  assert.deepEqual([op.osm_id, op.quantity, op.proof_id, op.price], [null, null, null, 150]);
+  assert.doesNotThrow(() => keepa({ products: [{ asin: "B000000002", title: hostile, size: hostile, model: hostile, eanList: [hostile], csv: [[1, 100]] }] }));
+  assert.doesNotThrow(() => ebayBrowse({ itemSummaries: [{ itemId: hostile, title: hostile, price: { currency: "GBP", value: hostile }, seller: { username: hostile } }] }));
+});
+
+test("Awin keeps the claimed previous price and RRP from structured columns only", () => {
+  const csv = [
+    "aw_product_id,product_name,currency,search_price,product_price_old,rrp_price,promotional_text",
+    "1,Jumper was £30,GBP,20.00,30.00,35.5,Was £40 now £20",
+    "2,Kettle,GBP,15.00,,0.00,",
+    "3,Mug,GBP,4.00,abc,-1,",
+  ].join("\n");
+  const [jumper, kettle, mug] = awin(csv);
+  assert.equal(jumper.was_price, 3000);
+  assert.equal(jumper.rrp_price, 3550);
+  // A price in the title or promotion text is never read.
+  for (const row of [kettle, mug]) {
+    assert.equal(row.was_price, null, row.title);
+    assert.equal(row.rrp_price, null, row.title);
+  }
+  assert.equal(claimedPence({ toString: () => "5" }), null);
 });

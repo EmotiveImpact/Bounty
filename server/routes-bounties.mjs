@@ -10,6 +10,10 @@
 // other modules' files:
 //   estimate(db, request, { now })  estimateFromEvidence from ./estimate.mjs
 //   recordCheck(db, check, { now }) recordCheck from ./audit.mjs
+//   askingLookup(db, barcode, { now })  the latest asking-price lookup for
+//                                   a barcode inside its time to live,
+//                                   { provider, fetched } or null (default:
+//                                   the eBay Browse lookup cache)
 //   photoDir                        where shelf photos are kept (default
 //                                   <data dir>/report-photos)
 //   clock()                         the server clock (ISO string)
@@ -24,6 +28,8 @@ import {
   bountyView,
   claim,
   completeClaim,
+  humanTime,
+  memberNotices,
   createBounty,
   createMember,
   dispatchAlerts,
@@ -61,6 +67,33 @@ const defaultRecordCheck = async () => (await import("./audit.mjs")).recordCheck
 const defaultPhotoDir = async () => join((await import("./db.mjs")).dataDir(), "report-photos");
 
 /**
+ * Ways a barcode may have been typed into an asking-price lookup: the
+ * 14-digit GTIN and its shorter forms without leading zeros.
+ */
+const barcodeQueries = (gtin) =>
+  [...new Set([14, 13, 12, 8].filter((n) => /^0*$/.test(gtin.slice(0, 14 - n))).map((n) => gtin.slice(14 - n)))];
+
+/**
+ * The latest eBay Browse lookup for the barcode still inside its time to
+ * live (evidence.mjs lookup cache), or null. Without one, an empty list of
+ * asking prices means nobody looked.
+ */
+async function defaultAskingLookup(db, barcode, { now }) {
+  if (typeof barcode !== "string" || !/^\d{14}$/.test(barcode)) return null;
+  try {
+    const { cachedLookup } = await import("./evidence.mjs");
+    let best = null;
+    for (const query of barcodeQueries(barcode)) {
+      const hit = cachedLookup(db, "ebay", query, { now });
+      if (hit && (!best || hit.fetched > best.fetched)) best = { provider: "ebay", fetched: hit.fetched };
+    }
+    return best;
+  } catch {
+    return null; // no lookup cache: nothing is on record
+  }
+}
+
+/**
  * The estimate request a bounty is created from, ready for the server to
  * run: the client's clock is dropped (the server clock decides freshness)
  * and the bounty's locality decides which branch stock checks count.
@@ -80,6 +113,14 @@ export function routes(db, options = {}) {
   const estimate = options.estimate ?? defaultEstimate;
   const recordCheck = async () => options.recordCheck ?? (await defaultRecordCheck());
   const photoDir = async () => options.photoDir ?? (await defaultPhotoDir());
+  const askingLookup = options.askingLookup ?? defaultAskingLookup;
+  const lookupFor = async (barcode, now) => {
+    try {
+      return (await askingLookup(db, barcode, { now })) ?? null;
+    } catch {
+      return null;
+    }
+  };
 
   /**
    * Re-runs the stored estimate for a live bounty with the server clock and
@@ -97,8 +138,21 @@ export function routes(db, options = {}) {
     } catch (error) {
       result = { error: error.message };
     }
-    return refreshBounty(db, bounty.id, result, now);
+    return refreshBounty(db, bounty.id, result, now, { lookup: await lookupFor(bounty.barcode, now) });
   }
+
+  /** The operator's message after a live bounty is created or re-checked. */
+  const outcome = (view, created) => {
+    const tier = view.opportunity?.tier ?? "Review";
+    const why = [...(view.claimBlockers ?? [])];
+    if (view.remaining <= 0) why.push(view.cap === 0 ? "the distribution cap is 0" : "the cap is fully claimed");
+    const hiddenNote = view.display.permitted
+      ? ""
+      : " Its source does not permit display, so members and visitors see no title, retailer, prices or sale figures.";
+    if (view.alert.canSend)
+      return `${created ? "Bounty created" : "Evidence re-checked"} (${tier}) with a cap of ${view.cap} unit${view.cap === 1 ? "" : "s"}. ${TERMS.buyAndResell}${hiddenNote}`;
+    return `${created ? "Bounty created" : "Evidence re-checked"} as ${tier}, but it cannot send alerts or take claims: ${why.join("; ") || "the buy-alert checks do not pass"}.${hiddenNote}`;
+  };
 
   const viewerOf = (url) => resolveViewer(db, url.searchParams.get("viewer"));
 
@@ -138,7 +192,17 @@ export function routes(db, options = {}) {
     [
       "GET",
       "/api/members/:id/alerts",
-      ({ params }) => ({ alerts: memberAlerts(db, pathId(params.id, "Member"), { now: clock() }), notice: TERMS.alerts }),
+      ({ params }) => {
+        const memberId = pathId(params.id, "Member");
+        const now = clock();
+        return {
+          alerts: memberAlerts(db, memberId, { now }),
+          // "Don't make the trip" notices, including bounties the member
+          // claimed without an alert.
+          stopNotices: memberNotices(db, memberId),
+          notice: TERMS.alerts,
+        };
+      },
     ],
     [
       "GET",
@@ -167,23 +231,36 @@ export function routes(db, options = {}) {
         const sample = input.sample === undefined ? false : bool(input.sample, "sample");
         let result = null;
         let request = null;
+        let lookup = null;
         if (sample) {
           if (input.estimate !== undefined && input.estimate !== null)
             fail("A sample bounty takes no estimate: remove the estimate or set sample to false");
         } else {
           request = bountyRequest(input.estimate, input.locality);
           result = await estimate(db, request, { now });
+          lookup = await lookupFor(result?.offer?.gtin, now);
         }
-        const bounty = createBounty(db, input, { estimate: result, request, now });
+        const bounty = createBounty(db, input, { estimate: result, request, lookup, now });
         const view = bountyView(db, bounty, { viewer: { kind: "operator" }, now });
         return reply(201, {
           bounty: view,
           message: view.sample
-            ? "Sample bounty created. It is labelled Sample and can never send an alert."
-            : view.alert.eligible
-              ? `Bounty created with a cap of ${view.cap} unit${view.cap === 1 ? "" : "s"}. ${TERMS.buyAndResell}`
-              : "Bounty created, but it cannot send alerts or take claims until every buy-alert check passes.",
+            ? "Sample bounty created. It is labelled Sample, shows illustrative figures only, can never send an alert and cannot be claimed."
+            : outcome(view, true),
         });
+      },
+    ],
+    [
+      "POST",
+      "/api/bounties/:id/recheck",
+      async ({ params }) => {
+        const now = clock();
+        const bounty = await recheck(pathId(params.id, "Bounty"), now);
+        const view = bountyView(db, bounty, { viewer: { kind: "operator" }, now });
+        return {
+          bounty: view,
+          message: view.sample ? "Sample bounty: there is no evidence to re-check." : outcome(view, false),
+        };
       },
     ],
     [
@@ -194,7 +271,8 @@ export function routes(db, options = {}) {
         const bounty = withdrawBounty(db, pathId(params.id, "Bounty"), { now });
         return {
           bounty: bountyView(db, bounty, { viewer: { kind: "operator" }, now }),
-          message: "Bounty withdrawn. Active claims were released.",
+          message:
+            "Bounty withdrawn. Active claims were released, and members alerted or holding a claim were told not to make the trip.",
         };
       },
     ],
@@ -207,12 +285,23 @@ export function routes(db, options = {}) {
         const bountyId = pathId(params.id, "Bounty");
         const member = requireMember(db, input.memberId);
         await recheck(bountyId, now);
-        const made = claim(db, { bountyId, memberId: member.id, units: input.units, now });
+        const qualifies = input.qualifiesForPromotion;
+        if (qualifies !== undefined && qualifies !== null) bool(qualifies, "qualifiesForPromotion");
+        const made = claim(db, {
+          bountyId,
+          memberId: member.id,
+          units: input.units,
+          qualifiesForPromotion: qualifies === true,
+          now,
+        });
         const bounty = requireBounty(db, bountyId);
         return reply(201, {
           claim: made,
           bounty: bountyView(db, bounty, { viewer: { kind: "member", member }, now }),
-          message: `Claim recorded for ${made.units} unit${made.units === 1 ? "" : "s"} until ${made.expires_at}. ${TERMS.claim} ${TERMS.buyAndResell}`,
+          message:
+            `Claim recorded for ${made.units} unit${made.units === 1 ? "" : "s"} until ${humanTime(made.expires_at)}.` +
+            (made.promotion ? ` You confirmed you qualify for: ${made.promotion}.` : "") +
+            ` ${TERMS.claim} ${TERMS.buyAndResell}`,
         });
       },
     ],
@@ -261,9 +350,12 @@ export function routes(db, options = {}) {
           reportId: report.id,
           message:
             (report.units_seen === 0
-              ? "Report saved: none on the shelf. Claims and alerts for this bounty pause until someone reports stock again."
+              ? "Report saved: none on the shelf. Claims and alerts for this bounty pause until someone reports stock again" +
+                (bounty.sample ? "." : ", and members alerted or holding a claim are told not to make the trip.")
               : "Report saved: stock seen.") +
-            " An accurate report earns reputation points once the operator verifies it, whether or not stock was there." +
+            (bounty.sample
+              ? " This is a sample bounty, so the report is practice and earns no reputation points."
+              : " An accurate report earns reputation points once the operator verifies it, whether or not stock was there.") +
             (report.photo_sha256 ? " " + TERMS.photo : ""),
         });
       },
@@ -279,6 +371,9 @@ export function routes(db, options = {}) {
           now,
           recordCheck: await recordCheck(),
         });
+        // A verified report became a branch stock check: re-check the
+        // bounty's evidence so its stock status follows at once.
+        if (result.stockCheckId !== null) await recheck(result.report.bounty_id, now);
         return {
           ...result,
           message:

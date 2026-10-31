@@ -86,6 +86,7 @@ const passing = {
   contribution: 900,
   hourly: 1500,
   hourlyFloor: 1200,
+  journeyKnown: true,
   offerObserved: "2026-10-30",
   now: "2026-10-31T12:00:00Z",
   localStockConfirmed: true,
@@ -95,6 +96,7 @@ const passing = {
   recentIndependentSales: 3,
   daysToSell: 6,
   cashNeededDays: 14,
+  payoutDays: 11,
   displayPermitted: true,
   meetsThresholds: true,
   units: 3,
@@ -114,9 +116,12 @@ test("alerts require every check and explain each failure", () => {
     ["shippingKnown", false],
     ["recentIndependentSales", 2],
     ["daysToSell", null],
-    ["daysToSell", 20],
+    ["payoutDays", 15],
+    ["payoutDays", null],
     ["displayPermitted", false],
     ["hourly", 1000],
+    ["journeyKnown", false],
+    ["journeyKnown", undefined],
     ["meetsThresholds", false],
     ["units", 4],
     ["units", 0],
@@ -125,6 +130,40 @@ test("alerts require every check and explain each failure", () => {
     assert.equal(result.eligible, false, field + "=" + value);
     assert.ok(result.reasons.length >= 1);
   }
+});
+
+test("a future-dated offer or a negative time to sell never passes", () => {
+  const future = evaluateAlert({ ...passing, offerObserved: "2026-11-01" });
+  assert.equal(future.eligible, false);
+  assert.equal(future.checks.find((c) => c.id === "offer-fresh").ok, false);
+  const today = evaluateAlert({ ...passing, offerObserved: "2026-10-31" });
+  assert.equal(today.checks.find((c) => c.id === "offer-fresh").ok, true);
+  const week = evaluateAlert({ ...passing, offerObserved: "2026-10-24" });
+  assert.equal(week.checks.find((c) => c.id === "offer-fresh").ok, true);
+  const old = evaluateAlert({ ...passing, offerObserved: "2026-10-23" });
+  assert.equal(old.checks.find((c) => c.id === "offer-fresh").ok, false);
+  const negative = evaluateAlert({ ...passing, daysToSell: -1 });
+  assert.equal(negative.eligible, false);
+  assert.equal(negative.checks.find((c) => c.id === "days-to-sell").ok, false);
+  const badNow = evaluateAlert({ ...passing, now: "not a date" });
+  assert.equal(badNow.eligible, false);
+});
+
+test("an empty shelf is named as such in the availability check", () => {
+  const empty = evaluateAlert({ ...passing, localStockConfirmed: false, availability: "out_of_stock" });
+  assert.match(empty.reasons.join(" "), /none on the shelf/);
+  const unknown = evaluateAlert({ ...passing, availability: "unknown" });
+  assert.match(unknown.reasons.join(" "), /No branch check has found stock/);
+});
+
+test("the cash date is checked against the payout, not the sale", () => {
+  // Sells in 4 days, but posting, delivery and the payout delay land the
+  // money after the date it is needed.
+  const late = evaluateAlert({ ...passing, daysToSell: 4, cashNeededDays: 5, payoutDays: 8 });
+  assert.equal(late.eligible, false);
+  assert.match(late.reasons.join(" "), /payout in 8 days/);
+  const none = evaluateAlert({ ...passing, cashNeededDays: null, payoutDays: null });
+  assert.equal(none.eligible, true);
 });
 
 test("a loyalty price needs confirmed eligibility; empty input fails closed", () => {
@@ -138,6 +177,10 @@ test("a loyalty price needs confirmed eligibility; empty input fails closed", ()
       promotion: "LOYALTY_PROGRAM",
       promotionEligible: true,
     }).eligible,
+    true,
+  );
+  assert.equal(
+    evaluateAlert({ ...passing, promotion: "LOYALTY_PROGRAM", costedAtRegularPrice: true }).eligible,
     true,
   );
   assert.equal(evaluateAlert({ ...passing, units: 8, provenItem: true }).eligible, true);

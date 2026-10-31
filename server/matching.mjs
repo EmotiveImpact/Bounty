@@ -9,9 +9,13 @@ import { ALERT_RULES, ageDays } from "./alerts.mjs";
 import { lowerMedian } from "./trip.mjs";
 
 // Lower case, Unicode-normalised, dashes unified, spaces collapsed. Null for
-// empty values so that "not stated" is never confused with a real value.
+// empty values so that "not stated" is never confused with a real value, and
+// null for anything other than text or a finite number (an object, array or
+// boolean is not an attribute value, and converting one could throw).
 export function clean(value) {
-  if (value === null || value === undefined) return null;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return null;
+  } else if (typeof value !== "string") return null;
   const text = String(value)
     .normalize("NFKC")
     .toLowerCase()
@@ -32,8 +36,11 @@ export function clean(value) {
  * is rejected.
  */
 export function normaliseBarcode(value) {
-  if (value === null || value === undefined) return null;
-  if (typeof value === "number" && !Number.isSafeInteger(value)) return null;
+  // Only text or a whole number can be a barcode. Anything else (null, an
+  // object, an array) is not one, and is never converted with String().
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value < 0) return null;
+  } else if (typeof value !== "string") return null;
   const digits = String(value).trim().replace(/[\s-]/g, "");
   if (!/^\d+$/.test(digits) || ![8, 12, 13, 14].includes(digits.length))
     return null;
@@ -84,6 +91,13 @@ const UNITS = [
   [/^(in|inch|inches|")$/, "in", 1],
   [/^(oz|ounces?)$/, "oz", 1],
 ];
+// Values that say nothing about an attribute ("n/a" can mean not available
+// as easily as not applicable). They read as not stated, so two of them never
+// make a match.
+const PLACEHOLDERS = new Set([
+  "n/a", "na", "n.a.", "-", "--", "?", "unknown", "not known", "tbc", "tba",
+  "null", "undefined", "not stated", "not specified", "unspecified",
+]);
 const MONTHS = /^(months?|mths?|mnths?|mos?|m)$/;
 const YEARS = /^(years?|yrs?|y)$/;
 const decimal = (text) => Number(text.replace(",", "."));
@@ -101,7 +115,7 @@ export function normaliseSize(value) {
   let s = clean(value);
   if (!s) return null;
   s = s.replace(/^(size|sz)\b\s*:?\s*/, "").trim();
-  if (!s) return null;
+  if (!s || PLACEHOLDERS.has(s)) return null;
   if (LETTER.has(s)) return LETTER.get(s);
   if (/^(newborn|new born|nb)$/.test(s)) return "newborn";
   const range = s.match(
@@ -157,14 +171,35 @@ export function normalisePack(value) {
 }
 
 /**
+ * The canonical model value for a product that has no model or part number
+ * (most food, for example). Source adapters never produce it from feed text;
+ * it comes only from the operator: a manual sale or offer, or an
+ * operator-confirmed offer attribute (estimate offerAttributes.model "none").
+ *
+ * In compare(), NO_MODEL on the offer means the operator has checked that the
+ * product has no model number, so a candidate with the same barcode that
+ * states no model (null or a placeholder such as "n/a") is treated as having
+ * none. A model stated on either side against NO_MODEL on the other still
+ * differs, and NO_MODEL on the candidate alone does not cover an offer whose
+ * model is unstated: the offer is what is bought, so the confirmation belongs
+ * to it.
+ */
+export const NO_MODEL = "none";
+const NO_MODEL_FORMS = new Set(["none", "no model", "no model number", "no model no", "not applicable"]);
+
+/**
  * Canonical model or part number: labels such as "Model:" removed and
  * spaces, hyphens and underscores dropped, so "SX-500" and "sx 500" agree.
  * Dots and slashes are kept because they change meaning ("v1.2" is not "v12").
+ * "None", "No model" and "Not applicable" give NO_MODEL; placeholders such as
+ * "n/a", "unknown" or "-" give null (not stated).
  */
 export function normaliseModel(value) {
   let s = clean(value);
   if (!s) return null;
-  s = s.replace(/^(model( no\.?| number)?|mpn|part( no\.?| number)?|ref)\s*:?\s*/, "");
+  s = s.replace(/^(model( no\.?| number)?|mpn|part( no\.?| number)?|ref)\s*:?\s*/, "").trim();
+  if (!s || PLACEHOLDERS.has(s)) return null;
+  if (NO_MODEL_FORMS.has(s)) return NO_MODEL;
   s = s.replace(/[\s_-]+/g, "");
   return s || null;
 }
@@ -278,7 +313,9 @@ export function similarTitles(a, b) {
  *
  * Returns { status, reasons } where status is:
  *  "exact"    both barcodes are valid and equal, and size, pack, model and
- *             condition are stated on both and equal after normalisation;
+ *             condition are stated on both and equal after normalisation
+ *             (an offer model of NO_MODEL also covers a candidate that
+ *             states no model: see NO_MODEL);
  *  "research" the same barcode with any attribute missing, unrecognised or
  *             different (one reason per attribute), a store-assigned barcode,
  *             or a different or missing barcode with a similar title;
@@ -291,6 +328,10 @@ export function compare(offer, candidate) {
   const noun = kindNoun(candidate);
   if (a.barcode && b.barcode && a.barcode === b.barcode) {
     const reasons = [];
+    // Operator-confirmed "no model" on the offer covers a candidate that
+    // states no model; a model stated on the candidate still differs.
+    const noModelCovered = a.model === NO_MODEL && b.model === null;
+    if (noModelCovered) b.model = NO_MODEL;
     for (const key of ["size", "pack", "model", "condition"]) {
       const label = ATTRIBUTE_LABELS[key];
       if (a[key] === null || b[key] === null) {
@@ -314,7 +355,12 @@ export function compare(offer, candidate) {
       ? { status: "research", reasons }
       : {
           status: "exact",
-          reasons: ["Barcode, size, pack, model and condition match"],
+          reasons: [
+            "Barcode, size, pack, model and condition match",
+            ...(noModelCovered
+              ? [`No model number: confirmed for the offer, and the ${noun} states none`]
+              : []),
+          ],
         };
   }
   const barcodeReason = !a.barcode
@@ -331,6 +377,23 @@ export function compare(offer, candidate) {
 }
 
 export const rowKey = (row) => `${row.provider}|${row.source_id ?? row.sourceId}`;
+
+// The manual sales importer keeps a listing id given without a seller name
+// as "listing:<id>", so the listing stays traceable.
+const LISTING_ONLY = /^listing:/;
+
+/**
+ * The canonical seller name of a record, or null when no seller is named.
+ * A listing id alone ("listing:<id>") is not a seller: one seller can have
+ * many listings, so listing ids never count as independent sellers.
+ */
+export function sellerName(value) {
+  const name = clean(value);
+  return name === null || LISTING_ONLY.test(name) ? null : name;
+}
+
+export const INDEPENDENCE_RULE =
+  "Independent sellers are distinct named sellers. Sales with no seller name, including those recorded only by listing id, are not counted as independent.";
 
 // Upper median: with an even count it takes the higher middle value, so an
 // estimate of days to sell leans slow rather than fast.
@@ -351,8 +414,12 @@ function upperMedian(values) {
  *  - the operator has confirmed it ("provider|sourceId" in `confirmed`).
  * Every other row goes to `excluded` with the first reason that applies.
  *
- * independent counts distinct non-null seller values among used rows: a sale
- * without a seller cannot show independence, so it adds nothing.
+ * independent counts distinct named sellers among used rows (see
+ * sellerName). A sale with no seller name, including one recorded only by
+ * its listing id, cannot show independence: such sales are not counted at
+ * all, because each could be from a seller already counted. withoutSeller
+ * says how many used sales that leaves out, and independenceRule says so in
+ * words.
  * daysToSell is the upper median of whole days from listed to observed over
  * used rows that have both dates (null when none do).
  */
@@ -378,9 +445,8 @@ export function soldSample(
     if (reason) excluded.push({ row, reason });
     else used.push(row);
   }
-  const sellers = new Set(
-    used.map((r) => clean(r.seller)).filter((s) => s !== null),
-  );
+  const sellers = new Set(used.map((r) => sellerName(r.seller)).filter((s) => s !== null));
+  const withoutSeller = used.filter((r) => sellerName(r.seller) === null).length;
   const dates = used
     .map((r) => r.observed)
     .sort((x, y) => Date.parse(x) - Date.parse(y));
@@ -392,6 +458,8 @@ export function soldSample(
     excluded,
     count: used.length,
     independent: sellers.size,
+    withoutSeller,
+    independenceRule: INDEPENDENCE_RULE,
     lowerMedian: lowerMedian(used.map((r) => r.price)),
     newest: dates.length ? dates[dates.length - 1] : null,
     oldest: dates.length ? dates[0] : null,
@@ -446,7 +514,7 @@ export function competition(offer, rows) {
   let unnamed = 0;
   let lowest = null;
   for (const r of listings) {
-    const seller = clean(r.seller);
+    const seller = sellerName(r.seller);
     if (seller) named.add(seller);
     else unnamed++;
     const shippingKnown = Number.isSafeInteger(r.shipping) && r.shipping >= 0;

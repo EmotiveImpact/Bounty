@@ -10,14 +10,28 @@
 import { KIND, LICENCE } from "./contract.mjs";
 import { ALERT_RULES, evaluateAlert } from "./alerts.mjs";
 import { SAMPLE_ASSUMPTIONS, tripEconomics } from "./trip.mjs";
-import { OPPORTUNITY_RULES, classifyOpportunity, effectiveRules } from "./opportunity.mjs";
-import { displayPermitted } from "./evidence.mjs";
-import { bool, fail, int, isoDate, num, text } from "./http.mjs";
 import {
+  CATEGORY_IDS,
+  OPPORTUNITY_RULES,
+  categoryChecks,
+  categoryReturnsRate,
+  categoryRule,
+  classifyOpportunity,
+  effectiveRules,
+} from "./opportunity.mjs";
+import { displayPermitted } from "./evidence.mjs";
+import { bool, fail, int, isoDate, num, oneOf, text } from "./http.mjs";
+import {
+  CONDITION_VOCABULARY,
   compare,
   competition,
   exclusionReason,
+  isRetailOffer,
   normaliseBarcode,
+  normaliseCondition,
+  normaliseModel,
+  normalisePack,
+  normaliseSize,
   offerFreshness,
   rowKey,
   similarTitles,
@@ -25,6 +39,7 @@ import {
   titleTokens,
 } from "./matching.mjs";
 import { CHECK_VALID_DAYS, stockStatus, tableExists } from "./audit.mjs";
+import { DEFAULT_GOALS, cashTiming, getGoals, payoutDate } from "./goals.mjs";
 
 const DAY = 86400000;
 export const OPEN_PRICES = "openprices";
@@ -84,6 +99,28 @@ export function sourceType(provider) {
   }
 }
 
+// Title words that clearly name clothing or food. Only a clear word suggests
+// a category; anything else is general, and the person can change it in the
+// estimate. Words that are often something else ("top", "polo") are left out.
+const CLOTHING_WORDS =
+  /\b(jumpers?|sweaters?|cardigans?|hoodies?|sweatshirts?|t-?shirts?|shirts?|blouses?|dress(es)?|skirts?|jeans|trousers|shorts|leggings|joggers|jackets?|coats?|gilets?|fleeces?|socks|pyjamas|underwear|bras?|boxers|knickers|swimsuits?|bikinis?|onesies?|babygrows?|dungarees|tights)\b/;
+const FOOD_WORDS =
+  /\b(honey|chocolates?|biscuits?|cookies?|crisps|sweets|flapjacks?|cereals?|granola|muesli|porridge|oats|coffee|teabags?|tea|jam|marmalade|syrup|sauces?|ketchup|mayonnaise|pasta|noodles|rice|nuts|peanuts|almonds|raisins|cakes?|snacks?|crackers|spreads?|peanut butter|olive oil|vinegar|spices?|gravy|stock cubes|soups?|beans|tinned|canned|juice|cordial|squash|protein bars?|cereal bars?|sugar|flour)\b/;
+
+/**
+ * The category an offer suggests from its title: { id, basis }. "clothing" or
+ * "food" only when a title word clearly names one, otherwise "general". This
+ * is a starting point; the estimate request's category always wins.
+ */
+export function suggestCategory(offer) {
+  const title = String(offer?.title ?? "").toLowerCase();
+  const clothing = title.match(CLOTHING_WORDS);
+  if (clothing) return { id: "clothing", basis: `The title mentions "${clothing[0]}"` };
+  const food = title.match(FOOD_WORDS);
+  if (food) return { id: "food", basis: `The title mentions "${food[0]}"` };
+  return { id: "general", basis: "The title does not clearly name clothing or food" };
+}
+
 // Label for an Open Prices price marked as discounted without a discount
 // type. Open Prices often leaves discount_type null on discounted prices; the
 // price is still conditional, so it must be treated as a promotion and the
@@ -127,6 +164,11 @@ function toOffer(row, now) {
     price: row.price,
     regularPrice:
       Number.isSafeInteger(row.regular_price) && row.regular_price > 0 ? row.regular_price : null,
+    // Prices the retailer claims in a feed (Awin product_price_old and
+    // rrp_price). Shown as claims only: nobody pays them now, so they are
+    // never the regular price the stock is costed at.
+    wasPrice: Number.isSafeInteger(row.was_price) && row.was_price > 0 ? row.was_price : null,
+    rrpPrice: Number.isSafeInteger(row.rrp_price) && row.rrp_price > 0 ? row.rrp_price : null,
     shipping: row.shipping ?? null,
     observed: row.observed ?? null,
     imported: row.imported ?? null,
@@ -151,18 +193,112 @@ function toOffer(row, now) {
     stockNote: type.stockNote,
     branchStockEstablished: false,
     sample: isSampleRecord(offer),
+    suggestedCategory: suggestCategory(offer),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Offer attributes the operator confirms after looking at the item.
+//
+// Imported offers often leave pack or model blank (Awin has no pack column,
+// Open Prices has neither), and compare() needs both sides stated, so an
+// imported offer could never reach an exact match. The person can confirm a
+// blank attribute after looking at the shelf, packaging or product page. A
+// confirmation only fills a blank: it never replaces what the source stored.
+
+export const OFFER_ATTRIBUTE_KEYS = Object.freeze(["size", "pack", "model", "condition"]);
+const ATTRIBUTE_NORMALISERS = Object.freeze({
+  size: normaliseSize,
+  pack: normalisePack,
+  model: normaliseModel,
+  condition: normaliseCondition,
+});
+const ATTRIBUTE_HINTS = Object.freeze({
+  size: "a size such as M, 10 or 28cm",
+  pack: "a pack count such as 1, single or 3-pack",
+  model: "a model or part number",
+  condition: "one of " + CONDITION_VOCABULARY.join(", "),
+});
+const ATTRIBUTE_NAMES = Object.freeze({ size: "Size", pack: "Pack", model: "Model", condition: "Condition" });
+const stated = (value) =>
+  value !== null && value !== undefined && String(value).trim() !== "";
+
+/**
+ * Validated operator-confirmed attributes { size?, pack?, model?, condition? }
+ * as trimmed text. Each value must be recognised by the matching module's
+ * normaliser, so a confirmation can never be something compare() ignores.
+ * Empty or null values are left out.
+ */
+export function validateOfferAttributes(value, name = "offerAttributes") {
+  if (value === undefined || value === null) return {};
+  if (!isObject(value)) fail(`${name} must be an object of { size, pack, model, condition }`);
+  const out = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (!Object.hasOwn(ATTRIBUTE_NORMALISERS, key))
+      fail(`${name} can only set: ${OFFER_ATTRIBUTE_KEYS.join(", ")}`);
+    if (raw === undefined || raw === null || raw === "") continue;
+    if (!(typeof raw === "string" || (key === "pack" && Number.isSafeInteger(raw))))
+      fail(`${name}.${key} must be text`);
+    const entered = String(raw).trim();
+    if (!entered) continue;
+    if (entered.length > 100) fail(`${name}.${key} must be up to 100 characters`);
+    if (ATTRIBUTE_NORMALISERS[key](entered) === null)
+      fail(`${name}.${key} "${entered}" is not recognised: enter ${ATTRIBUTE_HINTS[key]}`);
+    out[key] = entered;
+  }
+  return out;
+}
+
+/**
+ * Applies operator-confirmed attributes to an offer. Only attributes the
+ * source left blank are filled; a confirmation that disagrees with a stored
+ * value is ignored and reported. Returns { offer, applied, ignored } where
+ * offer gains attributeSource ({ size, pack, model, condition } each
+ * "source", "operator", "assumed" (a retail offer's unstated condition is
+ * taken as new) or null) and operatorConfirmed (the keys filled).
+ */
+export function applyOfferAttributes(offer, confirmed = {}) {
+  const next = { ...offer };
+  const applied = {};
+  const ignored = [];
+  const attributeSource = {};
+  for (const key of OFFER_ATTRIBUTE_KEYS) {
+    const has = stated(offer[key]);
+    attributeSource[key] = has ? "source" : null;
+    if (!Object.hasOwn(confirmed, key)) continue;
+    if (has) {
+      const normalise = ATTRIBUTE_NORMALISERS[key];
+      if (normalise(offer[key]) !== normalise(confirmed[key]))
+        ignored.push({
+          key,
+          value: confirmed[key],
+          stored: offer[key],
+          reason: `${ATTRIBUTE_NAMES[key]} you confirmed (${confirmed[key]}) differs from the source (${offer[key]}): the source value is kept`,
+        });
+      continue;
+    }
+    next[key] = confirmed[key];
+    applied[key] = confirmed[key];
+    attributeSource[key] = "operator";
+  }
+  if (attributeSource.condition === null && isRetailOffer(offer)) attributeSource.condition = "assumed";
+  return {
+    offer: { ...next, attributeSource, operatorConfirmed: Object.keys(applied) },
+    applied,
+    ignored,
   };
 }
 
 const RESEARCH_OFFER_COLUMNS = `'research' AS origin, provider, source_id, title, barcode, variant,
  size, pack, model, condition, price, NULL AS regular_price, shipping, observed, imported, retailer,
  location, availability, promotion, url, licence, NULL AS unit, NULL AS discounted, NULL AS place,
- NULL AS city`;
+ NULL AS city, was_price, rrp_price`;
 const OBSERVATION_OFFER_COLUMNS = `'observations' AS origin, '${OPEN_PRICES}' AS provider,
  CAST(id AS TEXT) AS source_id, COALESCE(title, 'Unlabelled item') AS title, barcode,
  NULL AS variant, quantity AS size, NULL AS pack, NULL AS model, NULL AS condition, price,
  regular_price, NULL AS shipping, day AS observed, imported, store AS retailer, NULL AS location,
- NULL AS availability, discount_type AS promotion, NULL AS url, licence, unit, discounted, place, city`;
+ NULL AS availability, discount_type AS promotion, NULL AS url, licence, unit, discounted, place, city,
+ NULL AS was_price, NULL AS rrp_price`;
 // Open Prices prices quoted per kilogram or litre are not per item, so they
 // cannot be an acquisition cost per unit.
 const PER_ITEM = "(unit IS NULL OR upper(trim(unit)) IN ('', 'UNIT', 'UNKNOWN'))";
@@ -294,10 +430,20 @@ export function findCandidates(db, offer) {
  *   blocker (why it cannot be used, ignoring confirmation).
  * listings: active asking prices, shown as resale competition only.
  * other: retail offers and Amazon history with the same barcode (not sales).
+ * offerAttributes: operator-confirmed attributes (validateOfferAttributes)
+ *   fill only what the source left blank; offerAttributes in the result lists
+ *   the ones applied and the ones ignored because the source states a value.
  */
-export function candidatesFor(db, { provider, sourceId, now = new Date().toISOString() }) {
+export function candidatesFor(
+  db,
+  { provider, sourceId, now = new Date().toISOString(), offerAttributes = {} },
+) {
   ensureFunctions(db);
-  const offer = findOffer(db, provider, sourceId, now);
+  const attributes = applyOfferAttributes(
+    findOffer(db, provider, sourceId, now),
+    validateOfferAttributes(offerAttributes),
+  );
+  const offer = attributes.offer;
   const rows = findCandidates(db, offer);
   const describe = (row) => ({ row, sample: isSampleRecord(row), ...compare(offer, row) });
   const sales = rows
@@ -313,7 +459,14 @@ export function candidatesFor(db, { provider, sourceId, now = new Date().toISOSt
   const other = rows
     .filter((r) => r.kind !== KIND.SOLD && r.kind !== KIND.ASKING)
     .map(describe);
-  return { offer, sales, listings, other, competition: competition(offer, rows) };
+  return {
+    offer,
+    sales,
+    listings,
+    other,
+    competition: competition(offer, rows),
+    offerAttributes: { applied: attributes.applied, ignored: attributes.ignored },
+  };
 }
 
 /**
@@ -378,7 +531,9 @@ export function validateRules(rules) {
   if (!isObject(rules)) fail("rules must be an object of threshold overrides");
   const out = {};
   for (const [key, value] of Object.entries(rules)) {
-    if (!RULE_INPUTS[key]) fail(`rules can only set: ${RULE_KEYS.join(", ")}`);
+    // Own keys only: "toString", "constructor" or "__proto__" must be a 400,
+    // never a call to something inherited from Object.prototype.
+    if (!Object.hasOwn(RULE_INPUTS, key)) fail(`rules can only set: ${RULE_KEYS.join(", ")}`);
     if (value === undefined || value === null) continue;
     out[key] = RULE_INPUTS[key](value, `rules.${key}`);
   }
@@ -491,6 +646,13 @@ export function validateEstimateRequest(request) {
       optional(request.cashNeededDays, (v) => int(v, "cashNeededDays", 0, 3650)) ?? null,
     cashNeededBy: isoDate(request.cashNeededBy, "cashNeededBy", { optional: true }),
     locality: text(request.locality, "locality", 120, { optional: true }),
+    // Category rules (opportunity.mjs CATEGORY_RULES). Missing means the
+    // category the offer suggests (suggestCategory).
+    category: optional(request.category, (v) => oneOf(v, "category", CATEGORY_IDS)) ?? null,
+    packagingChecked:
+      optional(request.packagingChecked, (v) => bool(v, "packagingChecked")) ?? false,
+    bestBefore: isoDate(request.bestBefore, "bestBefore", { optional: true }),
+    offerAttributes: validateOfferAttributes(request.offerAttributes),
     now: now ?? null,
   };
 }
@@ -530,6 +692,249 @@ export function resaleWeeksOfSupply(activeListings, rate) {
   return Math.round((activeListings / rate) * 100) / 100;
 }
 
+// ---------------------------------------------------------------------------
+// Time until payment.
+
+/** The saved goals, or the defaults when the goals table is absent. */
+function savedGoals(db) {
+  if (tableExists(db, "goals")) return getGoals(db);
+  return { ...DEFAULT_GOALS, dispatchDays: [...DEFAULT_GOALS.dispatchDays], updated: null };
+}
+
+/**
+ * When the cash from this trip comes back, from goals.payoutDate: the trip
+ * is today (the decision date), each unit is listed the same day and sells
+ * after the sold sample's days to sell, then posting, delivery and payout
+ * follow the saved goals (dispatch days, delivery days, payout delay).
+ *
+ * Returns { start, sold, dispatch, delivered, date, note, days, goals,
+ * cashNeededBy, cashNeededDays, timing }. days counts whole days from now to
+ * the start of the payout date, the same way cashNeededDays counts to the
+ * cash date, so a payout on the cash date is on time. timing is
+ * { status: "on time" | "late" | "unknown", daysLate, note }.
+ */
+export function payoutSchedule({ now, daysToSell, goals, cashNeededBy = null, cashNeededDays = null }) {
+  const start = new Date(Date.parse(now)).toISOString().slice(0, 10);
+  const schedule = Number.isInteger(daysToSell)
+    ? payoutDate({
+        start,
+        daysToSell,
+        dispatchDays: goals.dispatchDays,
+        deliveryDays: goals.deliveryDays,
+        payoutDelayDays: goals.payoutDelayDays,
+      })
+    : {
+        sold: null,
+        dispatch: null,
+        delivered: null,
+        date: null,
+        note: "Days to sell are unknown from the confirmed sales, so a payout date cannot be scheduled.",
+      };
+  const days = schedule.date ? daysUntil(schedule.date, now) : null;
+  let timing;
+  if (cashNeededBy) timing = cashTiming({ payoutDate: schedule.date, cashNeededBy });
+  else if (Number.isFinite(cashNeededDays)) {
+    if (days === null)
+      timing = {
+        status: "unknown",
+        daysLate: null,
+        note: `The payout date is unknown, so it cannot be checked against the ${cashNeededDays} days until you need the cash.`,
+      };
+    else if (days > cashNeededDays)
+      timing = {
+        status: "late",
+        daysLate: days - cashNeededDays,
+        note: `Payout expected ${schedule.date}, ${days - cashNeededDays} day${days - cashNeededDays === 1 ? "" : "s"} after you need the cash.`,
+      };
+    else timing = { status: "on time", daysLate: 0, note: `Payout expected ${schedule.date}, before you need the cash.` };
+  } else timing = cashTiming({ payoutDate: schedule.date, cashNeededBy: null });
+  return {
+    start,
+    ...schedule,
+    days,
+    goals: {
+      daysToSell: Number.isInteger(daysToSell) ? daysToSell : null,
+      daysToSellSource: "confirmed sold sample",
+      dispatchDays: [...goals.dispatchDays],
+      deliveryDays: goals.deliveryDays,
+      payoutDelayDays: goals.payoutDelayDays,
+      saved: Boolean(goals.updated),
+    },
+    cashNeededBy: cashNeededBy || null,
+    cashNeededDays: Number.isFinite(cashNeededDays) ? cashNeededDays : null,
+    timing,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The three prices, side by side, each with its evidence class and date.
+
+const MAX_HISTORY_POINTS = 30;
+
+// Open Prices observations of a barcode, per item only, newest first.
+function observationsFor(db, gtin) {
+  if (!gtin || !tableExists(db, "observations")) return [];
+  const core = gtin.replace(/^0+/, "");
+  const digits = "ltrim(replace(replace(trim(barcode), ' ', ''), '-', ''), '0')";
+  return db
+    .prepare(
+      `SELECT ${OBSERVATION_OFFER_COLUMNS} FROM observations
+ WHERE barcode IS NOT NULL AND ${digits} = ? AND price > 0 AND ${PER_ITEM}
+ ORDER BY day DESC NULLS LAST, id DESC LIMIT 500`,
+    )
+    .all(core)
+    .map(plain)
+    .filter((r) => normaliseBarcode(r.barcode) === gtin);
+}
+
+const historyPoint = (row, evidenceClass, chosen) => ({
+  evidenceClass,
+  provider: row.provider,
+  sourceId: String(row.source_id),
+  price: row.price,
+  observed: row.observed ?? null,
+  retailer: row.retailer ?? null,
+  promotion: row.promotion ?? null,
+  chosen,
+});
+const priceRange = (points) => {
+  const prices = points.map((p) => p.price);
+  const dates = points.map((p) => p.observed).filter(Boolean).sort();
+  return {
+    count: points.length,
+    lowest: prices.length ? Math.min(...prices) : null,
+    highest: prices.length ? Math.max(...prices) : null,
+    oldest: dates[0] ?? null,
+    newest: dates[dates.length - 1] ?? null,
+  };
+};
+
+/**
+ * Three prices for one barcode, kept apart because they answer different
+ * questions:
+ *  claimed   the retailer's claimed price when the source records one:
+ *            an Awin previous price (was_price), else an Awin recommended
+ *            retail price (rrp_price), else the Open Prices price without the
+ *            discount. kind is "previous", "rrp" or "regular". A feed's claim
+ *            is display only and never the cost. Null when no source states one
+ *  observed  the acquisition price over time: dated Retail offers and
+ *            per-item Open Prices observations of the same barcode (the
+ *            chosen offer included), plus Amazon offer history kept
+ *            separately as research context only
+ *  sold      completed resale prices from the confirmed sold sample, with
+ *            the count of exact-variant sales not (yet) in it
+ * Points are newest first, at most 30 per list; each has its evidence class
+ * and its source date. Future-dated points are left out.
+ */
+export function priceComparison(db, offer, rows, sample, now) {
+  const notFuture = (r) => !r.observed || Date.parse(r.observed) <= Date.parse(now);
+  const claim = (price, kind, basis) => ({
+    evidenceClass: KIND.RETAIL,
+    kind,
+    price,
+    observed: offer.observed,
+    basis,
+  });
+  const claimed = offer.wasPrice
+    ? claim(offer.wasPrice, "previous", "Previous price claimed by the retailer in the Awin feed")
+    : offer.rrpPrice
+      ? claim(offer.rrpPrice, "rrp", "Recommended retail price in the Awin feed")
+      : Number.isSafeInteger(offer.regularPrice) && offer.regularPrice > offer.price
+        ? claim(
+            offer.regularPrice,
+            "regular",
+            offer.provider === OPEN_PRICES
+              ? "Price without the discount, recorded with this Open Prices observation"
+              : "Regular price recorded by the source",
+          )
+        : null;
+  const chosenKey = `${offer.provider}|${offer.source_id}`;
+  const retail = [
+    ...rows.filter((r) => r.kind === KIND.RETAIL && normaliseBarcode(r.barcode) === offer.gtin),
+    ...observationsFor(db, offer.gtin),
+  ];
+  const seen = new Set();
+  const retailPoints = [{ ...offer }, ...retail]
+    .filter((r) => {
+      const k = `${r.origin === "observations" ? OPEN_PRICES : r.provider}|${r.source_id}`;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return notFuture(r) && Number.isSafeInteger(r.price) && r.price > 0;
+    })
+    .map((r) => {
+      const provider = r.origin === "observations" ? OPEN_PRICES : r.provider;
+      return historyPoint({ ...r, provider }, KIND.RETAIL, `${provider}|${r.source_id}` === chosenKey);
+    })
+    .sort((a, b) => String(b.observed ?? "").localeCompare(String(a.observed ?? "")));
+  const amazonPoints = rows
+    .filter((r) => r.kind === KIND.AMAZON && normaliseBarcode(r.barcode) === offer.gtin && notFuture(r))
+    .map((r) => historyPoint(r, KIND.AMAZON, false))
+    .sort((a, b) => String(b.observed ?? "").localeCompare(String(a.observed ?? "")));
+  const exactUnused = rows.filter(
+    (r) =>
+      r.kind === KIND.SOLD &&
+      compare(offer, r).status === "exact" &&
+      !sample.used.some((u) => rowKey(u) === rowKey(r)),
+  ).length;
+  const soldPrices = sample.used.map((r) => r.price);
+  return {
+    claimed,
+    observed: {
+      evidenceClass: KIND.RETAIL,
+      points: retailPoints.slice(0, MAX_HISTORY_POINTS),
+      ...priceRange(retailPoints),
+      amazon: {
+        evidenceClass: KIND.AMAZON,
+        note: "Amazon as seller: research context only, not a local offer and not a sale",
+        points: amazonPoints.slice(0, MAX_HISTORY_POINTS),
+        ...priceRange(amazonPoints),
+      },
+    },
+    sold: {
+      evidenceClass: KIND.SOLD,
+      count: sample.count,
+      lowerMedian: sample.lowerMedian,
+      lowest: soldPrices.length ? Math.min(...soldPrices) : null,
+      highest: soldPrices.length ? Math.max(...soldPrices) : null,
+      oldest: sample.oldest,
+      newest: sample.newest,
+      exactNotInSample: exactUnused,
+      note: "Realised totals including buyer postage, from sales you confirmed as the exact variant",
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The journey must be entered: a blank cost or time is never a free, instant
+// trip. Zero is accepted when entered, for example when walking.
+
+export const JOURNEY_CHECK_ID = "journey";
+
+/**
+ * Adds the journey check to an evaluateAlert result unless the gate already
+ * has one, recomputing eligible and reasons. The trip fails closed when the
+ * return journey cost or time was left blank.
+ */
+export function withJourneyCheck(alert, journey) {
+  if (alert.checks.some((c) => c.id === JOURNEY_CHECK_ID)) return alert;
+  const check = {
+    id: JOURNEY_CHECK_ID,
+    ok: journey.known === true,
+    detail: journey.known
+      ? "Return journey cost and time entered"
+      : "Journey cost or time not entered, so travel is left out of profit and earnings per hour",
+  };
+  const at = alert.checks.findIndex((c) => c.id === "hourly-floor");
+  const checks = [...alert.checks];
+  checks.splice(at === -1 ? checks.length : at + 1, 0, check);
+  return {
+    ...alert,
+    eligible: checks.every((c) => c.ok),
+    reasons: checks.filter((c) => !c.ok).map((c) => c.detail),
+    checks,
+  };
+}
+
 /**
  * estimateFromEvidence(db, request, options?) per docs/ARCHITECTURE.md.
  *
@@ -541,11 +946,25 @@ export function resaleWeeksOfSupply(activeListings, rate) {
  *            which rejects the opportunity ("Unit weight unknown").
  *  rules     the member's own threshold overrides (RULE_KEYS). They pass
  *            through effectiveRules, so they can only tighten.
+ *  offerAttributes  { size, pack, model, condition } the operator confirmed
+ *            after looking at the item; they fill only what the source left
+ *            blank (applyOfferAttributes) and are marked operator-confirmed.
+ *  category  "general" | "clothing" | "food"; missing means the offer's
+ *            suggested category. Clothing raises the returns allowance to its
+ *            floor and needs a size; food needs packagingChecked and a
+ *            bestBefore date with enough shelf life after the expected sale.
+ *  packagingChecked, bestBefore  food checks (categoryChecks).
+ *  costs.journeyCost, costs.journeyMinutes  must be entered (0 is allowed
+ *            when entered); a blank one fails the journey check, makes the
+ *            hourly floor and contribution unknown to the gate and sends the
+ *            tier to Review.
  *
  * Returns { offer, sample, competition, match, economics, opportunity,
  * alert } plus thresholds, stock (the availability check used), permission,
- * unitCost, cashNeededDays, inputs, assumptions and warnings. economics is
- * null unless at least one confirmed exact sale qualifies.
+ * unitCost, cashNeededDays, payout (payoutSchedule), prices
+ * (priceComparison), category, journey, offerAttributes, inputs,
+ * assumptions and warnings. economics is null unless at least one confirmed
+ * exact sale qualifies.
  *
  * opportunity is classifyOpportunity(...) from opportunity.mjs (tier,
  * reasons, unitProfit, returnOnCost, targetPrice, meetsThresholds,
@@ -566,7 +985,11 @@ export function estimateFromEvidence(db, request, options = {}) {
   const now = options.now ?? input.now ?? new Date().toISOString();
   if (!Number.isFinite(Date.parse(now))) fail("now must be a date and time");
   ensureFunctions(db);
-  const offer = findOffer(db, input.offer.provider, input.offer.sourceId, now);
+  const attributes = applyOfferAttributes(
+    findOffer(db, input.offer.provider, input.offer.sourceId, now),
+    input.offerAttributes,
+  );
+  const offer = attributes.offer;
   const rows = findCandidates(db, offer);
   const confirmed = new Set(input.sales.map((s) => `${s.provider}|${s.sourceId}`));
   const sample = soldSample(offer, rows, { now, confirmed });
@@ -576,19 +999,39 @@ export function estimateFromEvidence(db, request, options = {}) {
 
   // A promotion or loyalty price the shopper has not confirmed they qualify
   // for is not their cost: use the regular price when the source gives one.
+  // Without one the real cost is unknown, and the tier goes to Review.
   let unitCost = offer.price;
+  let promotionUnconfirmed = false;
+  let costedAtRegularPrice = false;
   if (offer.promotion && !input.promotionEligible) {
     if (offer.regularPrice && offer.regularPrice > offer.price) {
       unitCost = offer.regularPrice;
+      costedAtRegularPrice = true;
       assumptions.push(
         "Promotion eligibility not confirmed, so stock is costed at the regular price",
       );
     } else {
+      promotionUnconfirmed = true;
       warnings.push(
         "This is a promotion or loyalty price and eligibility is not confirmed: you may pay more",
       );
     }
   }
+
+  // Category rules: the returns allowance floor applies to the economics.
+  const suggestion = offer.suggestedCategory;
+  const categoryId = input.category ?? suggestion.id;
+  const rule = categoryRule(categoryId);
+  const returnsRate = categoryReturnsRate(categoryId, input.costs.returnsRate);
+  const costs = { ...input.costs, returnsRate };
+
+  const journeyMissing = ["journeyCost", "journeyMinutes"].filter((k) => input.defaulted.includes(k));
+  const journey = {
+    known: journeyMissing.length === 0,
+    missing: journeyMissing,
+    costKnown: !journeyMissing.includes("journeyCost"),
+    minutesKnown: !journeyMissing.includes("journeyMinutes"),
+  };
 
   const economics =
     sample.count > 0
@@ -596,7 +1039,7 @@ export function estimateFromEvidence(db, request, options = {}) {
           units: input.units,
           unitCost,
           salePrice: sample.lowerMedian,
-          ...input.costs,
+          ...costs,
         })
       : null;
 
@@ -619,35 +1062,57 @@ export function estimateFromEvidence(db, request, options = {}) {
   const cashNeededDays = input.cashNeededBy
     ? daysUntil(input.cashNeededBy, now)
     : input.cashNeededDays;
+  const payout = payoutSchedule({
+    now,
+    daysToSell: sample.daysToSell,
+    goals: savedGoals(db),
+    cashNeededBy: input.cashNeededBy,
+    cashNeededDays,
+  });
+
+  const categoryFailures = categoryChecks({
+    category: categoryId,
+    size: offer.size,
+    returnsRate,
+    packagingChecked: input.packagingChecked,
+    bestBefore: input.bestBefore,
+    daysToSell: sample.daysToSell,
+    now,
+  });
 
   const alertInput = {
     evidenceClass: sampleData ? "sample" : "live",
     match,
-    contribution: economics ? economics.contribution : null,
-    hourly: economics ? economics.hourly : null,
+    // A blank journey cost leaves the contribution unknown; a blank journey
+    // cost or time leaves earnings per hour unknown. Both fail closed.
+    contribution: economics && journey.costKnown ? economics.contribution : null,
+    hourly: economics && journey.known ? economics.hourly : null,
     hourlyFloor: input.hourlyFloor,
+    journeyKnown: journey.known,
     offerObserved: offer.observed,
     now,
     localStockConfirmed: stock.confirmed,
     availability: stock.availability,
     promotion: offer.promotion,
     promotionEligible: input.promotionEligible,
+    costedAtRegularPrice,
     shippingKnown: input.costs.postage > 0,
     recentIndependentSales: sample.independent,
     daysToSell: sample.daysToSell,
     cashNeededDays,
+    payoutDays: payout.days,
     displayPermitted: permission.permitted,
   };
   // Screening pass: classifyOpportunity reads only its evidence and stock
   // checks. Its buying-thresholds and trial-batch results are discarded.
-  const screening = evaluateAlert(alertInput);
+  const screening = withJourneyCheck(evaluateAlert(alertInput), journey);
   const thresholds = thresholdsFor(input.rules);
   const rate = salesPerWeek(sample.count);
   const weeksOfSupply = resaleWeeksOfSupply(resale.activeListings, rate);
   // The purchase price per unit is the price the stock is costed at: the
   // offer price, or the regular price when a promotion's eligibility is not
   // confirmed. The same figure is the base of the return on purchase price.
-  const classification = classifyOpportunity(
+  let classification = classifyOpportunity(
     {
       unitPrice: unitCost,
       weightKg: input.weightKg,
@@ -657,9 +1122,23 @@ export function estimateFromEvidence(db, request, options = {}) {
       daysToSell: sample.daysToSell,
       resaleWeeksOfSupply: weeksOfSupply,
       sourcingPressure: null,
+      availability: stock.availability,
+      promotionUnconfirmed,
+      categoryFailures,
     },
     thresholds.rules,
   );
+  // Without the journey the profit is overstated, so the numbers cannot be
+  // judged yet: Review, unless a hard filter already rejects the item.
+  const journeyReason = screening.checks.find((c) => c.id === JOURNEY_CHECK_ID && !c.ok)?.detail;
+  if (journeyReason && classification.tier !== "Reject" && !classification.reasons.includes(journeyReason))
+    classification = {
+      ...classification,
+      tier: "Review",
+      reasons: [journeyReason, ...(classification.tier === "Review" ? classification.reasons : [])],
+      targetPrice: null,
+      meetsThresholds: false,
+    };
   const opportunity = {
     ...classification,
     unitPrice: unitCost,
@@ -669,13 +1148,16 @@ export function estimateFromEvidence(db, request, options = {}) {
     sourcingPressure: null,
     provenItem: false,
   };
-  const alert = evaluateAlert({
-    ...alertInput,
-    meetsThresholds: classification.meetsThresholds,
-    units: input.units,
-    trialUnits: thresholds.rules.trialUnits,
-    provenItem: false,
-  });
+  const alert = withJourneyCheck(
+    evaluateAlert({
+      ...alertInput,
+      meetsThresholds: classification.meetsThresholds,
+      units: input.units,
+      trialUnits: thresholds.rules.trialUnits,
+      provenItem: false,
+    }),
+    journey,
+  );
 
   if (sampleData) warnings.push("Sample data: illustrative only and never a buy alert");
   if (input.weightKg === null)
@@ -695,16 +1177,24 @@ export function estimateFromEvidence(db, request, options = {}) {
         ? "The offer has no observation date"
         : `The offer price was observed ${offer.ageDays} days ago and has expired`,
     );
+  // stockStatus says in words why stock is not confirmed (no locality, no
+  // recent check in the locality, or a check that found none).
   if (!stock.confirmed)
     warnings.push(
-      input.localStockConfirmed
-        ? `Branch stock is not confirmed: record an availability check from the last ${CHECK_VALID_DAYS} days`
-        : `No availability check in the last ${CHECK_VALID_DAYS} days found stock at this retailer`,
+      stock.reason ??
+        `Branch stock is not confirmed: record an availability check from the last ${CHECK_VALID_DAYS} days`,
     );
   if (input.costs.postage <= 0)
     warnings.push("No parcel cost entered: contribution leaves out postage");
+  if (!journey.costKnown)
+    warnings.push(
+      "No return journey cost entered: profit leaves out travel. Enter 0 only if the trip costs nothing, for example walking",
+    );
+  if (!journey.minutesKnown)
+    warnings.push("No journey time entered: earnings per hour leave out travel time");
   if (input.costs.handlingMinutes <= 0)
     warnings.push("No handling time entered: earnings per hour leave out listing, packing and dispatch");
+  for (const x of attributes.ignored) warnings.push(x.reason);
   if (economics && sample.count < ALERT_RULES.minIndependentSales)
     warnings.push(
       `Only ${sample.count} confirmed sale${sample.count === 1 ? "" : "s"}: the sale estimate is weak`,
@@ -719,12 +1209,28 @@ export function estimateFromEvidence(db, request, options = {}) {
     );
   if (input.defaulted.some((k) => ["feeRate", "feeFixed", "returnsRate", "overheadMinutes"].includes(k)))
     assumptions.push("Sample fee, returns and in-store time assumptions fill the values you left out");
+  if (returnsRate > input.costs.returnsRate)
+    assumptions.push(
+      `${rule.name} returns allowance raised to ${Math.round(returnsRate * 1000) / 10}%, the minimum for the category`,
+    );
+  const confirmedKeys = Object.keys(attributes.applied);
+  if (confirmedKeys.length)
+    assumptions.push(
+      "You confirmed " +
+        confirmedKeys.map((k) => ATTRIBUTE_NAMES[k].toLowerCase() + " " + attributes.applied[k]).join(", ") +
+        " after looking at the item: the source left " +
+        (confirmedKeys.length === 1 ? "it" : "them") +
+        " blank",
+    );
   assumptions.push(
     `Branch stock comes only from an availability check recorded in the last ${CHECK_VALID_DAYS} days, never from a feed or catalogue`,
     "Profit per unit is the contribution divided by units, so it already carries fees, postage, packaging, the returns allowance and the unit's share of travel",
     "Sourcing pressure is unknown at research time, so a research estimate can reach Priority 2 at best",
     `Resale competition uses the confirmed sales spread over ${ALERT_RULES.maxSaleAgeDays} days as the sales rate, which understates demand and so overstates competition`,
     "No verified trade is linked from the ledger yet, so every item is treated as unproven and held to the trial batch",
+    `Payout timing assumes the trip is today and each unit is listed the same day, then uses ${
+      payout.goals.saved ? "your saved Goals" : "the default Goals settings"
+    } for dispatch days, delivery and payout delay`,
   );
 
   const { now: _now, ...inputs } = input;
@@ -741,6 +1247,25 @@ export function estimateFromEvidence(db, request, options = {}) {
     permission,
     unitCost,
     cashNeededDays,
+    // True when the offer or any used sale is sample data: never a buy
+    // alert, and a trip tracked from it is a sample trip in the ledger.
+    sampleData,
+    payout,
+    prices: priceComparison(db, offer, rows, sample, now),
+    category: {
+      id: rule.id,
+      name: rule.name,
+      chosen: input.category ? "request" : "suggested",
+      suggestion,
+      rule,
+      returnsRate,
+      returnsRaised: returnsRate > input.costs.returnsRate,
+      failures: categoryFailures,
+      packagingChecked: input.packagingChecked,
+      bestBefore: input.bestBefore,
+    },
+    journey,
+    offerAttributes: { applied: attributes.applied, ignored: attributes.ignored },
     inputs,
     assumptions,
     warnings,

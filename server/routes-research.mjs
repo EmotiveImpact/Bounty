@@ -2,8 +2,14 @@
 // branch availability checks and the validation audit.
 import { fail, int, reply, text } from "./http.mjs";
 import { ALERT_RULES } from "./alerts.mjs";
-import { OPPORTUNITY_RULES } from "./opportunity.mjs";
-import { RULE_KEYS, candidatesFor, estimateFromEvidence, listOffers } from "./estimate.mjs";
+import { CATEGORY_RULES, OPPORTUNITY_RULES } from "./opportunity.mjs";
+import {
+  OFFER_ATTRIBUTE_KEYS,
+  RULE_KEYS,
+  candidatesFor,
+  estimateFromEvidence,
+  listOffers,
+} from "./estimate.mjs";
 import { listChecks, listItems, progress, recordCheck, recordItem } from "./audit.mjs";
 
 // Query-string helpers: values arrive as text and are validated like JSON.
@@ -38,20 +44,34 @@ export function routes(db) {
     [
       "GET",
       "/api/research/candidates",
+      // size, pack, model and condition in the query are attributes the
+      // operator confirmed after looking at the item; they fill only what the
+      // source left blank, as in the estimate's offerAttributes.
       ({ url }) =>
         candidatesFor(db, {
           provider: queryText(url, "provider", 60),
           sourceId: queryText(url, "sourceId", 200),
+          offerAttributes: Object.fromEntries(
+            OFFER_ATTRIBUTE_KEYS.map((key) => [key, url.searchParams.get(key)]).filter(
+              ([, value]) => value !== null && value !== "",
+            ),
+          ),
           now: serverNow(),
         }),
     ],
     [
       // The agreed buying thresholds and alert rules, so the interface can
       // show what is in force before any estimate is run. overridable lists
-      // the thresholds a member may tighten (never loosen) in an estimate.
+      // the thresholds a member may tighten (never loosen) in an estimate;
+      // categories the clothing and food rules applied on top.
       "GET",
       "/api/research/rules",
-      () => ({ rules: OPPORTUNITY_RULES, overridable: RULE_KEYS, alertRules: ALERT_RULES }),
+      () => ({
+        rules: OPPORTUNITY_RULES,
+        overridable: RULE_KEYS,
+        alertRules: ALERT_RULES,
+        categories: CATEGORY_RULES,
+      }),
     ],
     [
       "POST",

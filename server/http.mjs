@@ -15,12 +15,18 @@ const REPLY = Symbol("reply");
 export const reply = (status, body) => ({ [REPLY]: true, status, body });
 export const isReply = (value) => Boolean(value && value[REPLY]);
 
+// Reads a JSON body of at most limit bytes. Chunks are joined before
+// decoding, so a character split across two chunks is not corrupted.
 export async function readJson(req, limit = 65536) {
-  let text = "";
+  const chunks = [];
+  let bytes = 0;
   for await (const chunk of req) {
-    text += chunk;
-    if (text.length > limit) throw new HttpError(413, "Request too large");
+    const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+    bytes += buffer.length;
+    if (bytes > limit) throw new HttpError(413, "Request too large");
+    chunks.push(buffer);
   }
+  const text = Buffer.concat(chunks).toString("utf8");
   if (!text.trim()) return {};
   try {
     return JSON.parse(text);
@@ -54,18 +60,23 @@ export const oneOf = (value, name, options) =>
     : fail(`${name} must be one of: ${options.join(", ")}`);
 export const bool = (value, name) =>
   typeof value === "boolean" ? value : fail(`${name} must be true or false`);
+// True for a real calendar date written YYYY-MM-DD. Impossible months or
+// days (2026-13-01, 2026-02-30) are false rather than an exception.
+export function isCalendarDate(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const at = new Date(value + "T00:00:00Z");
+  return Number.isFinite(at.getTime()) && at.toISOString().slice(0, 10) === value;
+}
 export const isoDate = (value, name, { optional = false } = {}) => {
   if (optional && (value === undefined || value === null || value === ""))
     return null;
-  return typeof value === "string" &&
-    /^\d{4}-\d{2}-\d{2}$/.test(value) &&
-    new Date(value + "T00:00:00Z").toISOString().slice(0, 10) === value
-    ? value
-    : fail(`${name} must be a calendar date (YYYY-MM-DD)`);
+  return isCalendarDate(value) ? value : fail(`${name} must be a calendar date (YYYY-MM-DD)`);
 };
 
-// Runs fn inside BEGIN IMMEDIATE so concurrent writers serialise.
+// Runs fn inside BEGIN IMMEDIATE so concurrent writers serialise. Inside an
+// open transaction (for example a schema migration) fn joins it.
 export function transaction(db, fn) {
+  if (db.isTransaction) return fn();
   db.exec("BEGIN IMMEDIATE");
   try {
     const result = fn();

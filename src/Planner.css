@@ -106,11 +106,61 @@ h3 .badge {
 .notice.warn {
   color: #8a2716;
 }
+/* Access needs. */
+.badge.planner-access {
+  background: #ece4f5;
+  color: #45307a;
+}
+.badge.planner-access.open {
+  background: #e3e8de;
+  color: #29453a;
+}
+.planner-badges .badge {
+  margin-bottom: 4px;
+}
+/* Text for screen readers only (the access-need detail). */
+.planner-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.planner .card {
+  position: relative;
+}
+.planner-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+.planner-check input {
+  margin: 0;
+}
+.planner .card em + em {
+  margin-top: 2px;
+}
+.planner-cell-note {
+  display: block;
+  margin-top: 2px;
+}
+.planner-rejected ul {
+  padding-left: 20px;
+}
+.planner-rejected li {
+  margin: 6px 0;
+}
+.planner-target-form {
+  margin-top: 16px;
+}
 @media (max-width: 740px) {
   /* The shared phone layout puts aside children in two columns; groups and
      notes need the full width. */
   .planner aside fieldset,
-  .planner aside p {
+  .planner aside p,
+  .planner aside .planner-check {
     grid-column: 1 / -1;
   }
   .planner .card {

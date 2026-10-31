@@ -94,6 +94,8 @@
 }
 .confirm input {
   margin-top: 3px;
+  /* Never squeezed by a long wrapped label beside it. */
+  flex: none;
 }
 .reasons {
   margin: 4px 0 0;
@@ -215,4 +217,79 @@
 }
 .thresholds button {
   margin-top: 8px;
+}
+/* A required field left blank, such as the journey cost or locality. */
+.research-calculator input[aria-invalid="true"] {
+  border-color: #c9b74a;
+  background: #fffdf0;
+}
+.research-calculator .inputs label > span {
+  display: block;
+}
+/* Three prices side by side; one column on a phone. */
+.three-prices {
+  border: 1px solid #c7d0c4;
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 12px 0;
+}
+.price-columns {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 6px;
+}
+.price-col {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.price-col h3 {
+  font: 600 14px system-ui, sans-serif;
+  margin: 0 0 4px;
+}
+.price-col .figure {
+  font-size: 18px;
+  margin: 4px 0 2px;
+}
+.price-points {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  font-size: 13px;
+}
+.price-points b.inline {
+  display: inline;
+}
+.price-col details {
+  margin: 6px 0;
+}
+.payout {
+  border-top: 1px solid #dce0d6;
+  margin-top: 12px;
+}
+.result.stale > :not(small):not(.notice) {
+  opacity: 0.55;
+}
+.attributes .confirm,
+.category .confirm {
+  margin-top: 8px;
+}
+@media (max-width: 740px) {
+  .price-columns {
+    grid-template-columns: 1fr;
+  }
+}
+.research-calculator .note {
+  display: block;
+  font-size: 14px;
+  margin: 4px 0;
+}
+/* The model input with its "no model number" box beneath it. */
+.attributes .model-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.attributes .model-field .confirm {
+  margin-top: 0;
 }

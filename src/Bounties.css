@@ -153,6 +153,86 @@ label.inline {
 .alert-list .badge {
   margin-left: 6px;
 }
+/* "Don't make the trip" lines and notices. */
+.stop {
+  display: block;
+  border-left: 4px solid #8a2716;
+  background: #f8dcd6;
+  color: #6e1d10;
+  padding: 8px 12px;
+  margin: 8px 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.stop-notices {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0;
+}
+.stop-notices li {
+  border-left: 4px solid #8a2716;
+  background: #fbeae6;
+  padding: 6px 10px;
+  margin: 4px 0;
+}
+.stop-notices b {
+  font-size: 14px;
+  color: #6e1d10;
+}
+.alert-list .stop {
+  margin: 6px 0;
+}
+.prevalidation {
+  border-left: 4px solid #8a6d10;
+}
+.claim-form {
+  display: grid;
+  gap: 4px;
+  max-width: 560px;
+}
+.claim-form button {
+  justify-self: start;
+}
+.promotion {
+  border: 1px solid #c7d0c4;
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+/* Stock reports: one card per report, so the operator's verify buttons are
+   always on screen, including at phone width. */
+.reports {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0;
+}
+.report {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(0, 2fr) auto;
+  gap: 4px 12px;
+  align-items: start;
+  border-bottom: 1px solid #dce0d6;
+  padding: 6px 0;
+  font-size: 14px;
+}
+.report-main {
+  display: grid;
+  gap: 2px;
+}
+.report-main b {
+  font-size: 14px;
+}
+.report-note {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 640px) {
+  .report {
+    grid-template-columns: 1fr;
+  }
+  .report-verify .actions button {
+    min-height: 40px;
+    padding: 6px 14px;
+  }
+}
 @media (max-width: 740px) {
   .facts {
     grid-template-columns: 1fr;

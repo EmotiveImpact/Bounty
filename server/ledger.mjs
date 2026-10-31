@@ -8,7 +8,7 @@
 // income: a recorded sale is not cash until the marketplace pays it out, and a
 // prediction is never cash at all. Household savings (the saving against the
 // usual price on things bought for the home) are never earnings or proceeds.
-import { fail, int, isoDate, oneOf, text, transaction } from "./http.mjs";
+import { bool, fail, int, isoDate, oneOf, text, transaction } from "./http.mjs";
 import { removesMetadata } from "./proofs.mjs";
 
 export const TRIP_SOURCES = Object.freeze(["planner", "research", "bounty", "manual"]);
@@ -210,8 +210,27 @@ function legacyTimestamp(value) {
 // ---------------------------------------------------------------------------
 // Reading
 
+/**
+ * Where a trip's prediction came from:
+ *   "sample"  sample or illustrative figures. Every Planner trip is sample
+ *             (the Planner runs on fixtures), and any trip tracked with
+ *             predicted.sample true.
+ *   "live"    the tab that tracked it said the prediction used live evidence
+ *             (predicted.sample false).
+ *   "unknown" a prediction stored without saying either, such as trips tracked
+ *             before the flag existed. Treated like sample: not counted.
+ *   null      no prediction.
+ * Only "live" predictions count in potential proceeds and the forecast
+ * measures.
+ */
+export function predictionBasis(trip) {
+  if (!trip.predicted) return null;
+  if (trip.source === "planner" || trip.predicted.sample === true) return "sample";
+  return trip.predicted.sample === false ? "live" : "unknown";
+}
+
 function tripView(row) {
-  return {
+  const trip = {
     id: Number(row.id),
     label: row.label,
     source: row.source,
@@ -223,6 +242,9 @@ function tripView(row) {
     closed_at: row.closed_at ?? null,
     legacy: row.source === "legacy",
   };
+  trip.predictionBasis = predictionBasis(trip);
+  trip.sample = trip.predictionBasis === "sample";
+  return trip;
 }
 function entryView(row) {
   return {
@@ -311,11 +333,13 @@ export function listTrips(db) {
       proofs: proofs.length,
       realisedContribution: r.realisedContribution,
       householdSavings: r.householdSavings,
+      netHouseholdSaving: r.netHouseholdSaving,
       pendingPayout: r.pendingPayout,
       unsoldUnits: r.unsoldUnits,
       complete: r.checklist.complete,
       discrepancies: r.discrepancies.length,
       verified: r.verified,
+      verificationMissing: r.verificationMissing,
     };
   });
 }
@@ -326,72 +350,189 @@ export function listTrips(db) {
 const pounds = (pence) => "£" + (pence / 100).toFixed(2);
 const sumOf = (entries, type, field = "amount") =>
   entries.filter((e) => e.type === type).reduce((total, e) => total + (e[field] ?? 0), 0);
+const byDate = (a, b) => (a.occurred === b.occurred ? a.id - b.id : a.occurred < b.occurred ? -1 : 1);
+const earliest = (entries, type) =>
+  entries.filter((e) => e.type === type).map((e) => e.occurred).sort()[0] ?? null;
+const shortDate = (date) =>
+  new Date(date + "T12:00:00Z").toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  });
 
 /**
- * A trade is verified only when it has a purchase receipt entry with an
- * attached proof AND a payout entry with an attached proof, and those are two
- * different files. Household trips and legacy totals are never verified.
- * Returns { verified, missing } where missing lists what verification needs.
- */
-export function verification(trip, entries, proofs = []) {
-  if (trip.kind !== "resale")
-    return { verified: false, missing: ["Only resale trades are verified. Household savings are your own record."] };
-  if (trip.source === "legacy")
-    return { verified: false, missing: ["Legacy totals have no purchase receipt or payout record to verify."] };
-  const typeOf = new Map(entries.map((e) => [e.id, e.type]));
-  const hashes = (type) =>
-    new Set(proofs.filter((p) => p.entry_id !== null && typeOf.get(p.entry_id) === type).map((p) => p.sha256));
-  const missing = [];
-  const receiptProofs = hashes("receipt");
-  const payoutProofs = hashes("payout");
-  if (!entries.some((e) => e.type === "receipt")) missing.push("Record the purchase receipt.");
-  else if (!receiptProofs.size) missing.push("Attach a proof to the purchase receipt entry.");
-  if (!entries.some((e) => e.type === "payout")) missing.push("Record the payout.");
-  else if (!payoutProofs.size) missing.push("Attach a proof to the payout entry.");
-  if (
-    !missing.length &&
-    ![...receiptProofs].some((r) => [...payoutProofs].some((p) => p !== r))
-  )
-    missing.push("The receipt and payout proofs are the same file. Attach each document separately.");
-  return { verified: missing.length === 0, missing };
-}
-
-/**
- * Splits recorded sales into paid and still to be paid out.
+ * Splits recorded sales into paid out and still to be paid out.
  *
- * When every payout entry says how many units it covers, sale units are
- * matched to payouts in date order: the gap on paid units is fees the
- * marketplace kept, and only sales of unpaid units are pending (basis
- * "units"). When any payout leaves units out, pending is recorded sales minus
- * payouts floored at 0, an upper bound that still includes fees (basis
- * "amount"). With no payout yet, every recorded sale is pending (basis
- * "no payouts"). Returns { pending, fees, basis }.
+ * Payouts are applied in date order. A payout that says how many units it
+ * covers pays that many sold units, oldest sales first. A payout with no unit
+ * count is taken to cover every sale dated on or before it, because a
+ * marketplace pays a sale out after it happens. The gap between the sales
+ * covered and the payouts is fees the marketplace kept; only sales no payout
+ * covers are pending, so the same money is never both pending and fees.
+ *
+ * basis: "units" when every payout gives its units, "dates" when any payout
+ * was matched by date, "no payouts" when there is none yet (every recorded
+ * sale is pending). Returns { pending, paid, fees, basis } where paid is the
+ * value of the sales covered and fees is null when it cannot be worked out
+ * (no sales, or payouts above the sales they cover).
  */
 export function payoutPosition(entries) {
   const sales = entries
     .filter((e) => e.type === "sale")
-    .sort((a, b) => (a.occurred === b.occurred ? a.id - b.id : a.occurred < b.occurred ? -1 : 1));
-  const payouts = entries.filter((e) => e.type === "payout");
-  const salesTotal = sales.reduce((t, e) => t + e.amount, 0);
+    .sort(byDate)
+    .map((e) => {
+      const units = Math.max(1, e.units ?? 1);
+      return { entry: e, units, left: units };
+    });
+  const payouts = entries.filter((e) => e.type === "payout").sort(byDate);
+  const salesTotal = sales.reduce((t, s) => t + s.entry.amount, 0);
   const payoutTotal = payouts.reduce((t, e) => t + e.amount, 0);
-  if (!payouts.length) return { pending: salesTotal, fees: null, basis: "no payouts" };
-  if (payouts.every((e) => Number.isSafeInteger(e.units) && e.units > 0)) {
-    let unpaid = payouts.reduce((t, e) => t + e.units, 0);
-    let paidAmount = 0;
-    let pending = 0;
-    for (const sale of sales) {
-      const units = Math.max(1, sale.units ?? 1);
-      const covered = Math.min(units, unpaid);
-      unpaid -= covered;
-      const coveredAmount = Math.round((sale.amount * covered) / units);
-      paidAmount += coveredAmount;
-      pending += sale.amount - coveredAmount;
+  if (!payouts.length) return { pending: salesTotal, paid: 0, fees: null, basis: "no payouts" };
+  const hasUnits = (e) => Number.isSafeInteger(e.units) && e.units > 0;
+  for (const payout of payouts) {
+    if (hasUnits(payout)) {
+      let units = payout.units;
+      for (const sale of sales) {
+        if (!units) break;
+        const covered = Math.min(sale.left, units);
+        sale.left -= covered;
+        units -= covered;
+      }
+    } else {
+      for (const sale of sales) if (sale.entry.occurred <= payout.occurred) sale.left = 0;
     }
-    const gap = paidAmount - payoutTotal;
-    return { pending, fees: sales.length && gap >= 0 ? gap : null, basis: "units" };
   }
-  const gap = salesTotal - payoutTotal;
-  return { pending: Math.max(0, gap), fees: salesTotal > 0 && gap >= 0 ? gap : null, basis: "amount" };
+  const pending = sales.reduce((t, s) => t + Math.round((s.entry.amount * s.left) / s.units), 0);
+  const paid = salesTotal - pending;
+  const gap = paid - payoutTotal;
+  return {
+    pending,
+    paid,
+    fees: sales.length && gap >= 0 ? gap : null,
+    basis: payouts.every(hasUnits) ? "units" : "dates",
+  };
+}
+
+/**
+ * Checks a resale trip's records against each other. Legacy totals have no
+ * receipt or sold listing by construction, which the legacy flag explains, so
+ * they are not checked. Returns [{ code, message }].
+ */
+export function findDiscrepancies(trip, entries) {
+  const discrepancies = [];
+  if (trip.kind !== "resale" || trip.source === "legacy") return discrepancies;
+  const flag = (code, message) => discrepancies.push({ code, message });
+  const has = (type) => entries.some((e) => e.type === type);
+  const sales = sumOf(entries, "sale");
+  const payouts = sumOf(entries, "payout");
+  const unitsBought = sumOf(entries, "receipt", "units");
+  const unitsSold = sumOf(entries, "sale", "units");
+  const unitsReturned = sumOf(entries, "refund", "units");
+  const position = payoutPosition(entries);
+  const unitsPaidOut = sumOf(entries, "payout", "units");
+  const firstReceipt = earliest(entries, "receipt");
+  const firstSale = earliest(entries, "sale");
+  const firstPayout = earliest(entries, "payout");
+  const payoutBeforeSale = firstPayout && firstSale && firstPayout < firstSale;
+
+  if (has("payout") && !has("sale"))
+    flag("payout-without-sale", "A payout is recorded without a sold listing.");
+  else if (payouts > sales)
+    flag(
+      "payout-above-sales",
+      `Payouts (${pounds(payouts)}) are above recorded sales (${pounds(sales)}). Record every sold listing.`,
+    );
+  else if (has("payout") && payouts > position.paid && !payoutBeforeSale)
+    flag(
+      "payout-above-paid-sales",
+      `Payouts (${pounds(payouts)}) are above the sold listings they cover (${pounds(position.paid)}). ` +
+        "Check the date and units on each payout.",
+    );
+  if (has("sale") && !has("receipt"))
+    flag("sale-without-receipt", "A sale is recorded without a purchase receipt.");
+  if (unitsSold > unitsBought)
+    flag("sold-above-bought", `More units sold (${unitsSold}) than bought (${unitsBought}).`);
+  if (position.basis === "units" && unitsPaidOut > unitsSold)
+    flag("paid-above-sold", `Payouts cover more units (${unitsPaidOut}) than were sold (${unitsSold}).`);
+  if (unitsReturned > unitsSold)
+    flag("returned-above-sold", `More units returned (${unitsReturned}) than sold (${unitsSold}).`);
+  if (firstReceipt && firstPayout && firstPayout < firstReceipt)
+    flag("payout-before-receipt", "A payout is dated before the first purchase receipt.");
+  if (firstReceipt && firstSale && firstSale < firstReceipt)
+    flag("sale-before-receipt", "A sold listing is dated before the first purchase receipt.");
+  if (payoutBeforeSale)
+    flag("payout-before-sale", "A payout is dated before the first sold listing.");
+  return discrepancies;
+}
+
+/**
+ * The PRD rule: a verified trade needs the purchase receipt and the payout
+ * record, which together prove realised profit. So a resale trade is verified
+ * only when all of these hold:
+ *   - at least one purchase receipt, one sold listing and one payout;
+ *   - every receipt entry and every payout entry has its own proof attached
+ *     to that entry (a whole-trip proof never counts, and one proof never
+ *     covers several entries: a file attached to more than one receipt or
+ *     payout entry counts for none of them);
+ *   - the records reconcile: findDiscrepancies() finds nothing, so no payout
+ *     or sale is dated before the purchase and the amounts and units agree.
+ * Household trips and legacy totals are never verified.
+ * Returns { verified, missing, proofedEntries } where missing gives every
+ * reason the trade is not verified, in words, and proofedEntries lists the
+ * receipt and payout entry ids whose proof counts.
+ */
+export function verification(trip, entries, proofs = []) {
+  if (trip.kind !== "resale")
+    return {
+      verified: false,
+      missing: ["Only resale trades are verified. Household savings are your own record."],
+      proofedEntries: [],
+    };
+  if (trip.source === "legacy")
+    return {
+      verified: false,
+      missing: ["Legacy totals have no purchase receipt or payout record to verify."],
+      proofedEntries: [],
+    };
+  const receipts = entries.filter((e) => e.type === "receipt").sort(byDate);
+  const payouts = entries.filter((e) => e.type === "payout").sort(byDate);
+  const needsProof = new Set([...receipts, ...payouts].map((e) => e.id));
+  // Which receipt or payout entries each file is attached to.
+  const uses = new Map();
+  for (const p of proofs) {
+    if (p.entry_id === null || !needsProof.has(p.entry_id)) continue;
+    const use = uses.get(p.sha256) || { entries: new Set(), label: p.label };
+    use.entries.add(p.entry_id);
+    uses.set(p.sha256, use);
+  }
+  const proofed = new Set();
+  const shared = [];
+  for (const use of uses.values()) {
+    if (use.entries.size === 1) proofed.add([...use.entries][0]);
+    else shared.push(use.label);
+  }
+
+  const missing = [];
+  if (!receipts.length) missing.push("Record the purchase receipt.");
+  if (!entries.some((e) => e.type === "sale")) missing.push("Record the sold listing the payout is for.");
+  if (!payouts.length) missing.push("Record the payout.");
+  const describe = (e) => shortDate(e.occurred) + ", " + pounds(e.amount);
+  for (const e of receipts)
+    if (!proofed.has(e.id)) missing.push(`Attach a proof to the purchase receipt (${describe(e)}).`);
+  for (const e of payouts)
+    if (!proofed.has(e.id)) missing.push(`Attach a proof to the payout (${describe(e)}).`);
+  for (const label of shared)
+    missing.push(
+      `The file "${label}" is attached to more than one receipt or payout entry, so it counts for none ` +
+        "of them. Attach each document to the one entry it records.",
+    );
+  for (const d of findDiscrepancies(trip, entries)) missing.push("Records do not reconcile: " + d.message);
+  return {
+    verified: missing.length === 0,
+    missing,
+    proofedEntries: [...proofed].sort((a, b) => a - b),
+  };
 }
 
 /**
@@ -407,6 +548,9 @@ export function payoutPosition(entries) {
  *   impliedFees = the gap between paid sales and payouts (see payoutPosition).
  *   unsoldUnits = units bought - units sold + units returned, floored at 0.
  *   cashTiedUp = spend not yet recovered by payouts on an open trip.
+ *   forecast.basis / forecast.counted: where the prediction came from (see
+ *     predictionBasis) and whether it counts in the prediction accuracy
+ *     measures (live evidence, and something recorded on the trip).
  * Household trips: saving entries count only as householdSavings, never as
  *   earnings or proceeds; netHouseholdSaving deducts the trip's expenses.
  */
@@ -432,7 +576,6 @@ export function reconcile(trip, entries, proofs = []) {
   const position = resale ? payoutPosition(entries) : { pending: 0, fees: null, basis: null };
   const pendingPayout = open ? position.pending : 0;
   const impliedFees = position.fees;
-  const unitsPaidOut = sumOf(entries, "payout", "units");
   const unsoldUnits = resale ? Math.max(0, unitsBought - unitsSold + unitsReturned) : null;
   const cashTiedUp = resale && open ? Math.max(0, spend - payouts) : 0;
 
@@ -466,39 +609,21 @@ export function reconcile(trip, entries, proofs = []) {
       };
   checklist.complete = checklist.required.every((key) => checklist[key] === "present");
 
-  const discrepancies = [];
-  const flag = (code, message) => discrepancies.push({ code, message });
-  // Legacy totals have no receipt or sold listing by construction; that is
-  // explained by the legacy flag rather than listed as something to fix.
-  if (resale && trip.source !== "legacy") {
-    if (has("payout") && !has("sale"))
-      flag("payout-without-sale", "A payout is recorded without a sold listing.");
-    else if (payouts > sales)
-      flag(
-        "payout-above-sales",
-        `Payouts (${pounds(payouts)}) are above recorded sales (${pounds(sales)}). Record every sold listing.`,
-      );
-    if (has("sale") && !has("receipt"))
-      flag("sale-without-receipt", "A sale is recorded without a purchase receipt.");
-    if (unitsSold > unitsBought)
-      flag("sold-above-bought", `More units sold (${unitsSold}) than bought (${unitsBought}).`);
-    if (position.basis === "units" && unitsPaidOut > unitsSold)
-      flag("paid-above-sold", `Payouts cover more units (${unitsPaidOut}) than were sold (${unitsSold}).`);
-    if (unitsReturned > unitsSold)
-      flag("returned-above-sold", `More units returned (${unitsReturned}) than sold (${unitsSold}).`);
-    if (payoutSpan !== null && payoutSpan < 0)
-      flag("payout-before-receipt", "The last payout is dated before the first purchase receipt.");
-  }
+  const discrepancies = findDiscrepancies(trip, entries);
   checklist.reconciled = checklist.complete && discrepancies.length === 0;
 
-  const { verified, missing } = verification(trip, entries, proofs);
+  const { verified, missing, proofedEntries } = verification(trip, entries, proofs);
 
   let forecast = null;
   if (resale && trip.predicted) {
     const p = trip.predicted;
     const predictedHourly =
       p.activeMinutes > 0 ? Math.round((p.contribution * 60) / p.activeMinutes) : null;
+    const basis = predictionBasis(trip);
     forecast = {
+      basis,
+      // Counts in the prediction accuracy measures once the trip is closed.
+      counted: basis === "live" && entries.length > 0,
       final: !open,
       predictedUnits: p.units,
       predictedProceeds: p.proceeds,
@@ -543,6 +668,7 @@ export function reconcile(trip, entries, proofs = []) {
     discrepancies,
     verified,
     verificationMissing: missing,
+    proofedEntries,
     forecast,
     timeToPayoutDays,
   };
@@ -554,10 +680,17 @@ export function reconcile(trip, entries, proofs = []) {
 const isObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 const absent = (value) => value === undefined || value === null || value === "";
 
-/** Validates the predictions stored with a trip (all integer pence/minutes). */
-function predictedInput(value) {
+/**
+ * Validates the predictions stored with a trip (all integer pence/minutes).
+ * sample: true when the prediction came from sample or illustrative figures,
+ * false when it came from live evidence; left out, it is stored as null and
+ * the prediction is not counted (see predictionBasis). Planner predictions are
+ * always stored as sample.
+ */
+function predictedInput(value, source) {
   if (absent(value)) return null;
   if (!isObject(value)) fail("predicted must be an object");
+  const sample = absent(value.sample) ? null : bool(value.sample, "predicted.sample");
   return {
     units: int(value.units, "predicted.units", 1, MAX_UNITS),
     proceeds: int(value.proceeds, "predicted.proceeds (pence)", 0, MAX_PENCE),
@@ -565,6 +698,7 @@ function predictedInput(value) {
     cashRequired: int(value.cashRequired, "predicted.cashRequired (pence)", 0, MAX_PENCE),
     activeMinutes: int(value.activeMinutes, "predicted.activeMinutes", 0, 100000),
     payoutBy: isoDate(value.payoutBy, "predicted.payoutBy", { optional: true }),
+    sample: source === "planner" ? true : sample,
   };
 }
 
@@ -578,7 +712,7 @@ export function createTrip(db, input, { now = new Date() } = {}) {
   const source = oneOf(input.source, "source", TRIP_SOURCES);
   const kind = oneOf(input.kind, "kind", TRIP_KINDS);
   const reference = text(input.reference, "reference", 120, { optional: true });
-  const predicted = predictedInput(input.predicted);
+  const predicted = predictedInput(input.predicted, source);
   if (predicted && kind !== "resale")
     fail("Predictions apply to resale trips only. Household savings are recorded as they happen.");
   const result = db
@@ -649,7 +783,8 @@ export function addEntry(db, tripId, input, { now = new Date() } = {}) {
 /**
  * Removes a mistaken entry from an open trip. A proof attached to it stays
  * stored but becomes a whole-trip proof, so it no longer counts towards
- * verification. Closed trips and legacy totals cannot be changed.
+ * verification until it is linked to another entry (relinkProof) or removed
+ * (removeProof). Closed trips and legacy totals cannot be changed.
  */
 export function deleteEntry(db, tripId, entryId) {
   const trip = requireTrip(db, tripId);
@@ -686,15 +821,61 @@ export function proofTarget(db, tripId, input) {
     fail("Legacy totals cannot be verified. Create a new trip with the receipt and payout.", 409);
   if (!isObject(input)) fail("Send a JSON object");
   const label = text(input.label, "label", 120);
-  let entryId = null;
-  if (!absent(input.entryId)) {
-    entryId = int(input.entryId, "entryId", 1, Number.MAX_SAFE_INTEGER);
-    const entry = db
-      .prepare("SELECT id FROM ledger_entries WHERE id = ? AND trip_id = ?")
-      .get(entryId, trip.id);
-    if (!entry) fail("entryId must be an entry on this trip");
-  }
-  return { trip, entryId, label };
+  return { trip, entryId: entryOnTrip(db, trip, input.entryId), label };
+}
+
+/** An entry id that belongs to the trip, or null (whole trip) when absent. */
+function entryOnTrip(db, trip, value) {
+  if (absent(value)) return null;
+  const entryId = int(value, "entryId", 1, Number.MAX_SAFE_INTEGER);
+  const entry = db
+    .prepare("SELECT id FROM ledger_entries WHERE id = ? AND trip_id = ?")
+    .get(entryId, trip.id);
+  if (!entry) fail("entryId must be an entry on this trip");
+  return entryId;
+}
+
+function requireProof(db, tripId, proofId) {
+  const trip = requireTrip(db, tripId);
+  const row = db.prepare("SELECT * FROM ledger_proofs WHERE id = ? AND trip_id = ?").get(proofId, trip.id);
+  if (!row) fail("No proof " + proofId + " on this trip", 404);
+  return { trip, row };
+}
+
+/**
+ * Moves a stored proof to another entry on the same trip, or to the whole
+ * trip with entryId null (which does not count towards verification). When
+ * the same file is already attached to that entry, the duplicate record is
+ * removed instead. Works on open and closed trips, since proofs are evidence
+ * about the records rather than records themselves. Returns the trip detail.
+ */
+export function relinkProof(db, tripId, proofId, input) {
+  const { trip, row } = requireProof(db, tripId, proofId);
+  if (!isObject(input) || !("entryId" in input))
+    fail("Send entryId: an entry on this trip, or null for the whole trip");
+  const entryId = entryOnTrip(db, trip, input.entryId);
+  transaction(db, () => {
+    const duplicate = db
+      .prepare("SELECT id FROM ledger_proofs WHERE trip_id = ? AND entry_id IS ? AND sha256 = ? AND id != ?")
+      .get(trip.id, entryId, row.sha256, row.id);
+    if (duplicate) db.prepare("DELETE FROM ledger_proofs WHERE id = ?").run(row.id);
+    else db.prepare("UPDATE ledger_proofs SET entry_id = ? WHERE id = ?").run(entryId, row.id);
+  });
+  return getTrip(db, trip.id);
+}
+
+/**
+ * Removes a proof record. Returns { sha256, fileUnused } where fileUnused is
+ * true when no other proof record (on any trip) refers to the same stored
+ * file, so the caller may delete the file itself.
+ */
+export function removeProof(db, tripId, proofId) {
+  const { row } = requireProof(db, tripId, proofId);
+  return transaction(db, () => {
+    db.prepare("DELETE FROM ledger_proofs WHERE id = ?").run(row.id);
+    const others = db.prepare("SELECT COUNT(*) AS n FROM ledger_proofs WHERE sha256 = ?").get(row.sha256);
+    return { sha256: row.sha256, fileUnused: Number(others.n) === 0 };
+  });
 }
 
 /**
@@ -727,16 +908,27 @@ export function recordProof(db, { tripId, entryId, label, sha256, bytes, mediaTy
  *   realisedEarnings = resale payouts minus resale receipts, expenses and
  *     refunds dated in the month. Stock bought in one month and paid out in
  *     the next shows as a cost in the first month and income in the second.
- *   householdSavings = saving entries dated in the month. Never earnings.
+ *   householdSavings = household saving entries minus household trip
+ *     expenses (travel, parking) dated in the month, so a trip that cost more
+ *     than it saved lowers the figure. Never earnings. This is the figure a
+ *     savings goal counts. householdSavingsGross and householdTripCosts are
+ *     its two parts.
  *   realisedMinutes = resale work minutes dated in the month;
  *     realisedHourly = realisedEarnings per hour of that time (null without).
  *   payouts / verifiedPayouts / verifiedEarnings = the same cash figures, in
- *     total and for verified trades only (receipt and payout proofs attached).
+ *     total and for verified trades only (see verification(): every receipt
+ *     and payout has its own proof, a sale is recorded and the records
+ *     reconcile).
  * Current position (open resale trips, whatever their dates):
- *   pendingPayouts = recorded sales not yet paid out (may include fees).
- *   potentialProceeds = predicted proceeds on open trips with no payout yet,
- *     less sales already recorded on them (those are under pendingPayouts),
- *     so the two figures never count the same money. An estimate only.
+ *   pendingPayouts = recorded sales no payout covers yet (payoutPosition).
+ *   potentialProceeds = predicted proceeds on open trips whose prediction
+ *     came from live evidence, that have a purchase receipt and no payout
+ *     yet. The prediction is scaled to the units actually bought, and sales
+ *     already recorded are taken off (those are under pendingPayouts), so the
+ *     two figures never count the same money. An estimate only.
+ *     potentialProceedsLeftOut counts the open trips with a prediction that
+ *     were left out: sample predictions, predictions whose evidence basis was
+ *     not recorded, and trips where nothing has been bought yet.
  *   cashTiedUp = spend not yet recovered by payouts.
  *   unsoldUnits = units bought and not yet sold.
  */
@@ -745,7 +937,8 @@ export function summary(db, month) {
   const inMonth = (e) => e.occurred.slice(0, 7) === month;
   const totals = {
     realisedEarnings: 0,
-    householdSavings: 0,
+    householdSavingsGross: 0,
+    householdTripCosts: 0,
     pendingPayouts: 0,
     potentialProceeds: 0,
     cashTiedUp: 0,
@@ -758,10 +951,12 @@ export function summary(db, month) {
     verifiedTrips: 0,
     unverifiedTrips: 0,
   };
+  const leftOut = { sample: 0, basisUnknown: 0, nothingBought: 0 };
   for (const { trip, entries, proofs } of loadAll(db)) {
     const monthEntries = entries.filter(inMonth);
     if (trip.kind === "household") {
-      totals.householdSavings += sumOf(monthEntries, "saving");
+      totals.householdSavingsGross += sumOf(monthEntries, "saving");
+      totals.householdTripCosts += sumOf(monthEntries, "expense");
       continue;
     }
     const r = reconcile(trip, entries, proofs);
@@ -781,16 +976,28 @@ export function summary(db, month) {
       totals.pendingPayouts += r.pendingPayout;
       totals.cashTiedUp += r.cashTiedUp;
       totals.unsoldUnits += r.unsoldUnits;
-      if (trip.predicted && r.payouts === 0)
-        totals.potentialProceeds += Math.max(0, trip.predicted.proceeds - r.sales);
+      // Once a payout arrives the trip's actual figures replace the estimate.
+      if (trip.predicted && r.payouts === 0) {
+        const p = trip.predicted;
+        if (trip.predictionBasis === "sample") leftOut.sample += 1;
+        else if (trip.predictionBasis !== "live") leftOut.basisUnknown += 1;
+        else if (!entries.some((e) => e.type === "receipt")) leftOut.nothingBought += 1;
+        else {
+          const units = Math.min(r.unitsBought, p.units);
+          totals.potentialProceeds += Math.max(0, Math.floor((p.proceeds * units) / p.units) - r.sales);
+        }
+      }
     }
   }
   return {
     month,
     realisedEarnings: totals.realisedEarnings,
-    householdSavings: totals.householdSavings,
+    householdSavings: totals.householdSavingsGross - totals.householdTripCosts,
+    householdSavingsGross: totals.householdSavingsGross,
+    householdTripCosts: totals.householdTripCosts,
     pendingPayouts: totals.pendingPayouts,
     potentialProceeds: totals.potentialProceeds,
+    potentialProceedsLeftOut: leftOut,
     cashTiedUp: totals.cashTiedUp,
     unsoldUnits: totals.unsoldUnits,
     realisedMinutes: totals.realisedMinutes,
@@ -806,7 +1013,9 @@ export function summary(db, month) {
     openTrips: totals.openTrips,
     basis:
       "Cash basis: payouts dated in the month minus receipts, expenses and refunds dated in the month. " +
-      "Pending payouts, potential proceeds, cash tied up and unsold units are the current position of open resale trips.",
+      "Household savings are savings dated in the month less household trip expenses dated in the month. " +
+      "Pending payouts, potential proceeds, cash tied up and unsold units are the current position of open resale trips. " +
+      "Potential proceeds count only live-evidence predictions on trips with a purchase receipt.",
   };
 }
 
@@ -825,13 +1034,18 @@ function median(values) {
  * separately because they cannot be reconciled):
  *   forecast: mean absolute and mean contribution error (realised minus
  *     predicted, so negative means it earned less than predicted) and the
- *     same for minutes (actual minus predicted), over trips with predictions.
+ *     same for minutes (actual minus predicted), over trips whose prediction
+ *     came from live evidence and that have something recorded. leftOut
+ *     counts the closed trips with a prediction that were not measured:
+ *     sample predictions, predictions whose evidence basis was not recorded
+ *     and trips closed with nothing recorded (never taken).
  *   cash: recovery rate = payouts / spend (receipts, expenses and refunds),
- *     with the verified share of payouts.
+ *     with the payouts of verified trades.
  *   medianTimeToPayoutDays: first receipt to last payout.
  *   unsoldUnits: units left unsold when the trips were closed.
  *   hourly: realised earnings per hour over trips with work recorded, and a
- *     like-for-like comparison with predicted hourly on trips that have both.
+ *     like-for-like comparison with predicted hourly on the measured trips
+ *     that have both.
  */
 export function metrics(db) {
   const all = loadAll(db);
@@ -839,7 +1053,15 @@ export function metrics(db) {
   const closed = all
     .filter(({ trip }) => trip.kind === "resale" && trip.status === "closed" && !trip.legacy)
     .map(({ trip, entries, proofs }) => ({ trip, r: reconcile(trip, entries, proofs) }));
-  const predicted = closed.filter(({ trip }) => trip.predicted);
+  const leftOut = { sample: 0, basisUnknown: 0, notTaken: 0 };
+  const predicted = closed.filter(({ trip, r }) => {
+    if (!trip.predicted) return false;
+    if (r.forecast.counted) return true;
+    if (r.forecast.basis === "sample") leftOut.sample += 1;
+    else if (r.forecast.basis !== "live") leftOut.basisUnknown += 1;
+    else leftOut.notTaken += 1;
+    return false;
+  });
   const contributionErrors = predicted.map(({ r }) => r.forecast.contributionError);
   const minutesErrors = predicted
     .map(({ r }) => r.forecast.minutesError)
@@ -864,6 +1086,7 @@ export function metrics(db) {
       minutesTrips: minutesErrors.length,
       meanAbsoluteMinutesError: mean(minutesErrors.map(Math.abs)),
       meanMinutesError: mean(minutesErrors),
+      leftOut,
     },
     cash: {
       spend,

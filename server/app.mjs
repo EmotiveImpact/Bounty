@@ -18,6 +18,12 @@ export const routeModules = [
 ];
 
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+// The Host header as sent, without its port and without URL normalisation,
+// so lookalikes such as 0x7f.1 or 2130706433 are not treated as local.
+const hostHeader = (value) => {
+  const match = /^(\[[0-9a-f:.]+\]|[^:[\]]+)(?::\d{1,5})?$/.exec(String(value).trim().toLowerCase());
+  return match ? match[1] : "";
+};
 const hostname = (value) => {
   try {
     return new URL("http://" + value).hostname;
@@ -69,7 +75,7 @@ export function createApi(db, { modules = routeModules } = {}) {
     };
     try {
       // DNS-rebinding guard: only answer requests addressed to this machine.
-      if (!LOCAL_HOSTS.has(hostname(req.headers.host || "")))
+      if (!LOCAL_HOSTS.has(hostHeader(req.headers.host || "")))
         return send(403, { error: "Local access only" });
       const url = new URL(req.url, "http://127.0.0.1");
       const method = req.method || "GET";
@@ -77,8 +83,15 @@ export function createApi(db, { modules = routeModules } = {}) {
         const origin = req.headers.origin;
         if (origin && !LOCAL_HOSTS.has(hostname(origin.replace(/^\w+:\/\//, ""))))
           return send(403, { error: "Local access only" });
-        // Forms cannot send JSON cross-site without a preflight.
-        if (!String(req.headers["content-type"] || "").includes("application/json"))
+        // Browsers mark requests from another site; refuse those writes even
+        // when an Origin header is missing.
+        if (req.headers["sec-fetch-site"] === "cross-site")
+          return send(403, { error: "Local access only" });
+        // Forms and other simple cross-site requests cannot send JSON without
+        // a preflight. Only the media type itself counts, so a parameter
+        // such as "text/plain; x=application/json" is refused.
+        const type = String(req.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+        if (type !== "application/json")
           return send(415, { error: "Send JSON with Content-Type: application/json" });
       }
       const found = find(method, url.pathname);

@@ -6,10 +6,23 @@
 // must fit the profile's budget. Figures are estimates from sample data and
 // never a buy alert.
 import { addMissingColumns } from "./contract.mjs";
-import { fail, int, isoDate, oneOf } from "./http.mjs";
+import { fail, int, isoDate, oneOf, text } from "./http.mjs";
 import { SAMPLE_ASSUMPTIONS, lowerMedian, tripEconomics } from "./trip.mjs";
-import { effectiveRules } from "./opportunity.mjs";
-import { assessSample, describeRules, journeyFor, sameArea } from "./catalog.mjs";
+import { effectiveRules, hardFilters } from "./opportunity.mjs";
+import {
+  QUANTITY_RULES,
+  accessNeeds,
+  assessSample,
+  categoryTerms,
+  checkedAndUncertainty,
+  demandUnits,
+  describeRules,
+  fareMissing,
+  journeyFor,
+  loadLimit,
+  sameArea,
+} from "./catalog.mjs";
+import { getTrip, listTrips } from "./ledger.mjs";
 
 // One settings row (id 1). dispatch_days is a JSON array of weekday numbers,
 // 0 Sunday to 6 Saturday. days_to_sell, delivery_days and payout_delay_days
@@ -62,10 +75,23 @@ export const DEFAULT_GOALS = Object.freeze({
   payoutDelayDays: 2,
 });
 
-/** Creates the goals table, adding any missing column to an older one. */
+// Named goals: what the money is for (a hobby, fuel, a bill such as car
+// insurance), the amount in pence, an optional deadline and the date from
+// which received cash counts.
+export const GOAL_TARGETS_TABLE = `CREATE TABLE IF NOT EXISTS goal_targets (
+ id INTEGER PRIMARY KEY,
+ name TEXT NOT NULL,
+ amount INTEGER NOT NULL CHECK (amount > 0),
+ deadline TEXT,
+ start TEXT NOT NULL,
+ created TEXT NOT NULL
+)`;
+
+/** Creates the goals tables, adding any missing column to an older one. */
 export function schema(db) {
   db.exec(GOALS_TABLE);
   addMissingColumns(db, "goals", GOAL_COLUMNS, GOAL_TYPES);
+  db.exec(GOAL_TARGETS_TABLE);
 }
 
 // A stored list that is unreadable becomes empty, which fails closed: no
@@ -220,6 +246,144 @@ export function cashTiming({ payoutDate: payout, cashNeededBy }) {
   };
 }
 
+/**
+ * Payout timing for a trip decided at `now` under the saved goals: the
+ * payoutDate() result, the cashTiming() check against the cash date, days
+ * from today to the payout (payoutDays, null when it cannot be scheduled)
+ * and to the cash date (cashNeededDays, null without one), and the days to
+ * sell assumed. evaluateAlert reads payoutDays and cashNeededDays.
+ */
+export function tripTiming(goals, { now = new Date().toISOString() } = {}) {
+  const start = now.slice(0, 10);
+  const payout = payoutDate({
+    start,
+    daysToSell: goals.daysToSell,
+    dispatchDays: goals.dispatchDays,
+    deliveryDays: goals.deliveryDays,
+    payoutDelayDays: goals.payoutDelayDays,
+  });
+  return {
+    start,
+    daysToSell: goals.daysToSell,
+    payout,
+    payoutDays: payout.date ? daysBetween(start, payout.date) : null,
+    cashNeededBy: goals.cashNeededBy || null,
+    cashNeededDays: goals.cashNeededBy ? daysBetween(start, goals.cashNeededBy) : null,
+    cash: cashTiming({ payoutDate: payout.date, cashNeededBy: goals.cashNeededBy }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Named goals with deadlines
+
+const EARLIEST = "2000-01-01";
+
+/** Validates a named goal. The deadline, when set, is today or later. */
+export function readTarget(input, { today }) {
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    fail("Send the goal as a JSON object");
+  const name = text(input.name, "name (what the money is for)", 80);
+  const amount = int(input.amount, "amount (pence)", 1, 10_000_000);
+  const deadline = isoDate(input.deadline, "deadline", { optional: true });
+  const start = isoDate(input.start, "start", { optional: true }) || today;
+  if (start < EARLIEST) fail(`start must be on or after ${EARLIEST}`);
+  if (start > today) fail("start cannot be in the future");
+  if (deadline && deadline < today) fail("deadline must be today or later");
+  return { name, amount, deadline, start };
+}
+
+/** Saves a new named goal and returns its id. */
+export function addTarget(db, input, { now = new Date().toISOString() } = {}) {
+  const t = readTarget(input, { today: now.slice(0, 10) });
+  const result = db
+    .prepare("INSERT INTO goal_targets (name, amount, deadline, start, created) VALUES (?, ?, ?, ?, ?)")
+    .run(t.name, t.amount, t.deadline, t.start, now);
+  return Number(result.lastInsertRowid);
+}
+
+/** Deletes a named goal. 404 when there is none with that id. */
+export function deleteTarget(db, id) {
+  const result = db.prepare("DELETE FROM goal_targets WHERE id = ?").run(id);
+  if (!result.changes) fail("No goal with id " + id, 404);
+  return { deleted: id };
+}
+
+// Dated cash movements on resale trips, read through the ledger's own API:
+// payouts in, receipts, expenses and refunds out. Sales and predictions are
+// not cash and never count. Household savings are not earnings.
+function cashMovements(db) {
+  const moves = [];
+  for (const trip of listTrips(db)) {
+    if (trip.kind !== "resale") continue;
+    for (const e of getTrip(db, trip.id).entries) {
+      if (e.type === "payout") moves.push({ date: e.occurred, payout: e.amount, cost: 0 });
+      else if (["receipt", "expense", "refund"].includes(e.type))
+        moves.push({ date: e.occurred, payout: 0, cost: e.amount });
+    }
+  }
+  return moves;
+}
+
+export const TARGET_BASIS =
+  "Counts only cash received: payouts dated from the goal's start to its deadline (or to today), less receipts, expenses and refunds dated in the same days. Pending payouts and potential proceeds never count. Goals are funded in deadline order, and cash already counted towards an earlier goal whose dates overlap is not counted again.";
+
+/**
+ * Named goals with progress, earliest deadline first (goals without a
+ * deadline last). For each goal:
+ *   payouts, costs   cash dated within [start, deadline or today]
+ *   received         payouts less costs, at least 0
+ *   counted          received less what earlier overlapping goals counted,
+ *                    capped at the amount
+ *   remaining        amount less counted
+ *   status           "reached", "in progress", "missed" (deadline passed
+ *                    short of the amount)
+ *   daysLeft         days to the deadline, null without one
+ * Returns { targets, basis }.
+ */
+export function goalTargets(db, { now = new Date().toISOString() } = {}) {
+  const today = now.slice(0, 10);
+  const rows = db.prepare("SELECT * FROM goal_targets").all();
+  const moves = rows.length ? cashMovements(db) : [];
+  const order = (r) => [r.deadline || "9999-12-31", Number(r.id)];
+  rows.sort((a, b) => {
+    const [da, ia] = order(a);
+    const [db2, ib] = order(b);
+    return da < db2 ? -1 : da > db2 ? 1 : ia - ib;
+  });
+  const done = [];
+  const targets = rows.map((r) => {
+    const end = r.deadline && r.deadline < today ? r.deadline : r.deadline || today;
+    const within = moves.filter((m) => m.date >= r.start && m.date <= end);
+    const payouts = within.reduce((t, m) => t + m.payout, 0);
+    const costs = within.reduce((t, m) => t + m.cost, 0);
+    const received = Math.max(0, payouts - costs);
+    const shared = done
+      .filter((d) => d.start <= end && d.end >= r.start)
+      .reduce((t, d) => t + d.counted, 0);
+    const counted = Math.min(Number(r.amount), Math.max(0, received - shared));
+    const passed = Boolean(r.deadline) && r.deadline < today;
+    const status = counted >= r.amount ? "reached" : passed ? "missed" : "in progress";
+    done.push({ start: r.start, end, counted });
+    return {
+      id: Number(r.id),
+      name: r.name,
+      amount: Number(r.amount),
+      deadline: r.deadline || null,
+      start: r.start,
+      created: r.created,
+      payouts,
+      costs,
+      received,
+      shared: Math.min(shared, received),
+      counted,
+      remaining: Number(r.amount) - counted,
+      status,
+      daysLeft: r.deadline ? daysBetween(today, r.deadline) : null,
+    };
+  });
+  return { targets, basis: TARGET_BASIS };
+}
+
 // Basket search bounds and the shared-journey approximation. A basket's one
 // journey runs to the furthest shop in it; each extra shop visited adds 0.5
 // mile to the one-way distance (so a mile on the return trip, costed and timed
@@ -271,28 +435,35 @@ const better = (a, b) => b.contribution - a.contribution || (b.hourly ?? -Infini
  * Compares baskets under one cash constraint.
  *
  * Searches unit allocations across the offers in the profile's area (at most
- * eight offers, at most BASKET_SEARCH.maxBaskets allocations). Each item is
- * bounded by its stock, the carry limit, storage and the profile's maximum
- * units; the whole basket must also fit: cash required before payout
- * (including the one shared journey) within the budget, total weight within
- * the carry limit, and total units within storage and the maximum units per
- * trip. Storage is the smaller of the profile's storage and the goals'
- * storage. Baskets are ranked by contribution, then earnings per hour.
+ * eight offers, at most BASKET_SEARCH.maxBaskets allocations). Offers that
+ * fail a hard filter (price band or weight) never enter a basket: they are
+ * listed under `excluded` with the reason. Each item is bounded by its stock,
+ * the load limit, storage, the profile's maximum units, the trial batch for
+ * a first purchase and the units its sales rate supports in the sell window
+ * after competing listings; the whole basket must also fit: cash required
+ * before payout (including the one shared journey) within the budget, total
+ * weight within the load limit, and total units within storage and the
+ * maximum units per trip. The load limit is loadLimit() for the transport,
+ * as in the Planner. Storage is the smaller of the profile's storage and the
+ * goals' storage. Baskets are ranked by contribution after the journey, then
+ * earnings per hour.
  *
  * Returns the top five baskets and the best single-item trip (plus the
  * thresholds applied and any looser override ignored), each with
  * economics, the downside if nothing sells and if half sells, cash timing,
  * and the reasons it falls short. At most one basket is marked recommended:
  * the best-ranked one with positive contribution, the hourly target met,
- * every item inside the buying thresholds and, when a cash date is set, the
- * payout on time. A basket with contribution of zero or below is never
- * recommended.
+ * every item inside the buying thresholds and the trial batch, a public
+ * transport fare entered when travelling by public transport and, when a
+ * cash date is set, the payout on time. A basket with contribution of zero
+ * or below is never recommended.
  */
 export function basketOptions(offers, profile, goals, { now = new Date().toISOString() } = {}) {
   const rules = effectiveRules(profile.rules || {});
   const storage = Math.min(profile.storage, goals.storageUnits);
   const unitCap = Math.min(profile.quantity, storage);
-  const carryGrams = Math.floor(profile.carry * 1000 + 1e-6);
+  const load = loadLimit(profile.transport, profile.carry);
+  const carryGrams = Math.floor(load * 1000 + 1e-6);
   const excluded = [];
   const pool = [];
   for (const offer of offers) {
@@ -301,12 +472,35 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
       excluded.push({ ...brief, reason: "Outside your area" });
       continue;
     }
-    const grams = Math.round(offer.weight * 1000);
-    const max = Math.min(offer.stock, grams > 0 ? Math.floor(carryGrams / grams) : 0, unitCap);
-    if (!(max >= 1)) {
-      excluded.push({ ...brief, reason: "No units fit your carrying, storage or unit limits" });
+    const hard = hardFilters({ unitPrice: offer.buy, weightKg: offer.weight }, rules);
+    if (hard.length) {
+      excluded.push({ ...brief, reason: hard.join("; "), rejected: true });
       continue;
     }
+    const grams = Math.round(offer.weight * 1000);
+    const caps = {
+      stock: offer.stock,
+      carry: grams > 0 ? Math.floor(carryGrams / grams) : 0,
+      units: unitCap,
+      trial: offer.provenItem === true ? unitCap : rules.trialUnits,
+      demand: demandUnits(offer),
+    };
+    const max = Math.min(...Object.values(caps));
+    if (!(max >= 1)) {
+      const zero = {
+        stock: "no stock on the shelf",
+        carry: "your load limit",
+        units: "your storage or maximum units",
+        trial: "the trial batch",
+        demand: `expected demand in ${QUANTITY_RULES.sellWindowWeeks} weeks after competing listings`,
+      };
+      excluded.push({
+        ...brief,
+        reason: "No units fit: " + Object.keys(caps).filter((k) => !(caps[k] >= 1)).map((k) => zero[k]).join(", "),
+      });
+      continue;
+    }
+    const terms = categoryTerms(offer, profile, now);
     const salePrice = lowerMedian([...offer.sales]) ?? 0;
     const base = {
       unitCost: offer.buy,
@@ -315,7 +509,7 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
       packaging: offer.pack,
       feeRate: profile.feeRate,
       feeFixed: profile.feeFixed,
-      returnsRate: profile.returnsRate,
+      returnsRate: terms.returnsRate,
       journeyMinutes: 0,
       overheadMinutes: 0,
       handlingMinutes: offer.handlingMinutes,
@@ -323,7 +517,7 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
     // Contribution and cash are linear in units once the journey is fixed,
     // so one unit with no journey gives the per-unit figures.
     const one = tripEconomics({ ...base, units: 1, journeyCost: 0 });
-    pool.push({ offer, base, grams, max, net: one.contribution, cash: one.cashRequired });
+    pool.push({ offer, base, terms, grams, max, net: one.contribution, cash: one.cashRequired });
   }
   pool.sort((a, b) => b.net - a.net);
   for (const p of pool.splice(BASKET_SEARCH.maxOffers))
@@ -334,14 +528,7 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
       reason: `Only the ${BASKET_SEARCH.maxOffers} strongest offers are searched`,
     });
 
-  const payout = payoutDate({
-    start: now.slice(0, 10),
-    daysToSell: goals.daysToSell,
-    dispatchDays: goals.dispatchDays,
-    deliveryDays: goals.deliveryDays,
-    payoutDelayDays: goals.payoutDelayDays,
-  });
-  const timing = cashTiming({ payoutDate: payout.date, cashNeededBy: goals.cashNeededBy });
+  const timing = tripTiming(goals, { now });
 
   // Journeys depend only on which offers are in the basket.
   const journeys = new Map();
@@ -408,7 +595,16 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
   visit(0, 0, 0, 0, 0);
 
   const describe = (candidate) =>
-    describeBasket(candidate, { pool, profile, goals, rules, now, route: journeyOf(candidate.mask), payout, timing });
+    describeBasket(candidate, {
+      pool,
+      profile,
+      goals,
+      rules,
+      now,
+      route: journeyOf(candidate.mask),
+      timing,
+      storage,
+    });
   const baskets = top.map(describe);
   const single = bestSingle ? describe(bestSingle) : null;
   const pick = [...baskets, single].find((b) => b && b.reasons.length === 0 && b.economics.contribution > 0);
@@ -418,14 +614,18 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
     sample: true,
     constraints: {
       budget: profile.budget,
-      carry: profile.carry,
+      carry: load,
+      carryEntered: profile.carry,
       storage,
       profileStorage: profile.storage,
       goalsStorage: goals.storageUnits,
       quantity: profile.quantity,
       unitCap,
+      trialUnits: rules.trialUnits,
+      sellWindowWeeks: QUANTITY_RULES.sellWindowWeeks,
       hourlyTarget: profile.target,
       transport: profile.transport,
+      fareMissing: fareMissing(profile),
       area: profile.area,
     },
     approximation: BASKET_APPROXIMATION,
@@ -435,13 +635,13 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
     excluded,
     searched,
     truncated,
-    timing: { payout, cash: timing },
+    timing: { payout: timing.payout, cash: timing.cash, payoutDays: timing.payoutDays },
     rules: describeRules(profile.rules || {}),
   };
 }
 
 /** Full figures for one allocation, built only for the baskets returned. */
-function describeBasket(candidate, { pool, profile, goals, rules, now, route, payout, timing }) {
+function describeBasket(candidate, { pool, profile, goals, rules, now, route, timing, storage }) {
   const chosen = pool
     .map((p, i) => ({ p, units: candidate.alloc[i] }))
     .filter((x) => x.units > 0);
@@ -458,6 +658,9 @@ function describeBasket(candidate, { pool, profile, goals, rules, now, route, pa
       hourlyFloor: profile.target,
       rules,
       now,
+      timing,
+      categoryFailures: p.terms.failures,
+      journeyKnown: !fareMissing(profile),
     });
     return {
       sku: p.offer.sku,
@@ -465,15 +668,20 @@ function describeBasket(candidate, { pool, profile, goals, rules, now, route, pa
       variant: p.offer.variant,
       shop: p.offer.shop,
       units,
+      maxUnits: p.max,
+      provenItem: p.offer.provenItem === true,
       weightKg: Math.round(units * p.offer.weight * 100) / 100,
       travelShare: shares[k],
       cashRequired: economics.cashRequired,
       contribution: economics.contribution,
       unitProfit: thresholds.unitProfit,
       returnOnCost: thresholds.returnOnCost,
+      returnsRate: p.terms.returnsRate,
       halfSellsContribution: perItem[k].half.contribution,
       thresholds,
       opportunity,
+      accessNeeds: accessNeeds(p.offer, profile),
+      ...checkedAndUncertainty(p.offer),
     };
   });
   const sum = (pick) => perItem.reduce((total, e) => total + pick(e.full), 0);
@@ -494,9 +702,14 @@ function describeBasket(candidate, { pool, profile, goals, rules, now, route, pa
   const reasons = [];
   if (!(contribution > 0)) reasons.push("Loses money");
   if (!(hourly >= profile.target)) reasons.push("Below hourly target");
-  for (const it of items)
+  for (const it of items) {
     for (const failure of it.thresholds.failures) reasons.push(`${it.name}: ${failure}`);
-  if (goals.cashNeededBy && timing.status !== "on time") reasons.push(timing.note);
+    if (it.units > rules.trialUnits && !it.provenItem)
+      reasons.push(`${it.name}: more than the trial batch of ${rules.trialUnits} for a first purchase`);
+  }
+  if (fareMissing(profile))
+    reasons.push("Public transport fare not entered, so the journey is costed as free");
+  if (goals.cashNeededBy && timing.cash.status !== "on time") reasons.push(timing.cash.note);
 
   return {
     id: items.map((it) => `${it.sku}:${it.units}`).join(","),
@@ -504,6 +717,7 @@ function describeBasket(candidate, { pool, profile, goals, rules, now, route, pa
     shops: [...new Set(items.map((it) => it.shop))],
     journey: route,
     units,
+    storage: { used: units, limit: storage },
     weightKg: Math.round(items.reduce((sum, it) => sum + it.weightKg, 0) * 100) / 100,
     economics: {
       units,
@@ -519,7 +733,7 @@ function describeBasket(candidate, { pool, profile, goals, rules, now, route, pa
       unsoldLoss,
     },
     downside: { nothingSells: unsoldLoss, halfSells },
-    timing: { payout, cash: timing },
+    timing: { payout: timing.payout, cash: timing.cash, payoutDays: timing.payoutDays },
     reasons,
     recommended: false,
   };

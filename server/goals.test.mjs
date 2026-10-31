@@ -2,17 +2,23 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { memoryDb, serve } from "./test-support.mjs";
 import { HttpError } from "./http.mjs";
-import { defaults, journeyFor, offers } from "./catalog.mjs";
+import { CAR_BOOT_KG, defaults, journeyFor, offers } from "./catalog.mjs";
 import {
   BASKET_SEARCH,
   DEFAULT_GOALS,
+  addTarget,
   basketOptions,
   cashTiming,
+  deleteTarget,
   getGoals,
+  goalTargets,
   payoutDate,
+  readTarget,
   saveGoals,
   schema,
+  tripTiming,
 } from "./goals.mjs";
+import { addEntry, createTrip, schema as ledgerSchema } from "./ledger.mjs";
 import * as planRoutes from "./routes-plan.mjs";
 
 const NOW = "2026-10-31T12:00:00Z"; // a Saturday
@@ -29,11 +35,15 @@ const validGoals = {
 };
 
 // Test-only offers: £10 a unit with no parcel or packaging cost, so each unit
-// needs exactly £10 of cash and nets a known margin.
+// needs exactly £10 of cash and nets a known margin (£14.20 for A, £12.56
+// for B after the sample fees and returns). Demand is plentiful.
 const item = (over) => ({
   sku: "a",
   name: "Item A",
   variant: "Test",
+  category: "general",
+  salesPerWeek: 10,
+  competingListings: 0,
   shop: "Shop A",
   area: "Leeds",
   miles: 1,
@@ -228,15 +238,146 @@ test("a basket that loses money is never recommended", () => {
   assert.equal(r.recommended, null);
   assert.ok(r.baskets.every((b) => !b.recommended && b.reasons.includes("Loses money")));
   assert.equal(r.bestSingle.recommended, false);
-  // Only the sample jacket clears the buying thresholds, so a recommended
-  // sample basket holds jackets alone and stays labelled as sample data.
+});
+
+test("the sample basket recommends the trial batch of jackets and stays sample data", () => {
+  // Only the sample jacket clears the buying thresholds, and a first purchase
+  // is a trial batch of three even though four units would fit.
   const sample = basketOptions(offers, { ...defaults }, goals(), { now: NOW });
   assert.equal(sample.sample, true);
+  assert.equal(sample.recommended, "jacket:3");
   const pick = sample.baskets.find((b) => b.recommended);
-  if (pick) {
-    assert.ok(pick.economics.contribution > 0);
-    assert.ok(pick.items.every((i) => i.sku === "jacket" || i.units === 0));
-  }
+  assert.ok(pick, "the recommended basket is in the top baskets");
+  assert.equal(pick.id, "jacket:3");
+  assert.ok(pick.economics.contribution > 0);
+  assert.equal(sample.constraints.trialUnits, 3);
+  for (const b of [...sample.baskets, sample.bestSingle])
+    for (const it of b.items) assert.ok(it.units <= 3, b.id);
+  // A stricter trial batch of two is the most any item gets. Two jackets
+  // spread the walk over fewer units and earn under £12 an hour, so nothing
+  // is recommended.
+  const two = basketOptions(offers, { ...defaults, rules: { trialUnits: 2 } }, goals(), { now: NOW });
+  for (const b of two.baskets) for (const it of b.items) assert.ok(it.units <= 2, b.id);
+  assert.equal(two.recommended, null);
+  assert.ok(two.baskets.find((b) => b.id === "jacket:2").reasons.includes("Below hourly target"));
+  // Sample items never pass the buy-alert gate.
+  for (const it of pick.items) assert.equal(it.opportunity.meetsThresholds, false);
+});
+
+test("offers that fail a hard filter never enter a basket", () => {
+  const r = basketOptions(offers, { ...defaults, budget: 100000 }, goals(), { now: NOW });
+  const rejected = Object.fromEntries(r.excluded.filter((e) => e.rejected).map((e) => [e.sku, e.reason]));
+  assert.deepEqual(Object.keys(rejected).sort(), ["baby", "pot"]);
+  assert.equal(rejected.baby, "Purchase price outside £5 to £50 per unit");
+  assert.equal(rejected.pot, "Unit weighs 2 kg or more");
+  for (const b of [...r.baskets, r.bestSingle])
+    assert.ok(b.items.every((it) => it.sku !== "baby" && it.sku !== "pot"), b.id);
+  // A member's stricter price floor leaves the jumper out as well.
+  const strict = basketOptions(offers, { ...defaults, rules: { minUnitPrice: 700 } }, goals(), { now: NOW });
+  assert.ok(strict.excluded.some((e) => e.sku === "knit" && e.rejected));
+});
+
+test("basket items respect the sales rate after competing listings", () => {
+  const slow = item({ salesPerWeek: 1, competingListings: 1 }); // one unit in two weeks
+  const r = basketOptions([slow], profile({ budget: 100000 }), goals(), { now: NOW });
+  assert.ok(r.baskets.every((b) => b.units <= 1));
+  const none = basketOptions([item({ competingListings: 40 })], profile({ budget: 100000 }), goals(), { now: NOW });
+  assert.equal(none.baskets.length, 0);
+  assert.match(none.excluded[0].reason, /expected demand/);
+  // Unknown demand fails closed.
+  const unknown = basketOptions([item({ salesPerWeek: undefined })], profile(), goals(), { now: NOW });
+  assert.equal(unknown.baskets.length, 0);
+});
+
+test("a basket below the hourly target is never recommended, even when it ranks first", () => {
+  // Item A earns more but takes two hours a unit to handle, so the basket
+  // with the most contribution earns under £12 an hour.
+  const slowA = item({ handlingMinutes: 120 });
+  const quickB = item({ sku: "b", name: "Item B", shop: "Shop B", sales: [2800], handlingMinutes: 5 });
+  const r = basketOptions([slowA, quickB], profile({ budget: 100000, target: 1200 }), goals(), { now: NOW });
+  const first = r.baskets[0];
+  assert.equal(first.id, "a:3,b:3", "most contribution first");
+  assert.ok(first.economics.hourly < 1200);
+  assert.equal(first.recommended, false);
+  assert.ok(first.reasons.includes("Below hourly target"));
+  assert.notEqual(r.recommended, null);
+  assert.notEqual(r.recommended, first.id);
+  const pick = [...r.baskets, r.bestSingle].find((b) => b.id === r.recommended);
+  assert.ok(pick.economics.hourly >= 1200);
+  assert.deepEqual(pick.reasons, []);
+});
+
+test("a basket holding an item under the buying thresholds is never recommended", () => {
+  // Item C nets £4.36 a unit: positive, so it adds contribution, but under £5.
+  const C = item({ sku: "c", name: "Item C", shop: "Shop A", sales: [1800] });
+  const r = basketOptions([A, C], profile({ budget: 100000 }), goals(), { now: NOW });
+  const first = r.baskets[0];
+  assert.ok(first.items.some((it) => it.sku === "c"), "the top basket includes C");
+  assert.equal(first.recommended, false);
+  assert.ok(first.reasons.some((x) => x.startsWith("Item C: Profit per unit of £4.36 is below £5.00")));
+  assert.equal(r.recommended, "a:3");
+  assert.ok(r.baskets.filter((b) => b.recommended).every((b) => b.items.every((it) => it.sku === "a")));
+});
+
+test("ranking counts the journey: a far shop loses to a near one with a smaller margin", () => {
+  // F nets 80p a unit more than A, but its shop is 20 miles away by car.
+  const F = item({ sku: "f", name: "Item F", shop: "Far shop", miles: 20, sales: [3098] });
+  const r = basketOptions([A, F], profile({ transport: "Car", perMile: 45, budget: 100000 }), goals(), { now: NOW });
+  assert.equal(r.bestSingle.id, "a:3");
+  const single = r.baskets.find((b) => b.id === "f:3");
+  assert.ok(!single || single.economics.contribution < r.bestSingle.economics.contribution);
+  assert.equal(r.bestSingle.economics.contribution, 3 * 1420 - journeyFor(profile({ transport: "Car" }), 1).cost);
+});
+
+test("a payout one day after the cash date is late and blocks the recommendation", () => {
+  const t = cashTiming({ payoutDate: "2026-11-13", cashNeededBy: "2026-11-12" });
+  assert.equal(t.status, "late");
+  assert.equal(t.daysLate, 1);
+  assert.match(t.note, /1 day after/);
+  assert.doesNotMatch(t.note, /1 days/);
+  // The payout is 13 November (see tripTiming), so a cash date of 12 November is one day short.
+  const p = profile({ budget: 100000 });
+  const r = basketOptions([A, B], p, goals({ cashNeededBy: "2026-11-12" }), { now: NOW });
+  assert.equal(r.timing.payout.date, "2026-11-13");
+  assert.equal(r.timing.cash.daysLate, 1);
+  assert.equal(r.recommended, null);
+  const onTheDay = basketOptions([A, B], p, goals({ cashNeededBy: "2026-11-13" }), { now: NOW });
+  assert.notEqual(onTheDay.recommended, null);
+});
+
+test("public transport with no fare entered is never recommended", () => {
+  const missing = basketOptions([A, B], profile({ transport: "Public transport", fare: null, budget: 100000 }), goals(), { now: NOW });
+  assert.equal(missing.constraints.fareMissing, true);
+  assert.equal(missing.recommended, null);
+  assert.ok(missing.baskets.every((b) => b.reasons.some((x) => x.includes("fare not entered"))));
+  const free = basketOptions([A, B], profile({ transport: "Public transport", fare: 0, budget: 100000 }), goals(), { now: NOW });
+  assert.notEqual(free.recommended, null);
+});
+
+test("baskets use the same load limit as the Planner for the transport", () => {
+  // A 10 kg item: on foot with 5 kg none fits, by car the boot holds two.
+  const heavy = item({ sku: "h", weight: 10, buy: 1000 });
+  const walk = basketOptions([heavy], profile({ carry: 5, budget: 100000 }), goals(), { now: NOW });
+  assert.equal(walk.constraints.carry, 5);
+  assert.equal(walk.baskets.length, 0, "a 10 kg unit fails the 2 kg weight filter and is excluded");
+  const light = item({ sku: "l", weight: 1.5 });
+  const car = basketOptions([light], profile({ transport: "Car", carry: 5, budget: 100000 }), goals(), { now: NOW });
+  assert.equal(car.constraints.carry, CAR_BOOT_KG);
+  assert.equal(car.constraints.carryEntered, 5);
+  const foot = basketOptions([light], profile({ carry: 3, budget: 100000 }), goals(), { now: NOW });
+  assert.ok(foot.baskets.every((b) => b.weightKg <= 3));
+});
+
+test("baskets show storage used against the limit, time until payment and access needs", () => {
+  const r = basketOptions(offers, { ...defaults }, goals(), { now: NOW });
+  const pick = r.baskets.find((b) => b.recommended);
+  assert.deepEqual(pick.storage, { used: 3, limit: 10 });
+  assert.equal(pick.timing.payoutDays, 13);
+  assert.equal(r.timing.payoutDays, 13);
+  assert.deepEqual(pick.items[0].accessNeeds.map((n) => n.id), ["limited-stock"]);
+  assert.deepEqual(pick.items[0].checked, { price: null, stock: null });
+  assert.match(pick.items[0].mainUncertainty, /Sample figures/);
+  assert.ok(pick.items[0].returnsRate >= 0.15, "clothing returns allowance");
 });
 
 test("the recommended basket is positive, meets the targets and pays out on time", () => {
@@ -281,8 +422,9 @@ test("plan, goals and baskets routes validate their input", async () => {
     const plan = await api.call("POST", "/api/plan", { ...defaults, rules: { minUnitPrice: 100 } });
     assert.equal(plan.status, 200);
     assert.equal(plan.body.sample, true);
-    assert.equal(plan.body.trips.length, 4);
+    assert.equal(plan.body.trips.length + plan.body.rejected.length, 4);
     assert.ok(plan.body.trips.every((t) => t.alert.eligible === false && t.opportunity.tier));
+    assert.ok(plan.body.trips.every((t) => t.timing && "payoutDays" in t.timing), "payout timing from the goals");
     assert.ok(plan.body.trips.every((t) => t.compare.heading === "What changes if I drive?"));
     assert.deepEqual(plan.body.rules.ignored.map((i) => i.key), ["minUnitPrice"]);
     for (const bad of [
@@ -291,9 +433,18 @@ test("plan, goals and baskets routes validate their input", async () => {
       { ...defaults, budget: 99.5 },
       { ...defaults, rules: { loosenEverything: true } },
       { ...defaults, rules: { minReturn: -1 } },
+      { ...defaults, rules: { toString: 1 } },
+      { ...defaults, rules: { constructor: 1 } },
       [],
     ])
       assert.equal((await api.call("POST", "/api/plan", bad)).status, 400, JSON.stringify(bad));
+    // A key named __proto__ arrives as an own property of the parsed body.
+    const proto = await fetch(api.base + "/api/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...defaults, rules: {} }).replace('"rules":{}', '"rules":{"__proto__":1}'),
+    });
+    assert.equal(proto.status, 400);
 
     const initial = await api.call("GET", "/api/goals");
     assert.equal(initial.status, 200);
@@ -323,9 +474,134 @@ test("plan, goals and baskets routes validate their input", async () => {
     );
     assert.equal((await api.call("POST", "/api/baskets", {})).status, 400);
     assert.equal(
+      (await api.call("POST", "/api/baskets", { profile: { ...defaults, rules: { constructor: 1 } } })).status,
+      400,
+    );
+    assert.equal((await api.call("POST", "/api/baskets", [])).status, 400);
+    assert.equal(
       (await api.call("POST", "/api/baskets", { profile: { ...defaults, carry: -1 } })).status,
       400,
     );
+  } finally {
+    await api.close();
+  }
+});
+
+test("trip timing gives days to the payout and to the cash date", () => {
+  const t = tripTiming(goals({ cashNeededBy: "2026-11-30" }), { now: NOW });
+  assert.equal(t.start, "2026-10-31");
+  assert.equal(t.payout.date, "2026-11-13");
+  assert.equal(t.payoutDays, 13);
+  assert.equal(t.cashNeededDays, 30);
+  assert.equal(t.cash.status, "on time");
+  const none = tripTiming(goals({ dispatchDays: [] }), { now: NOW });
+  assert.equal(none.payoutDays, null);
+  assert.equal(none.cashNeededDays, null);
+});
+
+// Named goals read received cash from the ledger.
+const ledgerDb = () => memoryDb(schema, ledgerSchema);
+const resaleTrip = (db, at) =>
+  createTrip(db, { label: "Test trip", source: "manual", kind: "resale" }, { now: new Date(at) });
+const entry = (db, trip, type, amount, occurred, units) =>
+  addEntry(db, trip, { type, amount, occurred, ...(units ? { units } : {}) }, { now: new Date(NOW) });
+
+test("named goals are validated", () => {
+  const today = "2026-10-31";
+  assert.deepEqual(readTarget({ name: " Car insurance ", amount: 20000, deadline: "2026-11-30" }, { today }), {
+    name: "Car insurance",
+    amount: 20000,
+    deadline: "2026-11-30",
+    start: today,
+  });
+  for (const bad of [
+    null,
+    [],
+    { amount: 100 },
+    { name: "", amount: 100 },
+    { name: "Fuel", amount: 0 },
+    { name: "Fuel", amount: 10.5 },
+    { name: "Fuel", amount: 100, deadline: "2026-10-30" },
+    { name: "Fuel", amount: 100, deadline: "2026-02-30" },
+    { name: "Fuel", amount: 100, start: "2026-11-01" },
+    { name: "x".repeat(81), amount: 100 },
+  ])
+    assert.throws(() => readTarget(bad, { today }), HttpError, JSON.stringify(bad));
+});
+
+test("a deadline goal counts only cash received by its date", () => {
+  const db = ledgerDb();
+  // The goal was set on 1 October for 15 October.
+  const id = addTarget(db, { name: "Car insurance", amount: 6000, deadline: "2026-10-15", start: "2026-10-01" }, { now: "2026-10-01T09:00:00Z" });
+  const trip = resaleTrip(db, "2026-10-01T09:00:00Z");
+  entry(db, trip, "receipt", 1000, "2026-10-02", 2);
+  entry(db, trip, "sale", 9000, "2026-10-08", 2);
+  entry(db, trip, "payout", 5000, "2026-10-10");
+  entry(db, trip, "payout", 3000, "2026-10-20"); // after the deadline
+  entry(db, trip, "payout", 700, "2026-09-30"); // before the start
+  const [goal] = goalTargets(db, { now: NOW }).targets;
+  assert.equal(goal.id, id);
+  assert.equal(goal.payouts, 5000);
+  assert.equal(goal.costs, 1000);
+  assert.equal(goal.received, 4000, "payouts less costs; the sale itself is not cash");
+  assert.equal(goal.counted, 4000);
+  assert.equal(goal.remaining, 2000);
+  assert.equal(goal.status, "missed", "the deadline passed short of the amount");
+  assert.equal(goal.daysLeft, -16);
+});
+
+test("named goals in progress never count pending payouts or predictions, and never count cash twice", () => {
+  const db = ledgerDb();
+  const fuel = addTarget(db, { name: "Fuel", amount: 3000, deadline: "2026-11-15", start: "2026-10-01" }, { now: NOW });
+  const hobby = addTarget(db, { name: "Pottery class", amount: 5000, start: "2026-10-01" }, { now: NOW });
+  const trip = createTrip(
+    db,
+    { label: "Predicted", source: "research", kind: "resale", predicted: { units: 2, proceeds: 90000, contribution: 50000, cashRequired: 2000, activeMinutes: 60 } },
+    { now: new Date(NOW) },
+  );
+  entry(db, trip, "sale", 40000, "2026-10-20", 1); // sold, not yet paid out
+  entry(db, trip, "payout", 4000, "2026-10-25");
+  const { targets, basis } = goalTargets(db, { now: NOW });
+  assert.match(basis, /only cash received/);
+  // Deadline goals come first; the goal without a deadline gets what is left.
+  assert.deepEqual(targets.map((t) => t.id), [fuel, hobby]);
+  const [f, h] = targets;
+  assert.equal(f.counted, 3000);
+  assert.equal(f.status, "reached");
+  assert.equal(f.daysLeft, 15);
+  assert.equal(h.received, 4000);
+  assert.equal(h.shared, 3000, "already counted towards Fuel");
+  assert.equal(h.counted, 1000);
+  assert.equal(h.status, "in progress");
+  assert.equal(f.counted + h.counted, 4000, "the same payout is never counted twice");
+  // Household savings are not earnings.
+  const home = createTrip(db, { label: "Home", source: "manual", kind: "household" }, { now: new Date(NOW) });
+  entry(db, home, "saving", 9000, "2026-10-26");
+  assert.equal(goalTargets(db, { now: NOW }).targets[1].counted, 1000);
+  assert.deepEqual(deleteTarget(db, fuel), { deleted: fuel });
+  assert.throws(() => deleteTarget(db, fuel), HttpError);
+  assert.equal(goalTargets(db, { now: NOW }).targets[0].counted, 4000);
+});
+
+test("named goal routes add, list and delete", async () => {
+  const db = ledgerDb();
+  const api = await serve(db, [planRoutes]);
+  try {
+    const empty = await api.call("GET", "/api/goals/targets");
+    assert.equal(empty.status, 200);
+    assert.deepEqual(empty.body.targets, []);
+    const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+    const added = await api.call("POST", "/api/goals/targets", { name: "Bill", amount: 2500, deadline: tomorrow });
+    assert.equal(added.status, 201);
+    assert.equal(added.body.targets.length, 1);
+    assert.equal(added.body.targets[0].name, "Bill");
+    assert.equal((await api.call("POST", "/api/goals/targets", { name: "Bill", amount: -1 })).status, 400);
+    assert.equal((await api.call("POST", "/api/goals/targets", { name: "Bill", amount: 1, deadline: "2020-01-01" })).status, 400);
+    assert.equal((await api.call("DELETE", "/api/goals/targets/abc", {})).status, 400);
+    assert.equal((await api.call("DELETE", "/api/goals/targets/999", {})).status, 404);
+    const gone = await api.call("DELETE", "/api/goals/targets/" + added.body.id, {});
+    assert.equal(gone.status, 200);
+    assert.deepEqual(gone.body.targets, []);
   } finally {
     await api.close();
   }

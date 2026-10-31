@@ -1,5 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, dateTime, hours, loadProfile, money, percent, toPence } from "./api";
+import {
+  api,
+  dateTime,
+  hours,
+  loadMemberRules,
+  loadProfile,
+  money,
+  percent,
+  saveMemberRules,
+  toPence,
+  type MemberRules,
+  type RuleKey,
+} from "./api";
 import "./Research.css";
 
 // Shapes returned by the research routes (server/routes-research.mjs).
@@ -28,6 +40,14 @@ export type EvidenceRow = {
   licence: string | null;
   imported: string | null;
 };
+type CategoryId = "general" | "clothing" | "food";
+type AttrKey = "size" | "pack" | "model" | "condition";
+const ATTR_KEYS: AttrKey[] = ["size", "pack", "model", "condition"];
+// The model value that says the operator checked and the item has no model
+// number (NO_MODEL in server/matching.mjs). It matches only sales that state
+// no model either.
+const NO_MODEL = "none";
+type AttrSource = "source" | "operator" | "assumed" | null;
 export type Offer = {
   provider: string;
   sourceId: string;
@@ -57,6 +77,14 @@ export type Offer = {
   stockNote: string;
   branchStockEstablished: boolean;
   sample: boolean;
+  suggestedCategory?: { id: CategoryId; basis: string };
+  // Present once operator-confirmed attributes were applied by the server.
+  attributeSource?: Record<AttrKey, AttrSource>;
+  operatorConfirmed?: AttrKey[];
+};
+type AttributeResult = {
+  applied: Partial<Record<AttrKey, string>>;
+  ignored: { key: AttrKey; value: string; stored: string; reason: string }[];
 };
 type Status = "exact" | "research" | "none";
 type Candidate = {
@@ -79,6 +107,7 @@ type Candidates = {
   listings: Candidate[];
   other: Candidate[];
   competition: Competition;
+  offerAttributes?: AttributeResult;
 };
 type Economics = {
   units: number;
@@ -122,7 +151,19 @@ export type Rules = {
   maxSourcingPressurePriority1: number;
 };
 type AlertRules = { maxOfferAgeDays: number; maxSaleAgeDays: number; minIndependentSales: number };
-type RuleKey = "minUnitPrice" | "maxUnitPrice" | "maxWeightKg" | "minUnitProfit" | "minReturn" | "trialUnits";
+type CategoryRule = {
+  id: CategoryId;
+  name: string;
+  minReturnsRate?: number;
+  needsSize?: boolean;
+  needsPackaging?: boolean;
+  minShelfLifeDays?: number;
+};
+type Agreed = {
+  rules: Rules;
+  alertRules: AlertRules;
+  categories?: Record<CategoryId, CategoryRule>;
+};
 type Tier = "Priority 1" | "Priority 2" | "Watch" | "Review" | "Reject";
 type Opportunity = {
   tier: Tier;
@@ -156,6 +197,64 @@ export type StockCheck = {
   units_seen: number | null;
   note: string | null;
 };
+type PricePoint = {
+  evidenceClass: string;
+  provider: string;
+  sourceId: string;
+  price: number;
+  observed: string | null;
+  retailer: string | null;
+  promotion: string | null;
+  chosen: boolean;
+};
+type PriceRange = {
+  count: number;
+  lowest: number | null;
+  highest: number | null;
+  oldest: string | null;
+  newest: string | null;
+};
+type Prices = {
+  claimed: {
+    evidenceClass: string;
+    // previous: the retailer's was price; rrp: the recommended retail price;
+    // regular: the price without the discount recorded by the source.
+    kind?: "previous" | "rrp" | "regular";
+    price: number;
+    observed: string | null;
+    basis: string;
+  } | null;
+  observed: PriceRange & {
+    evidenceClass: string;
+    points: PricePoint[];
+    amazon: PriceRange & { evidenceClass: string; note: string; points: PricePoint[] };
+  };
+  sold: PriceRange & {
+    evidenceClass: string;
+    lowerMedian: number | null;
+    exactNotInSample: number;
+    note: string;
+  };
+};
+type Payout = {
+  start: string;
+  sold: string | null;
+  dispatch: string | null;
+  delivered: string | null;
+  date: string | null;
+  note: string;
+  days: number | null;
+  goals: {
+    daysToSell: number | null;
+    dispatchDays: number[];
+    deliveryDays: number;
+    payoutDelayDays: number;
+    saved: boolean;
+  };
+  cashNeededBy: string | null;
+  cashNeededDays: number | null;
+  timing: { status: "on time" | "late" | "unknown"; daysLate: number | null; note: string };
+};
 type Estimate = {
   offer: Offer;
   sample: {
@@ -163,6 +262,8 @@ type Estimate = {
     excluded: { row: EvidenceRow; reason: string }[];
     count: number;
     independent: number;
+    // Used sales with no seller name: never counted as independent.
+    withoutSeller?: number;
     lowerMedian: number | null;
     newest: string | null;
     oldest: string | null;
@@ -178,6 +279,23 @@ type Estimate = {
   permission: { permitted: boolean; basis: string };
   unitCost: number;
   cashNeededDays: number | null;
+  // Added in later rounds; optional so an older server still renders.
+  sampleData?: boolean;
+  payout?: Payout;
+  prices?: Prices;
+  category?: {
+    id: CategoryId;
+    name: string;
+    chosen: "request" | "suggested";
+    suggestion: { id: CategoryId; basis: string };
+    rule: CategoryRule;
+    returnsRate: number;
+    returnsRaised: boolean;
+    failures: string[];
+  };
+  journey?: { known: boolean; missing: string[]; costKnown: boolean; minutesKnown: boolean };
+  offerAttributes?: AttributeResult;
+  inputs?: { defaulted: string[]; costs: Record<string, number> };
   assumptions: string[];
   warnings: string[];
 };
@@ -187,11 +305,15 @@ type EstimateRequest = {
   units: number;
   costs: Record<string, number>;
   weightKg?: number;
-  rules?: Partial<Record<RuleKey, number>>;
+  rules?: MemberRules;
   hourlyFloor?: number;
   promotionEligible: boolean;
   cashNeededBy?: string;
   locality?: string;
+  category?: CategoryId;
+  packagingChecked?: boolean;
+  bestBefore?: string;
+  offerAttributes?: Partial<Record<AttrKey, string>>;
 };
 // Prefill for the validation audit form (see Audit.tsx).
 export type AuditDraft = {
@@ -209,6 +331,12 @@ export type AuditDraft = {
   independentSales: number | null;
   displayPermitted: boolean | null;
   matchDecision: Status | null;
+  // Handed over so the audit rebuilds the estimate the operator saw (see
+  // AuditHandover in Audit.tsx). estimateInputs is the estimate request
+  // without the fields the audit sets from the item itself.
+  sales?: { provider: string; sourceId: string }[];
+  weightKg?: number | null;
+  estimateInputs?: Record<string, unknown> | null;
 };
 
 // Money and dates for display. Unknown values say so in words.
@@ -224,20 +352,24 @@ export const isSampleRow = (row: {
   /\b(sample|fixture|demo)\b/i.test(row.provider || "") ||
   /\b(sample|fixture|demo)\b/i.test(row.licence || "") ||
   /^(sample|fixture|demo)\b/i.test(row.source_id || "");
-export const attributesText = (row: {
-  size: string | null;
-  pack: string | number | null;
-  model: string | null;
-  condition: string | null;
-}) =>
-  [
-    ["size", row.size],
-    ["pack", row.pack],
-    ["model", row.model],
-    ["condition", row.condition],
-  ]
-    .map(([k, v]) => k + " " + (v === null || v === "" ? "not stated" : v))
-    .join(" · ");
+// sources marks attributes the operator confirmed after looking at the item
+// (the source left them blank) and a retail offer's assumed condition.
+export const attributesText = (
+  row: {
+    size: string | null;
+    pack: string | number | null;
+    model: string | null;
+    condition: string | null;
+  },
+  sources?: Partial<Record<AttrKey, AttrSource>>,
+) =>
+  ATTR_KEYS.map((k) => {
+    const v = row[k];
+    if (v === null || v === undefined || v === "")
+      return k + (sources?.[k] === "assumed" ? " new (assumed for a retailer)" : " not stated");
+    const shown = k === "model" && v === NO_MODEL ? "no model number" : k + " " + v;
+    return shown + (sources?.[k] === "operator" ? " (you confirmed)" : "");
+  }).join(" · ");
 
 const key = (provider: string, sourceId: string) => provider + "|" + sourceId;
 const STATUS_LABEL: Record<Status, string> = {
@@ -286,12 +418,19 @@ type Inputs = {
   cashNeededBy: string;
   promotionEligible: boolean;
   locality: string;
+  // "" means the category the offer suggests.
+  category: "" | CategoryId;
+  packagingChecked: boolean;
+  bestBefore: string;
 };
 function initialInputs(): Inputs {
   const p = loadProfile();
+  // A first purchase is a trial batch, so start small whatever the profile
+  // says, and no larger than the member's own stricter trial batch.
+  const trial = loadMemberRules().trialUnits;
+  const cap = Number.isInteger(trial) && (trial as number) >= 1 ? Math.min(3, trial as number) : 3;
   return {
-    // A first purchase is a trial batch, so start small whatever the profile says.
-    units: String(Math.min(3, Math.max(1, Math.round(p.quantity) || 1))),
+    units: String(Math.min(cap, Math.max(1, Math.round(p.quantity) || 1))),
     weightKg: "",
     postage: "",
     packaging: "",
@@ -305,7 +444,12 @@ function initialInputs(): Inputs {
     hourlyFloor: String(p.target),
     cashNeededBy: "",
     promotionEligible: false,
-    locality: p.area,
+    // Blank on purpose: a branch check counts only in the locality the
+    // operator states for this trip, never one assumed from the profile.
+    locality: "",
+    category: "",
+    packagingChecked: false,
+    bestBefore: "",
   };
 }
 type FieldKind = "pounds" | "percent" | "minutes" | "count" | "kg";
@@ -317,8 +461,18 @@ const FIELDS: [keyof Inputs, string, FieldKind, string?][] = [
   ["feeRate", "Marketplace fee rate (%)", "percent", "Up to 50%"],
   ["feeFixed", "Fixed fee per sale (£)", "pounds"],
   ["returnsRate", "Returns allowance (%)", "percent", "Share of the sale price set aside"],
-  ["journeyCost", "Return journey cost (£)", "pounds", "Fares, fuel, parking: shared across units"],
-  ["journeyMinutes", "Journey minutes (return)", "minutes"],
+  [
+    "journeyCost",
+    "Return journey cost (£), required",
+    "pounds",
+    "Fares, fuel and parking, shared across units. Enter 0 only if it costs nothing, for example walking",
+  ],
+  [
+    "journeyMinutes",
+    "Journey minutes (return), required",
+    "minutes",
+    "Door to door, there and back. A blank journey is never treated as free or instant",
+  ],
   ["overheadMinutes", "Minutes in store", "minutes"],
   ["handlingMinutes", "Handling minutes per unit", "minutes", "Listing, packing and dispatch"],
   ["hourlyFloor", "Hourly floor (£ per hour)", "pounds"],
@@ -338,7 +492,9 @@ function readNumber(raw: string, kind: FieldKind) {
   return Math.round(value);
 }
 
-// A member's own stricter buying thresholds, kept as form text.
+// A member's own stricter buying thresholds, kept as form text. They are
+// stored in API units with loadMemberRules and saveMemberRules, so the
+// Planner, Research and bounty drafts share them.
 type Stricter = Record<RuleKey, string>;
 const NO_STRICTER: Stricter = {
   minUnitPrice: "",
@@ -358,25 +514,6 @@ const STRICTER_FIELDS: [RuleKey, string, FieldKind, "higher" | "lower"][] = [
   ["minReturn", "Lowest return on purchase price (%)", "percent", "higher"],
   ["trialUnits", "Largest first purchase (units)", "count", "lower"],
 ];
-const STRICTER_KEY = "bounty-stricter-thresholds";
-function loadStricter(): Stricter {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STRICTER_KEY) || "{}");
-    const out = { ...NO_STRICTER };
-    for (const [key] of STRICTER_FIELDS)
-      if (typeof saved[key] === "string") out[key] = saved[key];
-    return out;
-  } catch {
-    return { ...NO_STRICTER };
-  }
-}
-function saveStricter(value: Stricter) {
-  try {
-    localStorage.setItem(STRICTER_KEY, JSON.stringify(value));
-  } catch {
-    /* storage unavailable: the thresholds last for this visit only */
-  }
-}
 // Threshold value in form units, for placeholders and messages.
 function ruleText(key: RuleKey, rules: Rules) {
   const v = rules[key];
@@ -385,12 +522,31 @@ function ruleText(key: RuleKey, rules: Rules) {
   if (key === "maxWeightKg") return v + " kg";
   return v + (v === 1 ? " unit" : " units");
 }
-function formValue(key: RuleKey, rules: Rules) {
-  const v = rules[key];
+// An API value (pence, share, kg, units) as form text (pounds, percent).
+function ruleFormText(key: RuleKey, v: number) {
   if (key === "minUnitPrice" || key === "maxUnitPrice" || key === "minUnitProfit")
     return (v / 100).toFixed(2);
   if (key === "minReturn") return String(Math.round(v * 1000) / 10);
   return String(v);
+}
+const formValue = (key: RuleKey, rules: Rules) => ruleFormText(key, rules[key]);
+function loadStricter(): Stricter {
+  const saved = loadMemberRules();
+  const out = { ...NO_STRICTER };
+  for (const [key] of STRICTER_FIELDS) {
+    const v = saved[key];
+    if (typeof v === "number") out[key] = ruleFormText(key, v);
+  }
+  return out;
+}
+// Form text to API units; blank or unreadable values are left out.
+function stricterRules(value: Stricter): MemberRules {
+  const rules: MemberRules = {};
+  for (const [key, , kind] of STRICTER_FIELDS) {
+    const v = readNumber(value[key], kind);
+    if (v !== undefined && !Number.isNaN(v)) rules[key] = v;
+  }
+  return rules;
 }
 
 /** Builds the estimate request, or returns an error message. */
@@ -399,6 +555,7 @@ function buildRequest(
   confirmed: string[],
   inputs: Inputs,
   stricter: Stricter,
+  offerAttributes: Partial<Record<AttrKey, string>>,
 ): EstimateRequest | string {
   const read = (field: keyof Inputs, kind: FieldKind) => readNumber(String(inputs[field]), kind);
   const costs: Record<string, number> = {};
@@ -412,13 +569,11 @@ function buildRequest(
   if (units === undefined || Number.isNaN(units)) return "Enter the number of units";
   const weightKg = read("weightKg", "kg");
   if (weightKg !== undefined && !(weightKg > 0)) return "Unit weight must be more than 0 kg";
-  const rules: Partial<Record<RuleKey, number>> = {};
-  for (const [key, label, kind] of STRICTER_FIELDS) {
-    const value = readNumber(stricter[key], kind);
-    if (Number.isNaN(value)) return label + " must be a number";
-    if (value !== undefined) rules[key] = value;
-  }
+  for (const [key, label, kind] of STRICTER_FIELDS)
+    if (Number.isNaN(readNumber(stricter[key], kind))) return label + " must be a number";
+  const rules = stricterRules(stricter);
   const hourlyFloor = read("hourlyFloor", "pounds");
+  const food = (inputs.category || offer.suggestedCategory?.id) === "food";
   return {
     offer: { provider: offer.provider, sourceId: offer.sourceId },
     sales: confirmed.map((k) => {
@@ -433,8 +588,44 @@ function buildRequest(
     promotionEligible: inputs.promotionEligible,
     ...(inputs.cashNeededBy ? { cashNeededBy: inputs.cashNeededBy } : {}),
     ...(inputs.locality.trim() ? { locality: inputs.locality.trim() } : {}),
+    ...(inputs.category ? { category: inputs.category } : {}),
+    ...(food ? { packagingChecked: inputs.packagingChecked } : {}),
+    ...(food && inputs.bestBefore ? { bestBefore: inputs.bestBefore } : {}),
+    ...(Object.keys(offerAttributes).length ? { offerAttributes } : {}),
   };
 }
+
+// The estimate request without what the audit sets from the item itself
+// (the offer, the sales, the locality, promotion eligibility and the unit
+// weight): costs, units, rules, the hourly floor, the cash date, the category
+// and its checks, and any attributes the operator confirmed.
+export function estimateInputsOf(req: EstimateRequest): Record<string, unknown> {
+  const {
+    offer: _offer,
+    sales: _sales,
+    locality: _locality,
+    promotionEligible: _promotion,
+    weightKg: _weight,
+    ...rest
+  } = req;
+  return rest;
+}
+
+// Attributes the operator confirms, sent only once the confirmation box is
+// ticked, and only for attributes the source left blank.
+type AttrDraft = { values: Record<AttrKey, string>; confirmed: boolean };
+const NO_ATTRS: AttrDraft = {
+  values: { size: "", pack: "", model: "", condition: "" },
+  confirmed: false,
+};
+function confirmedAttributes(offer: Offer | null, draft: AttrDraft) {
+  const out: Partial<Record<AttrKey, string>> = {};
+  if (!offer || !draft.confirmed) return out;
+  for (const k of ATTR_KEYS)
+    if (!offer[k] && draft.values[k].trim()) out[k] = draft.values[k].trim();
+  return out;
+}
+const blankAttributes = (offer: Offer) => ATTR_KEYS.filter((k) => !offer[k]);
 
 export function ResearchCalculator({
   onAuditDraft,
@@ -449,11 +640,16 @@ export function ResearchCalculator({
   const [offerError, setOfferError] = useState("");
   const [selected, setSelected] = useState<Offer | null>(null);
   const [candidates, setCandidates] = useState<Candidates | null>(null);
+  const [candidateError, setCandidateError] = useState("");
   const [confirmed, setConfirmed] = useState<string[]>([]);
+  const [attrs, setAttrs] = useState<AttrDraft>(NO_ATTRS);
   const [inputs, setInputs] = useState<Inputs>(initialInputs);
   const [stricter, setStricter] = useState<Stricter>(loadStricter);
-  const [agreed, setAgreed] = useState<{ rules: Rules; alertRules: AlertRules } | null>(null);
-  const [estimate, setEstimate] = useState<Estimate | null>(null);
+  const [agreed, setAgreed] = useState<Agreed | null>(null);
+  const [goalsCashDate, setGoalsCashDate] = useState<string | null>(null);
+  // The latest estimate with the request it answers. When the inputs have
+  // moved on it is shown as out of date and never tracked or drafted.
+  const [result, setResult] = useState<{ data: Estimate; key: string } | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [refresh, setRefresh] = useState(0);
@@ -479,10 +675,10 @@ export function ResearchCalculator({
     };
   }, [query]);
 
-  // The agreed buying thresholds, so they can be shown before an estimate.
+  // The agreed buying thresholds and category rules, shown before an estimate.
   useEffect(() => {
     let active = true;
-    api<{ rules: Rules; alertRules: AlertRules }>("research/rules")
+    api<Agreed>("research/rules")
       .then((data) => active && setAgreed(data))
       .catch(() => {
         /* the estimate result carries the thresholds as well */
@@ -491,52 +687,96 @@ export function ResearchCalculator({
       active = false;
     };
   }, []);
-  useEffect(() => saveStricter(stricter), [stricter]);
 
-  // Candidate evidence for the chosen offer.
+  // A cash date saved in Goals fills an empty cash date here.
   useEffect(() => {
-    setCandidates(null);
-    setEstimate(null);
-    setConfirmed([]);
-    setNotice("");
-    if (!selected) return;
     let active = true;
-    const params = new URLSearchParams({
-      provider: selected.provider,
-      sourceId: selected.sourceId,
-    });
-    api<Candidates>("research/candidates?" + params)
-      .then((data) => active && setCandidates(data))
-      .catch((e: Error) => active && setError(e.message));
+    api<{ cashNeededBy: string | null }>("goals")
+      .then((goals) => {
+        const date = goals?.cashNeededBy;
+        if (!active || !date || date < localToday()) return;
+        setGoalsCashDate(date);
+        setInputs((current) => (current.cashNeededBy ? current : { ...current, cashNeededBy: date }));
+      })
+      .catch(() => {
+        /* goals are optional here */
+      });
     return () => {
       active = false;
     };
+  }, []);
+
+  // Shared with the Planner: thresholds saved here apply there and back.
+  useEffect(() => saveMemberRules(stricterRules(stricter)), [stricter]);
+
+  // A new offer starts from a clean slate.
+  useEffect(() => {
+    setCandidates(null);
+    setCandidateError("");
+    setResult(null);
+    setConfirmed([]);
+    setAttrs(NO_ATTRS);
+    setNotice("");
   }, [selected]);
 
-  const request = useMemo(
-    () => (selected ? buildRequest(selected, confirmed, inputs, stricter) : null),
-    [selected, confirmed, inputs, stricter],
-  );
+  const offerAttributes = useMemo(() => confirmedAttributes(selected, attrs), [selected, attrs]);
+  const attrKey = JSON.stringify(offerAttributes);
 
-  // Recalculate shortly after any change; ignore stale answers.
+  // Candidate evidence for the chosen offer, read with the attributes the
+  // operator confirmed so that exact sales become confirmable.
   useEffect(() => {
+    if (!selected) return;
+    let active = true;
+    const timer = setTimeout(() => {
+      const params = new URLSearchParams({
+        provider: selected.provider,
+        sourceId: selected.sourceId,
+      });
+      for (const [k, v] of Object.entries(JSON.parse(attrKey) as Record<string, string>))
+        params.set(k, v);
+      api<Candidates>("research/candidates?" + params)
+        .then((data) => {
+          if (!active) return;
+          setCandidates(data);
+          setCandidateError("");
+        })
+        .catch((e: Error) => active && setCandidateError(e.message));
+    }, 250);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [selected, attrKey]);
+
+  const request = useMemo(
+    () =>
+      selected ? buildRequest(selected, confirmed, inputs, stricter, offerAttributes) : null,
+    [selected, confirmed, inputs, stricter, offerAttributes],
+  );
+  const requestKey = request && typeof request === "object" ? JSON.stringify(request) : null;
+
+  // Recalculate shortly after any change. Every change takes a new sequence
+  // number first, so an answer still in flight for older inputs can never
+  // replace a newer validation error or a newer result.
+  useEffect(() => {
+    const id = ++sequence.current;
     if (!request) return;
     if (typeof request === "string") {
       setError(request);
-      setEstimate(null);
+      setResult(null);
       return;
     }
-    const id = ++sequence.current;
+    const key = JSON.stringify(request);
     const timer = setTimeout(() => {
       api<Estimate>("research/estimate", request)
         .then((data) => {
           if (id !== sequence.current) return;
-          setEstimate(data);
+          setResult({ data, key });
           setError("");
         })
         .catch((e: Error) => {
           if (id !== sequence.current) return;
-          setEstimate(null);
+          setResult(null);
           setError(e.message);
         });
     }, 300);
@@ -550,24 +790,37 @@ export function ResearchCalculator({
       on ? [...new Set([...current, k])] : current.filter((x) => x !== k),
     );
 
-  const e = estimate?.economics ?? null;
-  const offer = estimate?.offer ?? selected;
+  const estimate = result?.data ?? null;
+  // Only an estimate for the inputs on screen may be tracked or drafted.
+  const current = result && result.key === requestKey ? result.data : null;
+  const stale = estimate !== null && current === null;
+  const offer = estimate?.offer ?? candidates?.offer ?? selected;
 
   async function trackInLedger() {
-    if (!estimate || !e || !offer) return;
+    const e = current?.economics;
+    if (!current || !e) return;
+    const o = current.offer;
+    // The same rule as the server: a sample offer or any sample sale in the
+    // sold sample makes the whole estimate sample data.
+    const sample =
+      current.sampleData ?? (o.sample || current.sample.used.some((r) => isSampleRow(r)));
+    const suffix = sample ? " (sample)" : "";
     setNotice("");
     try {
       const saved = await api<{ id: number | string }>("ledger/trips", {
-        label: (offer.title + (offer.retailer ? " at " + offer.retailer : "")).slice(0, 120),
+        label:
+          (o.title + (o.retailer ? " at " + o.retailer : "")).slice(0, 120 - suffix.length) + suffix,
         source: "research",
         kind: "resale",
-        reference: offer.provider + ":" + offer.sourceId,
+        reference: o.provider + ":" + o.sourceId,
         predicted: {
           units: e.units,
           proceeds: e.proceeds,
           contribution: e.contribution,
           cashRequired: e.cashRequired,
           activeMinutes: e.activeMinutes,
+          sample,
+          ...(current.payout?.date ? { payoutBy: current.payout.date } : {}),
         },
       });
       setNotice(
@@ -581,14 +834,14 @@ export function ResearchCalculator({
   }
 
   function draftBounty() {
-    if (!offer || !request || typeof request === "string") return;
+    if (!current || !request || typeof request === "string") return;
     try {
       localStorage.setItem(
         "bounty-draft",
         JSON.stringify({
           estimate: request,
-          title: offer.title,
-          retailer: offer.retailer,
+          title: current.offer.title,
+          retailer: current.offer.retailer,
           locality: inputs.locality.trim(),
         }),
       );
@@ -601,26 +854,35 @@ export function ResearchCalculator({
   }
 
   function auditDraft() {
-    if (!estimate || !offer || !onAuditDraft) return;
-    const postage = typeof request === "object" && request ? request.costs.postage : undefined;
+    if (!current || !onAuditDraft) return;
+    const o = current.offer;
+    // current is the estimate for this exact request (see requestKey), so
+    // the handover matches the figures on screen.
+    const req = typeof request === "object" && request ? request : null;
+    const postage = req ? req.costs.postage : undefined;
     onAuditDraft({
       locality: inputs.locality.trim(),
-      barcode: offer.gtin,
-      title: offer.title,
-      retailer: offer.retailer || "",
-      offerProvider: offer.provider,
-      offerSourceId: offer.sourceId,
-      availabilityCheckId: estimate.stock.check?.id ?? null,
-      promotion: offer.promotion,
-      promotionEligible: offer.promotion ? (inputs.promotionEligible ? true : null) : true,
+      barcode: o.gtin,
+      title: o.title,
+      retailer: o.retailer || "",
+      offerProvider: o.provider,
+      offerSourceId: o.sourceId,
+      availabilityCheckId: current.stock.check?.id ?? null,
+      promotion: o.promotion,
+      promotionEligible: o.promotion ? (inputs.promotionEligible ? true : null) : true,
       shipping: postage && postage > 0 ? postage : null,
-      daysToSell: estimate.sample.daysToSell,
-      independentSales: estimate.sample.independent,
-      displayPermitted: estimate.permission.permitted,
-      matchDecision: estimate.match,
+      daysToSell: current.sample.daysToSell,
+      independentSales: current.sample.independent,
+      displayPermitted: current.permission.permitted,
+      matchDecision: current.match,
+      sales: req ? req.sales : [],
+      weightKg: req?.weightKg ?? null,
+      estimateInputs: req ? estimateInputsOf(req) : null,
     });
     setNotice("Audit form filled from this estimate. Review it below before saving.");
   }
+
+  const categoryId: CategoryId = inputs.category || selected?.suggestedCategory?.id || "general";
 
   return (
     <article className="research-calculator">
@@ -700,6 +962,18 @@ export function ResearchCalculator({
       {selected && offer && (
         <>
           <OfferSummary offer={offer} />
+          <AttributesPanel
+            offer={selected}
+            draft={attrs}
+            onChange={setAttrs}
+            result={candidates?.offerAttributes ?? null}
+            error={candidateError}
+          />
+          {estimate?.prices ? (
+            <PriceComparison prices={estimate.prices} />
+          ) : (
+            <p className="muted">The three prices appear with the estimate.</p>
+          )}
           <fieldset>
             <legend>2. Completed sales</legend>
             <p className="muted">
@@ -708,7 +982,8 @@ export function ResearchCalculator({
               checked the listing yourself. Similar products need research and
               never enter the sample.
             </p>
-            {!candidates && !error && <p className="muted">Loading evidence…</p>}
+            {!candidates && !candidateError && <p className="muted">Loading evidence…</p>}
+            {candidateError && !candidates && <p role="alert">{candidateError}</p>}
             {candidates && candidates.sales.length === 0 && (
               <p>No completed sales recorded for this barcode or a similar title.</p>
             )}
@@ -842,6 +1117,10 @@ export function ResearchCalculator({
                     }
                     step={kind === "pounds" || kind === "kg" ? 0.01 : kind === "percent" ? 0.1 : 1}
                     value={String(inputs[field])}
+                    aria-invalid={
+                      (field === "journeyCost" || field === "journeyMinutes") &&
+                      String(inputs[field]).trim() === ""
+                    }
                     onChange={(ev) => set(field, ev.target.value)}
                   />
                   {hint && <span className="muted">{hint}</span>}
@@ -854,13 +1133,25 @@ export function ResearchCalculator({
                   value={inputs.cashNeededBy}
                   onChange={(ev) => set("cashNeededBy", ev.target.value)}
                 />
+                <span className="muted">
+                  {goalsCashDate && inputs.cashNeededBy === goalsCashDate
+                    ? "From your Goals. Checked against the expected payout, not the sale"
+                    : "Checked against the expected payout, not the sale"}
+                </span>
               </label>
               <label>
                 Locality for the stock check
                 <input
                   value={inputs.locality}
+                  maxLength={120}
+                  aria-invalid={!inputs.locality.trim()}
                   onChange={(ev) => set("locality", ev.target.value)}
                 />
+                <span className={inputs.locality.trim() ? "muted" : "warn"}>
+                  {inputs.locality.trim()
+                    ? "A branch check counts only in this locality"
+                    : "Enter the town or area of the branch: without it no branch check can confirm stock"}
+                </span>
               </label>
             </div>
             {offer.promotion && (
@@ -881,6 +1172,21 @@ export function ResearchCalculator({
             )}
           </fieldset>
 
+          <CategoryPanel
+            suggestion={selected.suggestedCategory ?? null}
+            chosen={inputs.category}
+            id={categoryId}
+            rules={agreed?.categories ?? null}
+            packagingChecked={inputs.packagingChecked}
+            bestBefore={inputs.bestBefore}
+            onChange={set}
+            failures={
+              estimate?.category && estimate.category.id === categoryId
+                ? estimate.category.failures
+                : null
+            }
+          />
+
           <ThresholdsPanel
             agreed={agreed}
             thresholds={estimate?.thresholds ?? null}
@@ -889,7 +1195,7 @@ export function ResearchCalculator({
           />
 
           {error && <p role="alert">{error}</p>}
-          {estimate && <Result estimate={estimate} />}
+          {estimate && <Result estimate={estimate} stale={stale} />}
 
           {estimate && (
             <StockCheckForm
@@ -903,20 +1209,25 @@ export function ResearchCalculator({
 
           {estimate && (
             <div className="actions">
-              <button type="button" onClick={trackInLedger} disabled={!e}>
+              <button type="button" onClick={trackInLedger} disabled={!current?.economics}>
                 Track in ledger
               </button>
-              <button type="button" onClick={draftBounty}>
+              <button type="button" onClick={draftBounty} disabled={!current}>
                 Draft a bounty
               </button>
               {onAuditDraft && (
-                <button type="button" onClick={auditDraft}>
+                <button type="button" onClick={auditDraft} disabled={!current}>
                   Add to validation audit
                 </button>
               )}
             </div>
           )}
-          {!e && estimate && (
+          {stale && (
+            <p className="muted">
+              The estimate is updating for your latest changes, so these actions wait for it.
+            </p>
+          )}
+          {!stale && estimate && !estimate.economics && (
             <p className="muted">
               Tracking needs at least one confirmed exact sale, so there is a
               prediction to compare against.
@@ -926,6 +1237,369 @@ export function ResearchCalculator({
         </>
       )}
     </article>
+  );
+}
+
+// Today as YYYY-MM-DD in the browser's time zone, for date inputs.
+const localToday = () => {
+  const d = new Date();
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 10);
+};
+
+const ATTR_LABEL: Record<AttrKey, string> = {
+  size: "Size",
+  pack: "Pack",
+  model: "Model or part number",
+  condition: "Condition",
+};
+const ATTR_HINT: Record<AttrKey, string> = {
+  size: "As printed on the label, for example M, 10 or 28cm",
+  pack: "Units in one pack as sold, for example 1, single or 3-pack",
+  model: "As printed on the packaging, or none if it has no model number",
+  condition: "Retailers sell new stock, so new is assumed if you leave this blank",
+};
+const CONDITIONS = [
+  "new",
+  "new with tags",
+  "new without tags",
+  "new with box",
+  "new without box",
+  "new other",
+  "new with defects",
+  "used",
+  "refurbished",
+  "for parts",
+];
+
+/**
+ * Lets the operator fill attributes the source left blank after looking at
+ * the item. Values apply only once the confirmation box is ticked, never
+ * replace what the source states, and are marked as confirmed by you.
+ */
+function AttributesPanel({
+  offer,
+  draft,
+  onChange,
+  result,
+  error,
+}: {
+  offer: Offer;
+  draft: AttrDraft;
+  onChange: (value: AttrDraft) => void;
+  result: AttributeResult | null;
+  error: string;
+}) {
+  const blank = blankAttributes(offer);
+  if (!blank.length) return null;
+  const applied = Object.entries(result?.applied ?? {});
+  const entered = blank.some((k) => draft.values[k].trim() !== "");
+  const noModel = draft.values.model.trim().toLowerCase() === NO_MODEL;
+  const setValue = (k: AttrKey, value: string) =>
+    onChange({ ...draft, values: { ...draft.values, [k]: value } });
+  return (
+    <fieldset className="attributes">
+      <legend>Attributes the source left blank</legend>
+      <p className="muted">
+        An exact match needs the size, pack, model and condition stated on both
+        the offer and the sale. This source does not state{" "}
+        {blank.map((k) => ATTR_LABEL[k].toLowerCase()).join(", ")}. Look at the item
+        itself (the shelf label, the packaging or the retailer's product page) and
+        enter what you see. Your values fill only these blanks and are shown as
+        confirmed by you.
+      </p>
+      <div className="grid2 inputs">
+        {blank.map((k) =>
+          k === "model" ? (
+            <div className="model-field" key={k}>
+              <label>
+                {ATTR_LABEL.model}
+                <input
+                  value={noModel ? "" : draft.values.model}
+                  maxLength={100}
+                  disabled={noModel}
+                  placeholder={noModel ? "No model number" : undefined}
+                  onChange={(ev) => setValue("model", ev.target.value)}
+                />
+                <span className="muted">{ATTR_HINT.model}</span>
+              </label>
+              <label className="confirm">
+                <input
+                  type="checkbox"
+                  checked={noModel}
+                  onChange={(ev) => setValue("model", ev.target.checked ? NO_MODEL : "")}
+                />
+                <span>
+                  This item has no model number. It then matches only sales that state
+                  no model either
+                </span>
+              </label>
+            </div>
+          ) : (
+          <label key={k}>
+            {ATTR_LABEL[k]}
+            {k === "condition" ? (
+              <select
+                value={draft.values.condition}
+                onChange={(ev) => setValue("condition", ev.target.value)}
+              >
+                <option value="">Not confirmed</option>
+                {CONDITIONS.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                value={draft.values[k]}
+                maxLength={100}
+                onChange={(ev) => setValue(k, ev.target.value)}
+              />
+            )}
+            <span className="muted">{ATTR_HINT[k]}</span>
+          </label>
+          ),
+        )}
+      </div>
+      <label className="confirm">
+        <input
+          type="checkbox"
+          checked={draft.confirmed}
+          disabled={!entered && !draft.confirmed}
+          onChange={(ev) => onChange({ ...draft, confirmed: ev.target.checked })}
+        />
+        <span>I have looked at the item and these values are correct</span>
+      </label>
+      {error && <p role="alert">{error}</p>}
+      {draft.confirmed && applied.length > 0 && !error && (
+        <p className="ok note">
+          Applied as confirmed by you:{" "}
+          {applied
+            .map(([k, v]) => (k === "model" && v === NO_MODEL ? "no model number" : k + " " + v))
+            .join(", ")}
+          .
+        </p>
+      )}
+      {result?.ignored.map((x) => (
+        <p className="warn note" key={x.key}>
+          {x.reason}
+        </p>
+      ))}
+    </fieldset>
+  );
+}
+
+const CATEGORY_NAME: Record<CategoryId, string> = {
+  general: "General",
+  clothing: "Clothing",
+  food: "Food",
+};
+function categoryRuleText(id: CategoryId, rule: CategoryRule | null) {
+  if (id === "clothing")
+    return [
+      "A returns allowance of at least " +
+        percent(rule?.minReturnsRate ?? 0.15) +
+        " of the sale price: a lower figure is raised to it",
+      "A stated size, because demand and sales are size-specific: only sales of that size can match",
+    ];
+  if (id === "food")
+    return [
+      "Packaging checked as sealed, undamaged and fit to post",
+      "At least " +
+        (rule?.minShelfLifeDays ?? 30) +
+        " days left on the best-before date after the expected sale",
+      "Unit weight entered, as for every item",
+    ];
+  return ["No rules beyond the buying thresholds"];
+}
+
+/** Category choice, the rules it brings and any that fail. */
+function CategoryPanel({
+  suggestion,
+  chosen,
+  id,
+  rules,
+  packagingChecked,
+  bestBefore,
+  onChange,
+  failures,
+}: {
+  suggestion: { id: CategoryId; basis: string } | null;
+  chosen: "" | CategoryId;
+  id: CategoryId;
+  rules: Record<CategoryId, CategoryRule> | null;
+  packagingChecked: boolean;
+  bestBefore: string;
+  onChange: (field: keyof Inputs, value: string | boolean) => void;
+  failures: string[] | null;
+}) {
+  const suggested = suggestion?.id ?? "general";
+  return (
+    <fieldset className="category">
+      <legend>4. Category rules</legend>
+      <div className="grid2 inputs">
+        <label>
+          Category
+          <select value={chosen} onChange={(ev) => onChange("category", ev.target.value)}>
+            <option value="">Suggested: {CATEGORY_NAME[suggested]}</option>
+            {(Object.keys(CATEGORY_NAME) as CategoryId[]).map((c) => (
+              <option key={c} value={c}>
+                {CATEGORY_NAME[c]}
+              </option>
+            ))}
+          </select>
+          <span className="muted">
+            {chosen
+              ? "Chosen by you"
+              : (suggestion?.basis ?? "No clear category in the title") + ". Change it if that is wrong"}
+          </span>
+        </label>
+      </div>
+      <p className="muted">{CATEGORY_NAME[id]} items need, on top of the buying thresholds:</p>
+      <ul className="threshold-list">
+        {categoryRuleText(id, rules?.[id] ?? null).map((t) => (
+          <li key={t}>{t}</li>
+        ))}
+      </ul>
+      {id === "food" && (
+        <div className="grid2 inputs">
+          <label className="confirm">
+            <input
+              type="checkbox"
+              checked={packagingChecked}
+              onChange={(ev) => onChange("packagingChecked", ev.target.checked)}
+            />
+            <span>I have checked the packaging is sealed, undamaged and fit to post</span>
+          </label>
+          <label>
+            Best-before date on the pack
+            <input
+              type="date"
+              value={bestBefore}
+              onChange={(ev) => onChange("bestBefore", ev.target.value)}
+            />
+          </label>
+        </div>
+      )}
+      {failures !== null &&
+        (failures.length ? (
+          <ul className="warnings">
+            {failures.map((f) => (
+              <li key={f}>{f}</li>
+            ))}
+          </ul>
+        ) : (
+          <p className="ok note">The {CATEGORY_NAME[id].toLowerCase()} rules pass.</p>
+        ))}
+    </fieldset>
+  );
+}
+
+const day = (value: string | null | undefined) => (value ? value.slice(0, 10) : "date unknown");
+const span = (r: { lowest: number | null; highest: number | null }) =>
+  r.lowest === null
+    ? "not known"
+    : r.lowest === r.highest
+      ? money(r.lowest)
+      : money(r.lowest) + " to " + money(r.highest);
+const plural = (n: number, word: string) => n + " " + word + (n === 1 ? "" : "s");
+// Shown wherever independent sales are: a sale with no seller name cannot
+// show independence, so it is left out of the count.
+export const noSellerNote = (n: number | null | undefined) =>
+  n && n > 0
+    ? plural(n, "sale") + " with no seller name " + (n === 1 ? "is" : "are") + " not counted as independent"
+    : "";
+const between = (r: { oldest: string | null; newest: string | null }) =>
+  day(r.oldest) === day(r.newest) ? "on " + day(r.newest) : day(r.oldest) + " to " + day(r.newest);
+
+/**
+ * The three prices side by side, each with its evidence class and dates:
+ * the claimed previous price, the acquisition price observed over time and
+ * completed resale prices. They answer different questions and are never
+ * pooled.
+ */
+function PriceComparison({ prices }: { prices: Prices }) {
+  const o = prices.observed;
+  const s = prices.sold;
+  const point = (p: PricePoint) => (
+    <li key={p.provider + "|" + p.sourceId}>
+      {day(p.observed)} · <b className="inline">{money(p.price)}</b> ·{" "}
+      {p.retailer || p.provider}
+      {p.promotion ? " · promotion" : ""}
+      {p.chosen ? " (this offer)" : ""}
+    </li>
+  );
+  return (
+    <section className="three-prices" aria-label="Three prices">
+      <small>THREE PRICES, KEPT APART</small>
+      <div className="price-columns">
+        <div className="price-col">
+          <h3>{prices.claimed?.kind === "rrp" ? "Recommended retail price" : "Claimed previous price"}</h3>
+          <span className="badge">{prices.claimed?.evidenceClass ?? "Retail offer"}</span>
+          {prices.claimed ? (
+            <>
+              <b className="figure">{money(prices.claimed.price)}</b>
+              <span className="note">
+                {prices.claimed.basis}. Source date {day(prices.claimed.observed)}.
+              </span>
+            </>
+          ) : (
+            <p className="muted">
+              Not stated by this source, so there is no claimed previous price or
+              recommended retail price to compare.
+            </p>
+          )}
+        </div>
+        <div className="price-col">
+          <h3>Price observed over time</h3>
+          <span className="badge">{o.evidenceClass}</span>
+          {o.count ? (
+            <>
+              <b className="figure">{span(o)}</b>
+              <span className="note">
+                {plural(o.count, "dated price")} for this barcode, {between(o)}
+              </span>
+              <ul className="price-points">{o.points.slice(0, 5).map(point)}</ul>
+              {o.points.length > 5 && (
+                <details>
+                  <summary>All {o.points.length} shown prices</summary>
+                  <ul className="price-points">{o.points.slice(5).map(point)}</ul>
+                </details>
+              )}
+            </>
+          ) : (
+            <p className="muted">No dated prices recorded for this barcode.</p>
+          )}
+          {o.amazon.count > 0 && (
+            <p className="muted">
+              <span className="badge">{o.amazon.evidenceClass}</span> {span(o.amazon)},{" "}
+              {plural(o.amazon.count, "point")}, {between(o.amazon)}. {o.amazon.note}.
+            </p>
+          )}
+        </div>
+        <div className="price-col">
+          <h3>Completed resale prices</h3>
+          <span className="badge">{s.evidenceClass}</span>
+          {s.count ? (
+            <>
+              <b className="figure">{money(s.lowerMedian)} lower median</b>
+              <span className="note">
+                {plural(s.count, "confirmed sale")}, {span(s)}, sold {between(s)}. {s.note}.
+              </span>
+            </>
+          ) : (
+            <p className="muted">No confirmed exact sale yet, so there is no resale price.</p>
+          )}
+          {s.exactNotInSample > 0 && (
+            <span className="note">
+              {plural(s.exactNotInSample, "other exact-variant sale")} not in the sample
+              (not confirmed, too old or undated).
+            </span>
+          )}
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -947,7 +1621,7 @@ function ThresholdsPanel({
   stricter,
   onChange,
 }: {
-  agreed: { rules: Rules; alertRules: AlertRules } | null;
+  agreed: Agreed | null;
   thresholds: Thresholds | null;
   stricter: Stricter;
   onChange: (value: Stricter) => void;
@@ -961,7 +1635,7 @@ function ThresholdsPanel({
   const entered = STRICTER_FIELDS.some(([k]) => stricter[k].trim() !== "");
   return (
     <fieldset className="thresholds">
-      <legend>4. Buying thresholds</legend>
+      <legend>5. Buying thresholds</legend>
       {!inForce && <p className="muted">Loading the buying thresholds…</p>}
       {inForce && (
         <>
@@ -1013,7 +1687,7 @@ function ThresholdsPanel({
           minimum profit or a smaller first purchase. Loosening is not allowed: the
           agreed thresholds keep out trips that are likely to lose money, so a looser
           value is ignored and the agreed threshold applies. Saved in this browser
-          only.
+          and shared with the Planner, so the same thresholds apply in both.
         </p>
         <div className="grid2 inputs">
           {STRICTER_FIELDS.map(([key, label, kind, direction]) => {
@@ -1075,7 +1749,15 @@ const TIER_MEANING: Record<Tier, string> = {
 };
 
 /** Opportunity tier with its reasons, profit per unit and return. */
-function TierCard({ opportunity: o, rules }: { opportunity: Opportunity; rules: Rules }) {
+function TierCard({
+  opportunity: o,
+  rules,
+  beforeTravel,
+}: {
+  opportunity: Opportunity;
+  rules: Rules;
+  beforeTravel: boolean;
+}) {
   const meets = (ok: boolean | null) => (ok === null ? "" : ok ? "ok" : "warn");
   return (
     <div className={"tier tier-" + o.tier.toLowerCase().replace(/\s+/g, "-")}>
@@ -1100,8 +1782,9 @@ function TierCard({ opportunity: o, rules }: { opportunity: Opportunity; rules: 
         <dd>{money(o.unitPrice)}</dd>
         <dt>Profit per unit after variable costs</dt>
         <dd className={meets(o.unitProfit === null ? null : o.unitProfit >= rules.minUnitProfit)}>
-          {o.unitProfit === null ? "not known" : money(o.unitProfit)} (needs at least{" "}
-          {money(rules.minUnitProfit)})
+          {o.unitProfit === null ? "not known" : money(o.unitProfit)}
+          {beforeTravel && o.unitProfit !== null ? " before travel, which is not entered" : ""} (needs at
+          least {money(rules.minUnitProfit)})
         </dd>
         <dt>Return on purchase price</dt>
         <dd className={meets(o.returnOnCost === null ? null : o.returnOnCost >= rules.minReturn)}>
@@ -1134,6 +1817,12 @@ function TierCard({ opportunity: o, rules }: { opportunity: Opportunity; rules: 
     </div>
   );
 }
+
+const ONLINE_AVAILABILITY: Record<string, string> = {
+  in_stock: "In stock online",
+  out_of_stock: "Out of stock online",
+  discontinued: "Discontinued",
+};
 
 function OfferSummary({ offer }: { offer: Offer }) {
   return (
@@ -1181,8 +1870,8 @@ function OfferSummary({ offer }: { offer: Offer }) {
         <dd>{offer.barcode}</dd>
         <dt>Variant</dt>
         <dd>
-          {attributesText(offer)}
-          {!offer.condition && " (retailers sell new stock, so new is assumed)"}
+          {attributesText(offer, offer.attributeSource)}
+          {!offer.attributeSource && !offer.condition && " (retailers sell new stock, so new is assumed)"}
         </dd>
         {offer.promotion && (
           <>
@@ -1192,8 +1881,12 @@ function OfferSummary({ offer }: { offer: Offer }) {
         )}
         {offer.availability && (
           <>
-            <dt>Source availability</dt>
-            <dd>{offer.availability} (as reported, not verified)</dd>
+            <dt>Online availability in the source</dt>
+            <dd>
+              {ONLINE_AVAILABILITY[offer.availability] ?? offer.availability}, as the source
+              claims online. It says nothing about branch stock, which only a branch check
+              confirms
+            </dd>
           </>
         )}
       </dl>
@@ -1202,18 +1895,72 @@ function OfferSummary({ offer }: { offer: Offer }) {
   );
 }
 
-function Result({ estimate }: { estimate: Estimate }) {
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/** When the cash comes back, from the Goals payout model. */
+function PayoutPanel({ payout: p }: { payout: Payout }) {
+  const g = p.goals;
+  const status = p.timing.status === "late" ? "warn" : p.timing.status === "on time" ? "ok" : "";
+  return (
+    <div className="payout">
+      <h3>Time until payment</h3>
+      <p className={status}>
+        {p.cashNeededBy || p.cashNeededDays !== null
+          ? p.timing.note
+          : p.date
+            ? "Payout expected " +
+              p.date +
+              (p.days === null ? "." : p.days <= 0 ? ", today." : ", in about " + plural(p.days, "day") + ".")
+            : "Payout date unknown."}
+      </p>
+      <p className="muted">
+        {p.note} Assumes the trip is today ({p.start}) and each unit is listed the same day,
+        with{" "}
+        {g.daysToSell === null
+          ? "days to sell unknown"
+          : plural(g.daysToSell, "day") + " to sell from the confirmed sales"}
+        , posting on{" "}
+        {g.dispatchDays.length ? g.dispatchDays.map((d) => WEEKDAYS[d]).join(", ") : "no days"},{" "}
+        {plural(g.deliveryDays, "day")} for delivery and {plural(g.payoutDelayDays, "day")} until
+        the marketplace pays out ({g.saved ? "your Goals" : "Goals defaults"}).{" "}
+        <a href="#Goals">Change these in Goals</a>.
+      </p>
+    </div>
+  );
+}
+
+function Result({ estimate, stale }: { estimate: Estimate; stale: boolean }) {
   const e = estimate.economics;
   const s = estimate.sample;
   const failing = estimate.alert.checks.filter((c) => !c.ok).length;
+  const defaulted = new Set(estimate.inputs?.defaulted ?? []);
+  const journey = estimate.journey ?? {
+    known: true,
+    missing: [],
+    costKnown: true,
+    minutesKnown: true,
+  };
+  // Figures that rest on a value left blank say so, so they never sit
+  // beside a check that calls the value unknown without explanation.
+  const notEntered = (pence: number) => "not entered (counted as " + money(pence) + ")";
+  const category = estimate.category;
   return (
-    <section className="result" aria-live="polite">
-      <small>5. ESTIMATE</small>
-      <TierCard opportunity={estimate.opportunity} rules={estimate.thresholds.rules} />
+    <section className={"result" + (stale ? " stale" : "")} aria-live="polite" aria-busy={stale}>
+      <small>6. ESTIMATE</small>
+      {stale && (
+        <p className="notice" role="status">
+          Updating for your latest changes. The figures below are for your previous inputs.
+        </p>
+      )}
+      <TierCard
+        opportunity={estimate.opportunity}
+        rules={estimate.thresholds.rules}
+        beforeTravel={!journey.costKnown}
+      />
       {!e && (
         <p className="notice">
           {estimate.match === "research"
-            ? "No confirmed exact sale yet. Check and confirm the sales above, or research the similar ones, before relying on this trip."
+            ? "No confirmed exact sale yet. Fill in any attributes the source left blank above, then tick the sales you have checked are the exact variant. A sale of a similar product never enters the sample."
             : "No matching completed sales. There is no evidence of what buyers pay, so no estimate is shown."}
         </p>
       )}
@@ -1222,7 +1969,8 @@ function Result({ estimate }: { estimate: Estimate }) {
           <p className="muted">
             Based on {s.count} confirmed sale{s.count === 1 ? "" : "s"} from{" "}
             {s.independent} independent seller{s.independent === 1 ? "" : "s"}
-            {s.oldest ? ", sold " + s.oldest + " to " + s.newest : ""}. Lower median
+            {s.oldest ? ", sold " + s.oldest + " to " + s.newest : ""}.
+            {s.withoutSeller ? " " + noSellerNote(s.withoutSeller) + "." : ""} Lower median
             sale {cash(s.lowerMedian)} including buyer postage. Stock costed at{" "}
             {money(estimate.unitCost)} per unit.
           </p>
@@ -1230,44 +1978,78 @@ function Result({ estimate }: { estimate: Estimate }) {
             <dt>Cash required before payout</dt>
             <dd>
               <b>{money(e.cashRequired)}</b>
+              {!journey.costKnown ? " plus travel, which is not entered" : ""}
             </dd>
             <dt>Stock ({e.units} units)</dt>
             <dd>{money(e.costs.stock)}</dd>
             <dt>Packaging</dt>
-            <dd>{money(e.costs.packaging)}</dd>
+            <dd>{defaulted.has("packaging") ? notEntered(e.costs.packaging) : money(e.costs.packaging)}</dd>
             <dt>Parcel costs</dt>
-            <dd>{money(e.costs.postage)}</dd>
+            <dd className={e.costs.postage > 0 ? "" : "warn"}>
+              {e.costs.postage > 0
+                ? money(e.costs.postage)
+                : defaulted.has("postage")
+                  ? notEntered(0)
+                  : money(0) + ", treated as unknown: enter what you pay to post one unit"}
+            </dd>
             <dt>Marketplace fees</dt>
             <dd>{money(e.costs.fees)}</dd>
             <dt>Returns allowance</dt>
-            <dd>{money(e.costs.returns)}</dd>
-            <dt>Travel</dt>
             <dd>
-              {money(e.costs.travel)} ({money(e.journeyPerUnit)} per unit)
+              {money(e.costs.returns)}
+              {category?.returnsRaised
+                ? " (" + percent(category.returnsRate) + ", the " + category.name.toLowerCase() + " minimum)"
+                : ""}
+            </dd>
+            <dt>Travel</dt>
+            <dd className={journey.costKnown ? "" : "warn"}>
+              {journey.costKnown
+                ? money(e.costs.travel) + " (" + money(e.journeyPerUnit) + " per unit)"
+                : notEntered(0)}
             </dd>
             <dt>Potential proceeds (not realised)</dt>
             <dd>{money(e.proceeds)}</dd>
             <dt>Contribution</dt>
-            <dd className={e.contribution > 0 ? "ok" : "warn"}>
+            <dd className={journey.costKnown && e.contribution > 0 ? "ok" : "warn"}>
               <b>{money(e.contribution)}</b>
+              {journey.costKnown ? "" : " before travel, which is not entered"}
             </dd>
             <dt>Active hours</dt>
-            <dd>{hours(e.activeMinutes)}</dd>
+            <dd>
+              {hours(e.activeMinutes)}
+              {journey.minutesKnown ? "" : ", leaving out the journey, which is not entered"}
+            </dd>
             <dt>Earnings per active hour</dt>
-            <dd>{e.hourly === null ? "not known" : money(e.hourly)}</dd>
+            <dd className={journey.known ? "" : "warn"}>
+              {!journey.known
+                ? "not known until the journey cost and time are entered"
+                : e.hourly === null
+                  ? "not known"
+                  : money(e.hourly)}
+            </dd>
             <dt>Loss if nothing sells</dt>
-            <dd className="warn">{money(e.unsoldLoss)}</dd>
+            <dd className="warn">
+              {money(e.unsoldLoss)}
+              {journey.costKnown ? "" : " plus travel"}
+            </dd>
             <dt>Break-even sale price</dt>
-            <dd>{cash(e.breakEvenSale)}</dd>
+            <dd>
+              {cash(e.breakEvenSale)}
+              {journey.costKnown ? "" : " before travel"}
+            </dd>
             <dt>Sample size</dt>
             <dd>{s.count}</dd>
             <dt>Independent sellers</dt>
-            <dd>{s.independent}</dd>
+            <dd>
+              {s.independent}
+              {s.withoutSeller ? <span className="note warn">{noSellerNote(s.withoutSeller)}</span> : null}
+            </dd>
             <dt>Days to sell</dt>
             <dd>{s.daysToSell === null ? "not known" : s.daysToSell + " days"}</dd>
           </dl>
         </>
       )}
+      {estimate.payout && <PayoutPanel payout={estimate.payout} />}
       <h3>Buy-alert checks</h3>
       <p className={estimate.alert.eligible ? "ok" : "warn"}>
         {estimate.alert.eligible
@@ -1352,10 +2134,12 @@ function StockCheckForm({
   }, [offer.gtin, version]);
   return (
     <fieldset className="stock-check">
-      <legend>6. Branch availability check</legend>
+      <legend>7. Branch availability check</legend>
       <p className="muted">
         Branch stock is confirmed only by a check you record here from the last
-        two days. Feeds, catalogues and past observations never confirm it.
+        two days, at this retailer and in the locality of the estimate
+        {locality.trim() ? " (" + locality.trim() + ")" : ", which is not entered yet"}.
+        Feeds, catalogues and past observations never confirm it.
         {latest
           ? " Latest usable check: " +
             (latest.in_stock ? "in stock" : "none found") +

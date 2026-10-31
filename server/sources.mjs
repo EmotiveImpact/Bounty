@@ -8,6 +8,7 @@
 // reported completed sale. Nothing in this file turns one into another.
 import { parse } from "csv-parse/sync";
 import { KIND, LICENCE } from "./contract.mjs";
+import { NO_MODEL, normaliseModel } from "./matching.mjs";
 
 // The source register. provider is the key stored in research.provider,
 // import_runs.provider and permissions.provider ("openprices" for the
@@ -113,7 +114,7 @@ export function status(env = process.env) {
 // Removes credential values and token-shaped fragments from text that may be
 // logged or stored, such as an upstream error message.
 export function redact(text, env = process.env) {
-  let out = String(text ?? "");
+  let out = typeof text === "string" ? text : textOf(text);
   for (const key of CREDENTIALS) {
     const value = typeof env[key] === "string" ? env[key].trim() : "";
     if (value.length >= 6) out = out.split(value).join("[redacted]");
@@ -126,10 +127,20 @@ export function redact(text, env = process.env) {
 // ---------------------------------------------------------------------------
 // Value normalisers. Unknown values become null so that matching fails closed.
 
-/** Trimmed string or null. */
+// Text of an upstream value that should be text: a string, or a finite
+// number written as digits. Anything else (an object, an array, a boolean)
+// is not text and gives "", so String() is never called on an object whose
+// toString could throw.
+function textOf(value) {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "bigint") return String(value);
+  return "";
+}
+
+/** Trimmed string or null. Values that are not text or a number are null. */
 export function clean(value, max = 500) {
-  if (value === undefined || value === null) return null;
-  const s = String(value).trim().replace(/\s+/g, " ");
+  const s = textOf(value).trim().replace(/\s+/g, " ");
   return s ? s.slice(0, max) : null;
 }
 
@@ -169,8 +180,7 @@ const optionalPence = (value) => {
  * mistyped barcode would otherwise match a different product.
  */
 export function gtin(value) {
-  if (value === undefined || value === null) return null;
-  const s = String(value).trim().replace(/[\s-]/g, "");
+  const s = textOf(value).trim().replace(/[\s-]/g, "");
   if (!/^(\d{8}|\d{12,14})$/.test(s)) return null;
   let sum = 0;
   for (let i = s.length - 2, w = 3; i >= 0; i--, w = 4 - w)
@@ -207,6 +217,27 @@ function calendarDate(value) {
   return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === value
     ? value
     : null;
+}
+
+/**
+ * A model or part number from a feed or provider, or null. A feed's "N/A",
+ * "none" or "-" is a placeholder rather than a statement that the product
+ * has no model, so it stays unknown: only a manual sale or an
+ * operator-confirmed attribute can say "no model" (matching.mjs NO_MODEL).
+ */
+export function feedModel(value) {
+  const canonical = normaliseModel(clean(value, 200));
+  return canonical === null || canonical === NO_MODEL ? null : attr(value);
+}
+
+/**
+ * A pack count given as structured data: a whole number of items from 1 to
+ * 10000 (Keepa packageQuantity, for example). Text such as "6 x 330ml" in a
+ * title or size is never read as a pack, and 0 or -1 (Keepa's "not
+ * available") is null.
+ */
+export function structuredPack(value) {
+  return Number.isSafeInteger(value) && value >= 1 && value <= 10000 ? String(value) : null;
 }
 
 // A row with every research column the adapters fill. Missing values are
@@ -293,8 +324,11 @@ export function awin(text) {
         barcode:
           gtin(r.ean) || gtin(r.product_GTIN) || gtin(r.gtin) || gtin(r.upc),
         variant: clean(r.colour ?? r.color, 200),
+        // Awin's feed columns have no pack count: pack stays unknown (null)
+        // until an operator confirms it. A pack in the product name is
+        // never read.
         size: attr(r["Fashion:size"] ?? r.size),
-        model: attr(r.model_number || r.mpn || r.product_model),
+        model: feedModel(r.model_number) ?? feedModel(r.mpn) ?? feedModel(r.product_model),
         condition: attr(r.condition),
         price: pence(r.search_price),
         shipping: optionalPence(r.delivery_cost),
@@ -305,8 +339,22 @@ export function awin(text) {
         promotion: clean(r.promotional_text, 300),
         url: clean(r.merchant_deep_link || r.aw_deep_link, 2000),
         licence: LICENCE.FEED,
+        // The retailer's claimed prices, from Awin's structured columns only:
+        // product_price_old is the previous price (Awin leaves it empty unless
+        // it is above the current price) and rrp_price the recommended retail
+        // price. They are claims for display beside the price history, never
+        // the cost: unlike Open Prices regular_price they are not a price
+        // anyone pays now. Stored once the research table has these columns.
+        was_price: claimedPence(r.product_price_old),
+        rrp_price: claimedPence(r.rrp_price),
       }),
     );
+}
+
+/** A claimed price in pence when the source gives a positive amount, else null. */
+export function claimedPence(value) {
+  const p = optionalPence(value);
+  return p !== null && p > 0 ? p : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -330,7 +378,8 @@ export function hobnight(body) {
     )
     .map((r) =>
       researchRow({
-        source_id: r.id === undefined || r.id === null ? null : String(r.id),
+        // Hobnight products state a size but no pack count or model.
+        source_id: clean(r.id, 200),
         kind: KIND.RETAIL,
         title: clean(r.name),
         barcode: gtin(r.gtin),
@@ -384,7 +433,10 @@ export function keepa(body) {
           barcode: gtin(p.eanList?.[0]) || gtin(p.upcList?.[0]),
           variant: clean(p.color, 200),
           size: attr(p.size),
-          model: attr(p.model),
+          // Keepa's packageQuantity is a structured count of items in the
+          // package (0 or -1 when Amazon does not give one).
+          pack: structuredPack(p.packageQuantity),
+          model: feedModel(p.model),
           condition: "new",
           price,
           observed: new Date((time + KEEPA_EPOCH_MINUTES) * 60000).toISOString(),
@@ -555,7 +607,7 @@ export function openPrices(body) {
         gbp(r.currency) &&
         r.location?.osm_address_country_code === "GB" &&
         !r.duplicate_of &&
-        Number(r.price) > 0,
+        pence(r.price) > 0,
     )
     .map((r) => {
       const loc = r.location || {};
@@ -564,11 +616,8 @@ export function openPrices(body) {
       const osmId = loc.osm_id ?? r.location_osm_id;
       const quantity =
         clean(product.quantity, 100) ||
-        (product.product_quantity
-          ? clean(
-              product.product_quantity + " " + (product.product_quantity_unit || ""),
-              100,
-            )
+        (clean(product.product_quantity)
+          ? clean(textOf(product.product_quantity) + " " + textOf(product.product_quantity_unit), 100)
           : null);
       return {
         id: r.id,
@@ -581,7 +630,7 @@ export function openPrices(body) {
         store: clean(loc.osm_name || loc.osm_brand, 200),
         place: clean(loc.osm_address_postcode, 20),
         city: clean(loc.osm_address_city, 100),
-        osm_id: osmType && osmId ? osmType.toLowerCase() + "/" + osmId : null,
+        osm_id: osmType && clean(osmId, 40) ? osmType.toLowerCase() + "/" + clean(osmId, 40) : null,
         price: pence(r.price),
         regular_price: optionalPence(r.price_without_discount),
         discounted: r.price_is_discounted === true ? 1 : 0,
@@ -590,7 +639,7 @@ export function openPrices(body) {
         unit: clean(r.price_per, 40),
         quantity,
         barcode: clean(r.product_code, 40),
-        proof_id: r.proof_id === undefined || r.proof_id === null ? null : String(r.proof_id),
+        proof_id: clean(r.proof_id, 40),
         licence: LICENCE.ODBL,
       };
     });

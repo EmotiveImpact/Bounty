@@ -1,7 +1,7 @@
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { memoryDb, serve } from "./test-support.mjs";
@@ -22,7 +22,7 @@ import {
   pastDate,
   londonDate,
 } from "./ledger.mjs";
-import { storeProof, decodeBase64, prepareProof, MAX_PROOF_BYTES } from "./proofs.mjs";
+import { storeProof, decodeBase64, deleteProofFile, prepareProof, MAX_PROOF_BYTES } from "./proofs.mjs";
 import * as ledgerRoutes from "./routes-ledger.mjs";
 
 const NOW = new Date("2026-10-31T12:00:00.000Z");
@@ -128,11 +128,12 @@ test("reconcile: realised contribution counts only payouts, never pending sales"
   assert.equal(more.pendingPayout, 1800 + 1500);
 });
 
-test("reconcile: without payout units, pending is sales minus payouts (an upper bound)", () => {
+test("reconcile: a payout without units covers the sales dated up to it", () => {
+  // partSold: sale 20.00 on 5 Oct, payout 17.00 on 7 Oct, sale 18.00 on 8 Oct.
   const r = reconcile(resaleTrip(), partSold({ payoutUnits: null }));
-  assert.equal(r.pendingBasis, "amount");
-  assert.equal(r.pendingPayout, 3800 - 1700);
-  assert.equal(r.impliedFees, 3800 - 1700);
+  assert.equal(r.pendingBasis, "dates");
+  assert.equal(r.pendingPayout, 1800); // only the sale after the payout
+  assert.equal(r.impliedFees, 300); // fees on the sale the payout covered, not on the pending one
   const none = reconcile(resaleTrip(), partSold().filter((e) => e.type !== "payout"));
   assert.equal(none.pendingBasis, "no payouts");
   assert.equal(none.pendingPayout, 3800);
@@ -145,8 +146,45 @@ test("reconcile: without payout units, pending is sales minus payouts (an upper 
   assert.equal(closed.cashTiedUp, 0);
   assert.deepEqual(
     payoutPosition([entry("sale", 1000, "2026-10-02", { units: 2 }), entry("payout", 400, "2026-10-03", { units: 1 })]),
-    { pending: 500, fees: 100, basis: "units" },
+    { pending: 500, paid: 500, fees: 100, basis: "units" },
   );
+});
+
+test("payout position: marketplace fees on a fully paid-out sale are never pending (qa:Q13)", () => {
+  // Receipt 24.00 for 2, one sold listing 50.00 for both, payout 43.00 with no units.
+  const entries = [
+    entry("receipt", 2400, "2026-10-20", { units: 2 }),
+    entry("sale", 5000, "2026-10-22", { units: 2 }),
+    entry("payout", 4300, "2026-10-26"),
+  ];
+  assert.deepEqual(payoutPosition(entries), { pending: 0, paid: 5000, fees: 700, basis: "dates" });
+  const r = reconcile(resaleTrip(), entries);
+  assert.equal(r.pendingPayout, 0);
+  assert.equal(r.impliedFees, 700);
+  assert.deepEqual(r.discrepancies, []);
+  // Same day counts as covered.
+  assert.equal(payoutPosition([entry("sale", 5000, "2026-10-22", { units: 1 }), entry("payout", 4300, "2026-10-22")]).pending, 0);
+  // Pending and fees never overlap: every sale is either paid or pending.
+  for (const list of [entries, partSold(), partSold({ payoutUnits: null })]) {
+    const p = payoutPosition(list);
+    assert.equal(p.paid + p.pending, list.filter((e) => e.type === "sale").reduce((t, e) => t + e.amount, 0));
+    if (p.fees !== null) assert.ok(p.fees <= p.paid);
+  }
+  // Mixed: a payout with units pays the oldest sale; a later one without
+  // units covers the rest up to its date.
+  const mixed = payoutPosition([
+    entry("sale", 2000, "2026-10-01", { units: 1 }),
+    entry("sale", 3000, "2026-10-02", { units: 1 }),
+    entry("payout", 1800, "2026-10-03", { units: 1 }),
+    entry("sale", 2500, "2026-10-05", { units: 1 }),
+    entry("payout", 2700, "2026-10-06"),
+    entry("sale", 1000, "2026-10-08", { units: 1 }),
+  ]);
+  assert.deepEqual(mixed, { pending: 1000, paid: 7500, fees: 7500 - 4500, basis: "dates" });
+  // A payout dated before every sale covers none of them.
+  const early = payoutPosition([entry("payout", 900, "2026-10-01"), entry("sale", 1000, "2026-10-04", { units: 1 })]);
+  assert.equal(early.pending, 1000);
+  assert.equal(early.fees, null);
 });
 
 test("reconcile: checklist and refunds", () => {
@@ -234,17 +272,22 @@ test("verification needs a receipt proof and a payout proof, as two different fi
   const entries = partSold();
   const receipt = entries.find((e) => e.type === "receipt");
   const payout = entries.find((e) => e.type === "payout");
-  const proof = (entryId, sha256) => ({ entry_id: entryId, sha256 });
+  const proof = (entryId, sha256, label = "proof " + sha256) => ({ entry_id: entryId, sha256, label });
   const check = (proofs) => verification(resaleTrip(), entries, proofs);
   assert.equal(check([]).verified, false);
   assert.deepEqual(check([]).missing, [
-    "Attach a proof to the purchase receipt entry.",
-    "Attach a proof to the payout entry.",
+    "Attach a proof to the purchase receipt (1 Oct 2026, £30.00).",
+    "Attach a proof to the payout (7 Oct 2026, £17.00).",
   ]);
   assert.equal(check([proof(receipt.id, "a")]).verified, false);
   assert.equal(check([proof(null, "a"), proof(null, "b")]).verified, false); // trip-level proofs do not count
-  assert.match(check([proof(receipt.id, "a"), proof(payout.id, "a")]).missing[0], /same file/);
-  assert.equal(check([proof(receipt.id, "a"), proof(payout.id, "b")]).verified, true);
+  const same = check([proof(receipt.id, "a", "Till receipt"), proof(payout.id, "a", "Till receipt")]);
+  assert.equal(same.verified, false);
+  assert.ok(same.missing.some((m) => /"Till receipt" is attached to more than one/.test(m)));
+  assert.deepEqual(same.proofedEntries, []);
+  const ok = check([proof(receipt.id, "a"), proof(payout.id, "b")]);
+  assert.equal(ok.verified, true);
+  assert.deepEqual(ok.proofedEntries, [receipt.id, payout.id].sort((x, y) => x - y));
   const noPayout = verification(resaleTrip(), entries.filter((e) => e.type !== "payout"), []);
   assert.ok(noPayout.missing.includes("Record the payout."));
   assert.equal(verification(resaleTrip({ kind: "household" }), entries, []).verified, false);
@@ -252,6 +295,89 @@ test("verification needs a receipt proof and a payout proof, as two different fi
   const r = reconcile(resaleTrip(), entries, [proof(receipt.id, "a"), proof(payout.id, "b")]);
   assert.equal(r.verified, true);
   assert.deepEqual(r.verificationMissing, []);
+});
+
+test("verification: every payout needs its own proof, and only verified payouts count as verified cash (M1)", () => {
+  const db = memoryDb(schema);
+  const t = createTrip(db, { label: "Jumpers", source: "manual", kind: "resale" }, clock);
+  const receipt = addEntry(db, t, { type: "receipt", amount: 3000, units: 3, occurred: "2026-10-05" }, clock);
+  addEntry(db, t, { type: "sale", amount: 2600, units: 1, occurred: "2026-10-10" }, clock);
+  const p1 = addEntry(db, t, { type: "payout", amount: 2200, occurred: "2026-10-12" }, clock);
+  const p2 = addEntry(db, t, { type: "payout", amount: 30000, occurred: "2026-10-20", note: "typed, no proof" }, clock);
+  const attach = (entryId, hash, label) =>
+    recordProof(db, { tripId: t, entryId, label, sha256: hash.repeat(64), bytes: 10, mediaType: "image/png" }, clock);
+  attach(receipt, "a", "receipt");
+  attach(p1, "b", "payout A");
+  let r = getTrip(db, t).reconciliation;
+  assert.equal(r.verified, false);
+  assert.ok(r.verificationMissing.includes("Attach a proof to the payout (20 Oct 2026, £300.00)."));
+  assert.ok(r.verificationMissing.some((m) => /Payouts \(£322.00\) are above recorded sales/.test(m)));
+  let s = summary(db, "2026-10");
+  assert.equal(s.payouts, 32200);
+  assert.equal(s.verifiedPayouts, 0);
+  assert.equal(s.verifiedEarnings, 0);
+  assert.equal(s.verifiedTrips, 0);
+  // The same file attached to both payouts counts for neither.
+  attach(p2, "b", "payout A");
+  r = getTrip(db, t).reconciliation;
+  assert.equal(r.verified, false);
+  assert.ok(r.verificationMissing.includes("Attach a proof to the payout (12 Oct 2026, £22.00)."));
+  assert.ok(r.verificationMissing.some((m) => /"payout A" is attached to more than one/.test(m)));
+  assert.deepEqual(r.proofedEntries, [receipt]);
+  assert.equal(listTrips(db)[0].verified, false);
+  assert.ok(listTrips(db)[0].verificationMissing.length > 0);
+});
+
+test("verification: records must reconcile, with a sale and no payout before the purchase (M2, P18)", () => {
+  const db = memoryDb(schema);
+  const attach = (tripId, entryId, hash) =>
+    recordProof(db, { tripId, entryId, label: hash, sha256: hash.repeat(64), bytes: 10, mediaType: "image/png" }, clock);
+  // M2: receipt on 20 Oct, payout dated 2 Oct, no sale, both proofed, closed.
+  const mugs = createTrip(db, { label: "Mugs", source: "manual", kind: "resale" }, clock);
+  attach(mugs, addEntry(db, mugs, { type: "receipt", amount: 1000, units: 2, occurred: "2026-10-20" }, clock), "c");
+  attach(mugs, addEntry(db, mugs, { type: "payout", amount: 9000, occurred: "2026-10-02" }, clock), "d");
+  closeTrip(db, mugs, clock);
+  const r = getTrip(db, mugs).reconciliation;
+  assert.equal(r.verified, false);
+  assert.deepEqual(r.discrepancies.map((d) => d.code), ["payout-without-sale", "payout-before-receipt"]);
+  assert.ok(r.verificationMissing.includes("Record the sold listing the payout is for."));
+  assert.ok(r.verificationMissing.includes("Records do not reconcile: A payout is dated before the first purchase receipt."));
+  const m = metrics(db);
+  assert.equal(m.verifiedTrips, 0);
+  assert.equal(m.cash.verifiedPayouts, 0);
+  assert.equal(summary(db, "2026-10").verifiedEarnings, 0);
+
+  // P18: receipt 10.00 and payout 500.00 with separate proofs, no sale.
+  const big = createTrip(db, { label: "Big payout", source: "manual", kind: "resale" }, clock);
+  attach(big, addEntry(db, big, { type: "receipt", amount: 1000, units: 1, occurred: "2026-10-01" }, clock), "e");
+  attach(big, addEntry(db, big, { type: "payout", amount: 50000, occurred: "2026-10-05" }, clock), "f");
+  assert.equal(getTrip(db, big).reconciliation.verified, false);
+  assert.equal(summary(db, "2026-10").verifiedEarnings, 0);
+
+  // Only one payout before the receipt is enough to flag it, even when a
+  // later payout comes after the receipt.
+  const split = [
+    entry("sale", 900, "2026-10-04", { units: 1 }),
+    entry("payout", 400, "2026-10-01", { units: 1 }),
+    entry("receipt", 500, "2026-10-03", { units: 2 }),
+    entry("sale", 900, "2026-10-04", { units: 1 }),
+    entry("payout", 800, "2026-10-09", { units: 1 }),
+  ];
+  const codes = reconcile(resaleTrip(), split).discrepancies.map((d) => d.code);
+  assert.ok(codes.includes("payout-before-receipt"));
+  assert.ok(codes.includes("payout-before-sale"));
+
+  // A fully reconciled, fully proofed trade is verified, and its payouts count.
+  const good = createTrip(db, { label: "Good", source: "manual", kind: "resale" }, clock);
+  attach(good, addEntry(db, good, { type: "receipt", amount: 1000, units: 1, occurred: "2026-10-01" }, clock), "g");
+  addEntry(db, good, { type: "sale", amount: 2000, units: 1, occurred: "2026-10-02" }, clock);
+  attach(good, addEntry(db, good, { type: "payout", amount: 1700, occurred: "2026-10-05" }, clock), "h");
+  assert.equal(getTrip(db, good).reconciliation.verified, true);
+  const s = summary(db, "2026-10");
+  assert.equal(s.verifiedPayouts, 1700);
+  assert.equal(s.verifiedEarnings, 700);
+  assert.equal(s.verifiedTrips, 1);
+  assert.equal(s.unverifiedTrips, 2);
 });
 
 test("household savings never count as earnings or proceeds", () => {
@@ -296,14 +422,14 @@ test("summary: cash basis by month and separate figures", () => {
   addEntry(db, a, { type: "expense", amount: 200, occurred: "2026-10-02" }, clock);
   addEntry(db, a, { type: "work", minutes: 60, occurred: "2026-10-02" }, clock);
   closeTrip(db, a, clock);
-  // Trip B: open, part sold, not yet paid out, with a prediction.
+  // Trip B: open, part sold, not yet paid out, with a live-evidence prediction.
   const b = createTrip(
     db,
     {
       label: "B",
-      source: "planner",
+      source: "research",
       kind: "resale",
-      predicted: { units: 3, proceeds: 4500, contribution: 1200, cashRequired: 3000, activeMinutes: 120 },
+      predicted: { units: 3, proceeds: 4500, contribution: 1200, cashRequired: 3000, activeMinutes: 120, sample: false },
     },
     clock,
   );
@@ -312,7 +438,7 @@ test("summary: cash basis by month and separate figures", () => {
   // Trip C: open, paid out once, so its prediction no longer counts as potential.
   const c = createTrip(
     db,
-    { label: "C", source: "research", kind: "resale", predicted: { units: 1, proceeds: 2000, contribution: 500, cashRequired: 1200, activeMinutes: 60 } },
+    { label: "C", source: "research", kind: "resale", predicted: { units: 1, proceeds: 2000, contribution: 500, cashRequired: 1200, activeMinutes: 60, sample: false } },
     clock,
   );
   addEntry(db, c, { type: "receipt", amount: 1200, units: 1, occurred: "2026-10-10" }, clock);
@@ -339,11 +465,14 @@ test("summary: cash basis by month and separate figures", () => {
   assert.equal(oct.realisedMinutes, 60);
   assert.equal(oct.realisedHourly, Math.round(((4300 - 4400) * 60) / 60));
   // Current position of open trips only.
-  assert.equal(oct.pendingPayouts, 1500 + 300); // B unpaid sale, C upper bound
+  // B's unpaid sale. C's payout has no units, so it covers C's earlier sale
+  // and the 3.00 gap is fees, not money still to come.
+  assert.equal(oct.pendingPayouts, 1500);
   assert.equal(oct.potentialProceeds, 4500 - 1500); // B only, less its recorded sale
   assert.equal(oct.cashTiedUp, 3000 + 0); // C recovered more than spent
   assert.equal(oct.unsoldUnits, 2);
   assert.equal(oct.householdSavings, 0);
+  assert.deepEqual(oct.potentialProceedsLeftOut, { sample: 0, basisUnknown: 0, nothingBought: 0 });
   assert.equal(oct.verifiedPayouts, 0);
   assert.equal(oct.verifiedEarnings, 0);
   assert.equal(oct.unverifiedTrips, 3);
@@ -398,9 +527,10 @@ test("metrics: forecast error, cash recovery, time to payout, unsold and hourly"
     contribution,
     cashRequired: 2000,
     activeMinutes,
+    sample: false,
   });
   // Trip 1: receipts 2000, payout 3000, realised +1000; predicted 1500; 60 minutes against 90 predicted.
-  const one = createTrip(db, { label: "1", source: "planner", kind: "resale", predicted: predicted(1500, 90) }, clock);
+  const one = createTrip(db, { label: "1", source: "bounty", kind: "resale", predicted: predicted(1500, 90) }, clock);
   addEntry(db, one, { type: "receipt", amount: 2000, units: 2, occurred: "2026-10-01" }, clock);
   addEntry(db, one, { type: "sale", amount: 3400, units: 2, occurred: "2026-10-03" }, clock);
   addEntry(db, one, { type: "payout", amount: 3000, units: 2, occurred: "2026-10-05" }, clock);
@@ -439,6 +569,142 @@ test("metrics: forecast error, cash recovery, time to payout, unsold and hourly"
   assert.equal(m.hourly.comparison.trips, 2);
   assert.equal(m.hourly.comparison.realised, Math.round((500 * 60) / 180));
   assert.equal(m.hourly.comparison.predicted, Math.round((2000 * 60) / 150));
+  assert.deepEqual(m.forecast.leftOut, { sample: 0, basisUnknown: 0, notTaken: 0 });
+});
+
+test("sample and untaken trips never count in potential proceeds or forecast measures (M13, P21, qa:Q5)", () => {
+  const db = memoryDb(schema);
+  const prediction = (extra = {}) => ({ units: 4, proceeds: 10000, contribution: 2700, cashRequired: 5340, activeMinutes: 106, ...extra });
+  // The Planner's sample jacket, tracked and nothing bought.
+  const jacket = createTrip(db, { label: "Jacket (sample)", source: "planner", kind: "resale", predicted: prediction() }, clock);
+  // A Planner trip is sample even if the client says otherwise.
+  const insisted = createTrip(db, { label: "Planner", source: "planner", kind: "resale", predicted: prediction({ sample: false }) }, clock);
+  // Research on sample data, flagged by the client.
+  const researchSample = createTrip(db, { label: "Research sample", source: "research", kind: "resale", predicted: prediction({ sample: true }) }, clock);
+  // Research that did not say what its evidence was.
+  const unknown = createTrip(db, { label: "Old research", source: "research", kind: "resale", predicted: prediction() }, clock);
+  // Live research, not bought yet.
+  const notBought = createTrip(db, { label: "Live, not bought", source: "research", kind: "resale", predicted: prediction({ sample: false }) }, clock);
+  for (const id of [jacket, insisted, researchSample, unknown]) addEntry(db, id, { type: "receipt", amount: 1000, units: 1, occurred: "2026-10-02" }, clock);
+  const listed = new Map(listTrips(db).map((t) => [t.id, t]));
+  assert.equal(listed.get(jacket).sample, true);
+  assert.equal(listed.get(jacket).predictionBasis, "sample");
+  assert.equal(listed.get(insisted).predicted.sample, true);
+  assert.equal(listed.get(researchSample).sample, true);
+  assert.equal(listed.get(unknown).predictionBasis, "unknown");
+  assert.equal(listed.get(unknown).sample, false);
+  assert.equal(listed.get(notBought).predictionBasis, "live");
+  assert.equal(getTrip(db, jacket).reconciliation.forecast.basis, "sample");
+  assert.equal(getTrip(db, jacket).reconciliation.forecast.counted, false);
+
+  let s = summary(db, "2026-10");
+  assert.equal(s.potentialProceeds, 0);
+  assert.deepEqual(s.potentialProceedsLeftOut, { sample: 3, basisUnknown: 1, nothingBought: 1 });
+  // Once bought, a live prediction counts, scaled to the units actually bought.
+  addEntry(db, notBought, { type: "receipt", amount: 1000, units: 1, occurred: "2026-10-03" }, clock);
+  s = summary(db, "2026-10");
+  assert.equal(s.potentialProceeds, 10000 / 4);
+  assert.equal(s.potentialProceedsLeftOut.nothingBought, 0);
+  addEntry(db, notBought, { type: "receipt", amount: 3000, units: 5, occurred: "2026-10-03" }, clock);
+  assert.equal(summary(db, "2026-10").potentialProceeds, 10000); // never above the prediction
+
+  // Closed trips: only live, taken trips are measured.
+  const finish = (id) => {
+    addEntry(db, id, { type: "sale", amount: 6000, units: 1, occurred: "2026-10-05" }, clock);
+    addEntry(db, id, { type: "payout", amount: 5000, units: 1, occurred: "2026-10-07" }, clock);
+    addEntry(db, id, { type: "work", minutes: 120, occurred: "2026-10-07" }, clock);
+    closeTrip(db, id, clock);
+  };
+  finish(jacket);
+  finish(unknown);
+  finish(notBought);
+  const neverTaken = createTrip(db, { label: "Never went", source: "research", kind: "resale", predicted: prediction({ sample: false }) }, clock);
+  closeTrip(db, neverTaken, clock);
+  const m = metrics(db);
+  assert.equal(m.closedTrips, 4);
+  assert.equal(m.forecast.trips, 1);
+  assert.deepEqual(m.forecast.leftOut, { sample: 1, basisUnknown: 1, notTaken: 1 });
+  // notBought: receipts 4000, payout 5000, realised +1000 against 2700.
+  assert.equal(m.forecast.meanContributionError, 1000 - 2700);
+  assert.equal(m.hourly.comparison.trips, 1);
+  assert.equal(m.hourly.comparison.predicted, Math.round((2700 * 60) / 106));
+  // Realised measures still use every closed trip's real records.
+  assert.equal(m.hourly.trips, 3);
+  assert.equal(m.cash.payouts, 15000);
+  // Bad flag values are refused.
+  assert.throws(
+    () => createTrip(db, { label: "x", source: "research", kind: "resale", predicted: prediction({ sample: "yes" }) }, clock),
+    /predicted.sample/,
+  );
+});
+
+test("potential proceeds stop at the first payout and predicted units must be at least 1", () => {
+  const db = memoryDb(schema);
+  const t = createTrip(
+    db,
+    { label: "Live", source: "research", kind: "resale", predicted: { units: 2, proceeds: 6000, contribution: 1500, cashRequired: 2000, activeMinutes: 60, sample: false } },
+    clock,
+  );
+  addEntry(db, t, { type: "receipt", amount: 2000, units: 2, occurred: "2026-10-01" }, clock);
+  addEntry(db, t, { type: "sale", amount: 2500, units: 1, occurred: "2026-10-03" }, clock);
+  assert.equal(summary(db, "2026-10").potentialProceeds, 6000 - 2500);
+  addEntry(db, t, { type: "payout", amount: 2100, units: 1, occurred: "2026-10-05" }, clock);
+  // Proceeds still exceed sales, but a payout means the actual figures take over.
+  assert.equal(summary(db, "2026-10").potentialProceeds, 0);
+  assert.throws(
+    () => createTrip(db, { label: "x", source: "research", kind: "resale", predicted: { units: 0, proceeds: 100, contribution: 10, cashRequired: 50, activeMinutes: 5 } }, clock),
+    /predicted.units/,
+  );
+});
+
+test("household savings in the summary are net of the trip's own costs (M14)", () => {
+  const db = memoryDb(schema);
+  const t = createTrip(db, { label: "Big shop", source: "manual", kind: "household" }, clock);
+  addEntry(db, t, { type: "receipt", amount: 4000, occurred: "2026-10-10" }, clock);
+  addEntry(db, t, { type: "saving", amount: 300, occurred: "2026-10-10" }, clock);
+  addEntry(db, t, { type: "expense", amount: 550, occurred: "2026-10-10", note: "return bus fare" }, clock);
+  assert.equal(getTrip(db, t).reconciliation.netHouseholdSaving, -250);
+  const s = summary(db, "2026-10");
+  assert.equal(s.householdSavings, -250);
+  assert.equal(s.householdSavingsGross, 300);
+  assert.equal(s.householdTripCosts, 550);
+  assert.equal(s.realisedEarnings, 0);
+  assert.equal(listTrips(db)[0].netHouseholdSaving, -250);
+  // A second trip that saved more than it cost.
+  const u = createTrip(db, { label: "Bulk buy", source: "manual", kind: "household" }, clock);
+  addEntry(db, u, { type: "saving", amount: 1200, occurred: "2026-10-12" }, clock);
+  addEntry(db, u, { type: "expense", amount: 200, occurred: "2026-10-12" }, clock);
+  assert.equal(summary(db, "2026-10").householdSavings, -250 + 1000);
+  // Each month counts its own dated entries.
+  assert.equal(summary(db, "2026-09").householdSavings, 0);
+});
+
+test("discrepancies: sales before the purchase and payouts above the sales they cover", () => {
+  const codes = (entries) => reconcile(resaleTrip(), entries).discrepancies.map((d) => d.code);
+  assert.ok(
+    codes([
+      entry("sale", 900, "2026-10-01", { units: 1 }),
+      entry("receipt", 500, "2026-10-03", { units: 1 }),
+      entry("payout", 800, "2026-10-05", { units: 1 }),
+    ]).includes("sale-before-receipt"),
+  );
+  // Two sold units at 25.00 each, a payout of 43.00 for one unit: above what it covers.
+  const over = codes([
+    entry("receipt", 2400, "2026-10-01", { units: 2 }),
+    entry("sale", 5000, "2026-10-02", { units: 2 }),
+    entry("payout", 4300, "2026-10-04", { units: 1 }),
+  ]);
+  assert.deepEqual(over, ["payout-above-paid-sales"]);
+  // A payout with no units dated between two sales cannot pay the later one.
+  assert.deepEqual(
+    codes([
+      entry("receipt", 2400, "2026-10-01", { units: 2 }),
+      entry("sale", 2000, "2026-10-02", { units: 1 }),
+      entry("payout", 3000, "2026-10-03"),
+      entry("sale", 2000, "2026-10-05", { units: 1 }),
+    ]),
+    ["payout-above-paid-sales"],
+  );
 });
 
 test("legacy outcomes migrate idempotently and keep the old table", () => {
@@ -586,6 +852,22 @@ test("proof storage: magic bytes, size, private modes and metadata removal", () 
   assert.equal(storedPdf.sha256, sha(statement));
   assert.ok(readFileSync(join(dir, storedPdf.sha256)).equals(statement));
   assert.equal(prepareProof(statement, "application/pdf").bytes, statement.length);
+
+  // An existing directory or file with looser permissions is tightened (P3, P5).
+  const loose = join(scratch, "loose");
+  mkdirSync(loose, { recursive: true });
+  chmodSync(loose, 0o755);
+  const statement2 = pdf("loose file");
+  writeFileSync(join(loose, sha(statement2)), statement2);
+  chmodSync(join(loose, sha(statement2)), 0o644);
+  storeProof(loose, statement2, "application/pdf");
+  assert.equal(statSync(loose).mode & 0o777, 0o700);
+  assert.equal(statSync(join(loose, sha(statement2))).mode & 0o777, 0o600);
+  // Deleting a stored file by fingerprint stays inside the proof directory.
+  assert.throws(() => deleteProofFile(loose, "../" + "a".repeat(61)), /fingerprint/);
+  assert.throws(() => deleteProofFile(loose, "A".repeat(64)), /fingerprint/);
+  assert.equal(deleteProofFile(loose, sha(statement2)), "deleted");
+  assert.equal(deleteProofFile(loose, sha(statement2)), "missing");
 
   assert.throws(() => decodeBase64("not base64!"), /base64/);
   assert.throws(() => decodeBase64("abc"), /base64/);
@@ -754,6 +1036,101 @@ test("routes: proofs are stored privately and never returned", async (t) => {
   assert.equal(big.body.proof.entry_id, null);
   const tooBig = Buffer.concat([pdf(), Buffer.alloc(MAX_PROOF_BYTES, 0x20)]);
   assert.equal((await upload(id, { label: "Too big", mediaType: "application/pdf", data: tooBig.toString("base64") })).status, 400);
+});
+
+test("routes: a stored proof can be re-linked to an entry or removed (qa:Q12)", async (t) => {
+  const { call, proofDir } = await api(t);
+  const id = (await call("POST", "/api/ledger/trips", { label: "Relink", source: "manual", kind: "resale" })).body.id;
+  const other = (await call("POST", "/api/ledger/trips", { label: "Other", source: "manual", kind: "resale" })).body.id;
+  const add = async (trip, body) => (await call("POST", `/api/ledger/trips/${trip}/entries`, body)).body.id;
+  const receipt = await add(id, { type: "receipt", amount: 1000, units: 1, occurred: "2026-10-20" });
+  await add(id, { type: "sale", amount: 2000, units: 1, occurred: "2026-10-22" });
+  const payout = await add(id, { type: "payout", amount: 1750, units: 1, occurred: "2026-10-25" });
+  const elsewhere = await add(other, { type: "receipt", amount: 500, units: 1, occurred: "2026-10-20" });
+  const upload = (trip, body) => call("POST", `/api/ledger/trips/${trip}/proofs`, body);
+  const photo = jpegWithGps().toString("base64");
+  const statement = pdf().toString("base64");
+
+  // Stored against the whole trip by mistake: does not count.
+  const till = (await upload(id, { label: "Till receipt", mediaType: "image/jpeg", data: photo })).body.proof;
+  const paid = (await upload(id, { label: "Payout statement", mediaType: "application/pdf", data: statement, entryId: payout })).body.proof;
+  assert.equal(till.entry_id, null);
+  assert.equal((await call("GET", `/api/ledger/trips/${id}`)).body.reconciliation.verified, false);
+
+  const relink = (proofId, body, trip = id) => call("PATCH", `/api/ledger/trips/${trip}/proofs/${proofId}`, body);
+  const moved = await relink(till.id, { entryId: receipt });
+  assert.equal(moved.status, 200);
+  assert.equal(moved.body.proofs.find((p) => p.id === till.id).entry_id, receipt);
+  assert.equal(moved.body.reconciliation.verified, true);
+  assert.deepEqual(moved.body.reconciliation.proofedEntries, [receipt, payout]);
+  // Back to the whole trip.
+  const back = await relink(till.id, { entryId: null });
+  assert.equal(back.body.proofs.find((p) => p.id === till.id).entry_id, null);
+  assert.equal(back.body.reconciliation.verified, false);
+  // Refused: another trip's entry, a missing body field, unknown proof, proof on another trip.
+  assert.equal((await relink(till.id, { entryId: elsewhere })).status, 400);
+  assert.equal((await relink(till.id, {})).status, 400);
+  assert.equal((await relink(9999, { entryId: receipt })).status, 404);
+  assert.equal((await relink(till.id, { entryId: elsewhere }, other)).status, 404);
+  // Moving onto an entry that already has the same file merges the two.
+  await upload(id, { label: "Till receipt again", mediaType: "image/jpeg", data: photo, entryId: receipt });
+  const merged = await relink(till.id, { entryId: receipt });
+  assert.equal(merged.body.proofs.filter((p) => p.sha256 === till.sha256).length, 1);
+  assert.equal(merged.body.reconciliation.verified, true);
+
+  // The same statement is also attached on the other trip.
+  const shared = (await upload(other, { label: "Statement copy", mediaType: "application/pdf", data: statement, entryId: elsewhere })).body.proof;
+  assert.equal(shared.sha256, paid.sha256);
+  const remove = (trip, proofId) => call("DELETE", `/api/ledger/trips/${trip}/proofs/${proofId}`, {});
+  assert.equal((await remove(other, paid.id)).status, 404); // not on that trip
+  const first = await remove(id, paid.id);
+  assert.equal(first.status, 200);
+  assert.deepEqual(first.body.removed, { id: paid.id, file: "in use" });
+  assert.equal(first.body.reconciliation.verified, false);
+  assert.ok(first.body.proofs.every((p) => p.id !== paid.id));
+  assert.ok(existsSync(join(proofDir, paid.sha256)), "file kept while another proof uses it");
+  const last = await remove(other, shared.id);
+  assert.deepEqual(last.body.removed, { id: shared.id, file: "deleted" });
+  assert.ok(!existsSync(join(proofDir, paid.sha256)), "file deleted with its last proof");
+  assert.equal((await remove(other, shared.id)).status, 404);
+  // The receipt photo is untouched.
+  assert.ok(existsSync(join(proofDir, till.sha256)));
+  assert.equal((await call("DELETE", `/api/ledger/trips/${id}/proofs/abc`, {})).status, 400);
+});
+
+test("routes: sample trips are marked, and fees on a paid-out sale are not pending (qa:Q5, qa:Q13)", async (t) => {
+  const { call } = await api(t);
+  // The payload the Planner sends.
+  const planner = (
+    await call("POST", "/api/ledger/trips", {
+      label: "Children's waterproof jacket (sample)",
+      source: "planner",
+      kind: "resale",
+      reference: "jacket",
+      predicted: { units: 4, proceeds: 10000, contribution: 2700, cashRequired: 5340, activeMinutes: 106 },
+    })
+  ).body.id;
+  const detail = (await call("GET", `/api/ledger/trips/${planner}`)).body;
+  assert.equal(detail.trip.sample, true);
+  assert.equal(detail.trip.predictionBasis, "sample");
+  assert.equal(detail.reconciliation.forecast.counted, false);
+  const listed = (await call("GET", "/api/ledger/trips")).body.trips.find((trip) => trip.id === planner);
+  assert.equal(listed.sample, true);
+
+  // qa:Q13: receipt 24.00 for 2, sold 50.00 for 2, payout 43.00 with units left blank.
+  const id = (await call("POST", "/api/ledger/trips", { label: "Fees", source: "manual", kind: "resale" })).body.id;
+  const entry = (body) => call("POST", `/api/ledger/trips/${id}/entries`, body);
+  await entry({ type: "receipt", amount: 2400, units: 2, occurred: "2026-10-20" });
+  await entry({ type: "sale", amount: 5000, units: 2, occurred: "2026-10-22" });
+  const paid = (await entry({ type: "payout", amount: 4300, occurred: "2026-10-26" })).body;
+  assert.equal(paid.reconciliation.pendingPayout, 0);
+  assert.equal(paid.reconciliation.impliedFees, 700);
+  assert.equal(paid.reconciliation.pendingBasis, "dates");
+  const month = (await call("GET", "/api/ledger/summary?month=2026-10")).body;
+  assert.equal(month.pendingPayouts, 0);
+  assert.equal(month.potentialProceeds, 0);
+  assert.deepEqual(month.potentialProceedsLeftOut, { sample: 1, basisUnknown: 0, nothingBought: 0 });
+  assert.equal((await call("GET", "/api/ledger/trips")).body.trips.find((trip) => trip.id === id).pendingPayout, 0);
 });
 
 test("routes: summary and metrics", async (t) => {

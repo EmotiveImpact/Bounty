@@ -6,7 +6,7 @@
 export const ALERT_RULES = Object.freeze({
   maxOfferAgeDays: 7, // a shelf price older than this has expired
   maxSaleAgeDays: 90, // completed sales older than this do not count
-  minIndependentSales: 3, // distinct sellers or listings with recent sales
+  minIndependentSales: 3, // distinct named sellers with recent sales; a listing id is not a seller
 });
 
 const DAY = 86400000;
@@ -22,18 +22,30 @@ export function ageDays(date, now) {
 //  match               "exact" | "research" | "none"
 //  contribution        trip contribution in pence (all units)
 //  hourly, hourlyFloor pence per active hour
+//  journeyKnown        true when the return journey cost and time were
+//                      entered (0 counts only when entered, for example
+//                      walking); a blank journey is never free and instant
 //  offerObserved       source date of the acquisition price
 //  now                 ISO timestamp the decision is made at
 //  localStockConfirmed true only after an in-store or retailer branch check;
 //                      affiliate feeds and online catalogues never set it
-//  availability        source availability; must be "in_stock"
+//  availability        availability from the latest branch check (in-store,
+//                      phone or retailer branch page); must be "in_stock".
+//                      A feed's own in-stock flag never sets it
 //  promotion           promotion or loyalty condition on the price, or null
 //  promotionEligible   true when the user confirmed they qualify
+//  costedAtRegularPrice true when the stock is costed at the known regular
+//                      price because eligibility is not confirmed, so the
+//                      trip does not depend on the promotion
 //  shippingKnown       true when parcel cost for the item is known
 //  recentIndependentSales  count of independent completed sales within
 //                      maxSaleAgeDays of exact matches
 //  daysToSell          median days from listing to sale, or null if unknown
 //  cashNeededDays      days until the user needs the cash back, or null
+//  payoutDays          days from the decision until the payout is expected
+//                      (trip, listing, sale, dispatch, delivery and payout
+//                      delay, as goals.payoutDate works it out); required
+//                      when cashNeededDays is set
 //  displayPermitted    licence or programme permits showing this offer
 //  meetsThresholds     classifyOpportunity(...).meetsThresholds
 //  units, trialUnits   units planned and the trial batch size (default 3)
@@ -74,6 +86,12 @@ export function evaluateAlert(input = {}, rules = ALERT_RULES) {
     "Meets the hourly floor",
     "Below the hourly floor or working time unknown",
   );
+  add(
+    "journey",
+    input.journeyKnown === true,
+    "Return journey cost and time entered",
+    "Journey cost or time not entered, so travel is left out of profit and earnings per hour",
+  );
   const offerAge = input.offerObserved
     ? ageDays(input.offerObserved, input.now)
     : null;
@@ -94,13 +112,19 @@ export function evaluateAlert(input = {}, rules = ALERT_RULES) {
   add(
     "availability",
     input.availability === "in_stock",
-    "Reported in stock",
-    "Availability not reported as in stock",
+    "Latest branch check found stock",
+    input.availability === "out_of_stock"
+      ? "Latest branch check found none on the shelf"
+      : "No branch check has found stock",
   );
   add(
     "promotion",
-    !input.promotion || input.promotionEligible === true,
-    input.promotion ? "Promotion eligibility confirmed" : "No promotion condition",
+    !input.promotion || input.promotionEligible === true || input.costedAtRegularPrice === true,
+    !input.promotion
+      ? "No promotion condition"
+      : input.promotionEligible === true
+        ? "Promotion eligibility confirmed"
+        : "Costed at the regular price, so the trip does not depend on the promotion",
     "Promotion or loyalty price: eligibility not confirmed",
   );
   add(
@@ -120,17 +144,21 @@ export function evaluateAlert(input = {}, rules = ALERT_RULES) {
       rules.maxSaleAgeDays +
       " days",
   );
+  // The cash date is met only by money received: the payout, not the sale.
+  const cashDate = Number.isFinite(input.cashNeededDays);
+  const sellKnown = Number.isFinite(input.daysToSell) && input.daysToSell >= 0;
+  const payoutKnown = Number.isFinite(input.payoutDays) && input.payoutDays >= 0;
   add(
     "days-to-sell",
-    Number.isFinite(input.daysToSell) &&
-      input.daysToSell >= 0 &&
-      (input.cashNeededDays === null ||
-        input.cashNeededDays === undefined ||
-        input.daysToSell <= input.cashNeededDays),
-    "Expected to sell before the cash is needed",
-    Number.isFinite(input.daysToSell)
-      ? "Expected to sell after the date the cash is needed"
-      : "Days to sell unknown",
+    sellKnown && (!cashDate || (payoutKnown && input.payoutDays <= input.cashNeededDays)),
+    cashDate
+      ? "Expected to be paid out within " + input.cashNeededDays + " days, before the cash is needed"
+      : "Time to sell known",
+    !sellKnown
+      ? "Days to sell unknown"
+      : !payoutKnown
+        ? "Payout date unknown, so the cash date cannot be checked"
+        : "Expected payout in " + input.payoutDays + " days, after the date the cash is needed",
   );
   add(
     "display-permitted",

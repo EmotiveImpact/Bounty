@@ -124,7 +124,8 @@ export function validResearchRow(row) {
 const RESEARCH_FIELDS = [
   "kind", "title", "barcode", "variant", "size", "pack", "model", "condition",
   "price", "shipping", "observed", "listed", "retailer", "location",
-  "availability", "promotion", "seller", "url", "licence",
+  "availability", "promotion", "seller", "url", "licence", "was_price",
+  "rrp_price",
 ];
 
 /**
@@ -150,7 +151,7 @@ first_imported = COALESCE(research.first_imported, excluded.first_imported)`);
       if (!validResearchRow(row)) continue;
       const values = RESEARCH_FIELDS.map((f) => {
         if (f === "price") return row.price;
-        if (f === "shipping") return pennies(row.shipping);
+        if (f === "shipping" || f === "was_price" || f === "rrp_price") return pennies(row[f]);
         if (f === "title") return textOrNull(row.title, 500);
         return textOrNull(row[f]);
       });

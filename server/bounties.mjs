@@ -30,8 +30,12 @@ import {
   OPPORTUNITY_RULES,
   PAID_TIER_IDS,
   accessTier,
+  effectiveRules,
+  meetsReturn,
   membershipTier,
 } from "./opportunity.mjs";
+import { AUDIT_TARGET, CHECK_VALID_DAYS, progress as auditProgress } from "./audit.mjs";
+import { displayPermitted } from "./evidence.mjs";
 import { stripMetadata } from "./metadata.mjs";
 import { bool, fail, int, isoDate, num, oneOf, text, transaction } from "./http.mjs";
 
@@ -87,6 +91,14 @@ export const TERMS = Object.freeze({
   alerts: "Alerts are recorded here for each member. Nothing is sent by email or text yet.",
   verified:
     "A trade counts as verified only with both the purchase receipt and the payout record in the Ledger.",
+  sample:
+    "Sample bounty: the figures are illustrative, entered by hand, and describe no real offer. Nothing here can be claimed or bought, and it never sends an alert.",
+  promotion:
+    "Promotion and loyalty prices depend on the person buying. The operator's check covers only the operator: each member confirms for themselves that they qualify before claiming.",
+  stop: "Don't make the trip",
+  hidden:
+    "The source of this offer does not permit display, so its title, retailer, prices and sale figures are not shown.",
+  times: "Times are UK time (London).",
 });
 
 // ---------------------------------------------------------------- schema
@@ -102,12 +114,16 @@ const TABLES = [
  paid_until TEXT,
  alerts_opt_in INTEGER NOT NULL DEFAULT 0,
  alert_localities TEXT NOT NULL DEFAULT '[]',
+ rules TEXT NOT NULL DEFAULT '{}',
  created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 )`,
-    columns: ["id", "name", "locality", "paid_tier", "paid_until", "alerts_opt_in", "alert_localities", "created"],
+    columns: [
+      "id", "name", "locality", "paid_tier", "paid_until", "alerts_opt_in", "alert_localities", "rules", "created",
+    ],
     types: {
       alerts_opt_in: "INTEGER NOT NULL DEFAULT 0",
       alert_localities: "TEXT NOT NULL DEFAULT '[]'",
+      rules: "TEXT NOT NULL DEFAULT '{}'",
     },
   },
   {
@@ -172,15 +188,21 @@ const TABLES = [
  status TEXT NOT NULL DEFAULT 'active',
  created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
  expires_at TEXT NOT NULL,
- ended_at TEXT
+ ended_at TEXT,
+ promotion TEXT,
+ promotion_confirmed INTEGER NOT NULL DEFAULT 0
 )`,
-    columns: ["id", "bounty_id", "member_id", "units", "status", "created", "expires_at", "ended_at"],
+    columns: [
+      "id", "bounty_id", "member_id", "units", "status", "created", "expires_at", "ended_at", "promotion",
+      "promotion_confirmed",
+    ],
     types: {
       bounty_id: "INTEGER",
       member_id: "INTEGER",
       units: "INTEGER NOT NULL DEFAULT 0",
       status: "TEXT NOT NULL DEFAULT 'active'",
       expires_at: "TEXT NOT NULL DEFAULT ''",
+      promotion_confirmed: "INTEGER NOT NULL DEFAULT 0",
     },
   },
   {
@@ -239,10 +261,14 @@ const TABLES = [
  via TEXT NOT NULL,
  release_at TEXT NOT NULL,
  reputation INTEGER NOT NULL DEFAULT 0,
+ promotion TEXT,
+ warning TEXT,
  created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
  UNIQUE(bounty_id, member_id)
 )`,
-    columns: ["id", "bounty_id", "member_id", "tier", "via", "release_at", "reputation", "created"],
+    columns: [
+      "id", "bounty_id", "member_id", "tier", "via", "release_at", "reputation", "promotion", "warning", "created",
+    ],
     types: {
       bounty_id: "INTEGER",
       member_id: "INTEGER",
@@ -250,6 +276,33 @@ const TABLES = [
       via: "TEXT NOT NULL DEFAULT 'earned'",
       release_at: "TEXT NOT NULL DEFAULT ''",
       reputation: "INTEGER NOT NULL DEFAULT 0",
+    },
+  },
+  {
+    // "Don't make the trip" notices: one per member per event (ref), sent to
+    // every member alerted for a bounty or holding a live claim on it when
+    // the shelf is reported empty, the operator confirms it, a branch check
+    // finds none or the bounty is withdrawn.
+    name: "notices",
+    sql: `CREATE TABLE IF NOT EXISTS notices (
+ id INTEGER PRIMARY KEY,
+ bounty_id INTEGER NOT NULL REFERENCES bounties(id),
+ member_id INTEGER NOT NULL REFERENCES members(id),
+ kind TEXT NOT NULL DEFAULT 'stop',
+ reason TEXT NOT NULL,
+ ref TEXT NOT NULL,
+ message TEXT NOT NULL,
+ created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(bounty_id, member_id, ref)
+)`,
+    columns: ["id", "bounty_id", "member_id", "kind", "reason", "ref", "message", "created"],
+    types: {
+      bounty_id: "INTEGER",
+      member_id: "INTEGER",
+      kind: "TEXT NOT NULL DEFAULT 'stop'",
+      reason: "TEXT NOT NULL DEFAULT ''",
+      ref: "TEXT NOT NULL DEFAULT ''",
+      message: "TEXT NOT NULL DEFAULT ''",
     },
   },
 ];
@@ -271,6 +324,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS reputation_one_per_report
  ON reputation_events(report_id) WHERE report_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS reputation_member ON reputation_events(member_id);
 CREATE INDEX IF NOT EXISTS alerts_member ON alerts(member_id, created);
+CREATE INDEX IF NOT EXISTS notices_member ON notices(member_id, created);
 CREATE INDEX IF NOT EXISTS bounties_barcode ON bounties(barcode, status);`);
 }
 
@@ -282,6 +336,28 @@ const plain = (row) => (row ? { ...row } : null);
 const round2 = (v) => Math.round(v * 100) / 100;
 const isCount = (v) => Number.isSafeInteger(v) && v >= 0;
 const isPositive = (v) => typeof v === "number" && Number.isFinite(v) && v > 0;
+const pounds = (pence) => "£" + (pence / 100).toFixed(2);
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+// Share as a percentage to one decimal place, rounded down (34.96% is 34.9%).
+const percentDown = (share) => (Math.floor(share * 1000 + 1e-9) / 10).toLocaleString("en-GB") + "%";
+
+const LONDON = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/London",
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+/** A date and time for people, in UK time: "31 Oct 2026, 14:05". */
+export function humanTime(value) {
+  const ms = typeof value === "number" ? value : Date.parse(value);
+  return Number.isFinite(ms) ? LONDON.format(new Date(ms)) : "an unknown time";
+}
+
+const tableExists = (db, name) =>
+  Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
 
 /** Milliseconds for the injected clock; a bad clock is a programming error. */
 function clock(now) {
@@ -367,12 +443,60 @@ function localityList(value) {
   return [...seen.values()];
 }
 
+// Thresholds a member may tighten for themselves, in API units: pence for
+// money, kilograms, a share of the purchase price for the return, units.
+const RULE_INPUTS = Object.freeze({
+  minUnitPrice: { label: "Lowest purchase price per unit", check: (v, n) => int(v, n, 0, 10_000_000), show: pounds },
+  maxUnitPrice: { label: "Highest purchase price per unit", check: (v, n) => int(v, n, 0, 10_000_000), show: pounds },
+  maxWeightKg: { label: "Weight limit per unit", check: (v, n) => num(v, n, 0, 1000), show: (v) => v + " kg" },
+  minUnitProfit: { label: "Lowest profit per unit", check: (v, n) => int(v, n, 0, 10_000_000), show: pounds },
+  minReturn: { label: "Lowest return on purchase price", check: (v, n) => num(v, n, 0, 100), show: percentDown },
+  trialUnits: { label: "Trial batch", check: (v, n) => int(v, n, 1, 100), show: (v) => v + " units" },
+});
+export const MEMBER_RULE_KEYS = Object.freeze(Object.keys(RULE_INPUTS));
+
+/**
+ * A member's stricter thresholds from a request. Each value must be at
+ * least as strict as the agreed threshold (effectiveRules keeps only
+ * stricter overrides, so a looser value is refused here rather than
+ * silently dropped). Values equal to the agreed thresholds are not stored.
+ */
+function memberRulesInput(value) {
+  if (value === null) return {};
+  if (!isObject(value)) fail("rules must be an object of stricter thresholds");
+  const out = {};
+  for (const [key, raw] of Object.entries(value)) {
+    const spec = RULE_INPUTS[key] ?? fail(`rules.${key} is not a threshold a member can set`);
+    if (raw === null || raw === undefined || raw === "") continue;
+    const v = spec.check(raw, `rules.${key}`);
+    if (effectiveRules({ [key]: v })[key] !== v)
+      fail(
+        `${spec.label} of ${spec.show(v)} would loosen the agreed ${spec.show(OPPORTUNITY_RULES[key])}: you can tighten the thresholds for yourself but never loosen them`,
+      );
+    if (v !== OPPORTUNITY_RULES[key]) out[key] = v;
+  }
+  const rules = effectiveRules(out);
+  if (rules.minUnitPrice > rules.maxUnitPrice)
+    fail("The lowest purchase price per unit must not be above the highest");
+  return out;
+}
+
+/** The member's stored stricter thresholds (raw overrides). */
+export const memberRules = (member) => {
+  const saved = json(member?.rules, {});
+  return isObject(saved) ? saved : {};
+};
+
 function memberFields(body, current) {
   if (!isObject(body)) fail("Send a member as a JSON object");
   const has = (k) => Object.hasOwn(body, k);
   const next = current
-    ? { ...current, alert_localities: json(current.alert_localities, []) }
-    : { name: null, locality: null, paid_tier: null, paid_until: null, alerts_opt_in: 0, alert_localities: [] };
+    ? { ...current, alert_localities: json(current.alert_localities, []), rules: memberRules(current) }
+    : {
+        name: null, locality: null, paid_tier: null, paid_until: null, alerts_opt_in: 0, alert_localities: [],
+        rules: {},
+      };
+  if (has("rules")) next.rules = memberRulesInput(body.rules);
   if (!current || has("name")) next.name = text(body.name, "name", 80);
   if (has("locality")) next.locality = text(body.locality, "locality", 120, { optional: true });
   if (has("alertsOptIn")) next.alerts_opt_in = bool(body.alertsOptIn, "alertsOptIn") ? 1 : 0;
@@ -410,6 +534,10 @@ export function memberView(db, member, { now }) {
     locality: member.locality,
     alertsOptIn: member.alerts_opt_in === 1,
     alertLocalities: json(member.alert_localities, []),
+    // Stricter thresholds this member set for their own alerts and claims
+    // (API units), and the thresholds that result.
+    rules: memberRules(member),
+    effectiveRules: pick(effectiveRules(memberRules(member)), MEMBER_RULE_KEYS),
     created: member.created,
     paid: {
       label: "Paid early access",
@@ -438,22 +566,28 @@ export function createMember(db, body, { now }) {
   const m = memberFields(body, null);
   const result = db
     .prepare(
-      `INSERT INTO members(name, locality, paid_tier, paid_until, alerts_opt_in, alert_localities, created)
- VALUES(?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO members(name, locality, paid_tier, paid_until, alerts_opt_in, alert_localities, rules, created)
+ VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(m.name, m.locality, m.paid_tier, m.paid_until, m.alerts_opt_in, JSON.stringify(m.alert_localities), now);
+    .run(
+      m.name, m.locality, m.paid_tier, m.paid_until, m.alerts_opt_in, JSON.stringify(m.alert_localities),
+      JSON.stringify(m.rules), now,
+    );
   return getMember(db, Number(result.lastInsertRowid));
 }
 
-/** Updates name, locality, alert opt-in and localities, or the paid tier. */
+/** Updates name, locality, alert opt-in and localities, stricter thresholds or the paid tier. */
 export function updateMember(db, memberId, body, { now }) {
   clock(now);
   const current = requireMember(db, memberId);
   const m = memberFields(body, current);
   db.prepare(
-    `UPDATE members SET name = ?, locality = ?, paid_tier = ?, paid_until = ?, alerts_opt_in = ?, alert_localities = ?
- WHERE id = ?`,
-  ).run(m.name, m.locality, m.paid_tier, m.paid_until, m.alerts_opt_in, JSON.stringify(m.alert_localities), current.id);
+    `UPDATE members SET name = ?, locality = ?, paid_tier = ?, paid_until = ?, alerts_opt_in = ?, alert_localities = ?,
+ rules = ? WHERE id = ?`,
+  ).run(
+    m.name, m.locality, m.paid_tier, m.paid_until, m.alerts_opt_in, JSON.stringify(m.alert_localities),
+    JSON.stringify(m.rules), current.id,
+  );
   return getMember(db, current.id);
 }
 
@@ -498,39 +632,71 @@ function evidencedUnits(stock) {
 }
 
 /**
- * The figures behind a live bounty's cap. The operator's entries can only be
- * lowered by the evidence: available units by the latest stock check's count,
- * and sales a week by the confirmed sales rate. Competing listings come from
- * the estimate's resale competition. Unknown evidence fails closed.
+ * A recorded asking-price lookup for the barcode, { provider, fetched } or
+ * null: from options (the route checks the lookup cache) or from the
+ * estimate's competition when it carries one.
  */
-function capBasis(entered, estimate) {
+function lookupOf(estimate, lookup) {
+  const given = lookup ?? estimate?.competition?.lookup ?? null;
+  return isObject(given) && typeof given.fetched === "string" && Number.isFinite(Date.parse(given.fetched))
+    ? { provider: String(given.provider ?? "unknown"), fetched: given.fetched }
+    : null;
+}
+
+/**
+ * The figures behind a live bounty's cap. Units on the shelf come only from
+ * the evidence (the latest stock check's count); the operator's entry can
+ * only lower them, and a form figure never stands in for a count. Sales a
+ * week are the confirmed sales rate, lowered further by the operator's
+ * entry. Competing listings come from the estimate's resale competition.
+ * No listings with no recorded asking-price lookup means nobody looked, so
+ * competition is unknown, never zero. Unknown evidence fails closed (cap 0).
+ */
+function capBasis(entered, estimate, lookup = null) {
   const units = evidencedUnits(estimate.stock);
   const rate = evidencedSalesPerWeek(estimate.sample?.count);
   const listings = estimate.competition?.activeListings;
   const sellers = estimate.competition?.sellers;
+  const looked = lookupOf(estimate, lookup);
+  const limit = isCount(entered.availableUnits) ? entered.availableUnits : null;
+  const knownListings = isCount(listings) && (listings > 0 || looked !== null) ? listings : null;
   const used = {
-    availableUnits: units === null ? entered.availableUnits : Math.min(entered.availableUnits, units),
+    availableUnits: units === null ? null : limit === null ? units : Math.min(limit, units),
     salesPerWeek: rate === null ? null : Math.min(entered.salesPerWeek, rate),
     sellWindowWeeks: entered.sellWindowWeeks,
-    competingListings: isCount(listings) ? listings : null,
+    competingListings: knownListings,
   };
   const notes = [];
-  if (units !== null && units < entered.availableUnits)
-    notes.push(`Available units lowered to ${units}, the count on the latest stock check`);
+  if (units === null)
+    notes.push(
+      estimate.stock?.check
+        ? "The stock check recorded no unit count, so units on the shelf are unknown and the cap is 0. Record a check with the units seen."
+        : "No stock check with a unit count, so units on the shelf are unknown and the cap is 0",
+    );
+  else if (limit !== null && limit < units)
+    notes.push(`Units to share limited to ${limit} of the ${units} counted on the latest stock check`);
   if (rate === null) notes.push("No confirmed sales count, so the cap is 0");
   else if (rate < entered.salesPerWeek)
     notes.push(
       `Sales a week lowered to ${round2(rate)}: ${estimate.sample.count} confirmed sales over ${BOUNTY_RULES.saleWindowDays} days`,
     );
-  if (used.competingListings === null) notes.push("Competing listings unknown, so the cap is 0");
+  if (knownListings === null)
+    notes.push(
+      listings === 0
+        ? "No competing listings recorded and no asking-price lookup for this barcode is on record, so competition is unknown (not zero) and the cap is 0. Run an asking-price lookup before sharing."
+        : "Competing listings unknown, so the cap is 0",
+    );
+  else if (knownListings === 0)
+    notes.push(`An asking-price lookup (${looked.provider}, ${humanTime(looked.fetched)}) found no competing listings`);
   return {
     entered,
     evidence: {
       unitsSeen: units,
       salesPerWeek: rate === null ? null : round2(rate),
       confirmedSales: isCount(estimate.sample?.count) ? estimate.sample.count : null,
-      competingListings: used.competingListings,
-      competingSellers: isCount(sellers) ? sellers : null,
+      competingListings: knownListings,
+      competingSellers: knownListings === null ? null : isCount(sellers) ? sellers : null,
+      askingLookup: looked,
     },
     used: { ...used, salesPerWeek: used.salesPerWeek === null ? null : round2(used.salesPerWeek) },
     cap: distributionCap(used),
@@ -554,8 +720,41 @@ function opportunitySnapshot(estimate) {
     return { tier: "Review", reasons: ["The estimate did not include an opportunity tier"], meetsThresholds: false };
   return pick(o, [
     "tier", "reasons", "unitProfit", "returnOnCost", "targetPrice", "meetsThresholds", "trialUnits",
-    "unitPrice", "weightKg", "salesPerWeek", "resaleWeeksOfSupply",
+    "unitPrice", "weightKg", "salesPerWeek", "resaleWeeksOfSupply", "provenItem",
   ]);
+}
+
+/**
+ * The promotion or loyalty condition on a live bounty's price, or null.
+ * operatorConfirmed records the operator's tick, which covers only the
+ * operator. needsMemberConfirmation is true unless the stock is costed at
+ * a known regular price, so each member confirms for themselves that they
+ * qualify before claiming.
+ */
+function promotionSnapshot(estimate, request) {
+  const condition = estimate.offer?.promotion;
+  if (typeof condition !== "string" || !condition.trim()) return null;
+  const price = Number.isSafeInteger(estimate.offer?.price) ? estimate.offer.price : null;
+  const regular = Number.isSafeInteger(estimate.offer?.regularPrice) ? estimate.offer.regularPrice : null;
+  const unitCost = Number.isSafeInteger(estimate.unitCost) ? estimate.unitCost : null;
+  const atRegular = regular !== null && unitCost === regular;
+  return {
+    condition: condition.trim(),
+    price,
+    regularPrice: regular,
+    costedAt: atRegular ? "regular" : "promotion",
+    operatorConfirmed: request?.promotionEligible === true,
+    needsMemberConfirmation: !atRegular,
+  };
+}
+
+/** Display permission recorded with the estimate: fails closed when absent. */
+function permissionSnapshot(estimate) {
+  const p = estimate.permission;
+  return {
+    permitted: p?.permitted === true,
+    basis: typeof p?.basis === "string" ? p.basis : "No display permission was recorded with the evidence",
+  };
 }
 
 /**
@@ -563,11 +762,14 @@ function opportunitySnapshot(estimate) {
  * re-check the evidence later) and the key results. No credentials are ever
  * part of an estimate.
  */
-function estimateSnapshot(estimate, request, at) {
+function estimateSnapshot(estimate, request, at, lookup = null) {
   const e = estimate.economics;
   return {
     request: request ?? null,
     checkedAt: iso(at),
+    permission: permissionSnapshot(estimate),
+    promotion: promotionSnapshot(estimate, request),
+    askingLookup: lookupOf(estimate, lookup),
     offer: pick(estimate.offer, [
       "provider", "sourceId", "title", "price", "observed", "retailer", "location", "gtin", "variant",
       "source", "stockNote", "sample", "expired", "ageDays", "promotion",
@@ -627,7 +829,12 @@ function bountyFields(input, at) {
     title: text(input.title, "title", 200),
     locality: text(input.locality, "locality", 120),
     retailer: text(input.retailer, "retailer", 120),
-    availableUnits: int(input.availableUnits, "availableUnits", 1, BOUNTY_RULES.maxAvailableUnits),
+    // Optional for a live bounty: an upper limit on units to share. The
+    // count itself comes from the stock check.
+    availableUnits:
+      input.availableUnits === undefined || input.availableUnits === null || input.availableUnits === ""
+        ? null
+        : int(input.availableUnits, "availableUnits", 1, BOUNTY_RULES.maxAvailableUnits),
     salesPerWeek,
     sellWindowWeeks,
     expiresAt: iso(expires),
@@ -646,17 +853,23 @@ function bountyFields(input, at) {
  * options.estimate: the estimateFromEvidence result for a live bounty
  *   (competing listings and sellers, the barcode and alert eligibility come
  *   from it). options.request: the estimate request, stored so the evidence
- *   can be re-checked before claims and alerts.
+ *   can be re-checked before claims and alerts. options.lookup: the latest
+ *   asking-price lookup for the barcode inside its time to live
+ *   ({ provider, fetched }) or null; without one, no competing listings
+ *   means competition is unknown.
  *
- * A sample bounty has no estimate, is labelled Sample everywhere and can
- * never alert. Only one live bounty may be open per barcode, because the cap
- * shares out the resale demand for the item and two bounties would double it.
+ * For a live bounty availableUnits is optional: it can only lower the count
+ * on the stock check. A sample bounty needs it, has no estimate, is
+ * labelled Sample everywhere, can never alert and can never be claimed.
+ * Only one live bounty may be open per barcode, because the cap shares out
+ * the resale demand for the item and two bounties would double it.
  */
-export function createBounty(db, input, { estimate = null, request = null, now } = {}) {
+export function createBounty(db, input, { estimate = null, request = null, lookup = null, now } = {}) {
   const at = clock(now);
   if (!isObject(input)) fail("Send a bounty as a JSON object");
   const sample = input.sample === undefined ? false : bool(input.sample, "sample");
   const f = bountyFields(input, at);
+  if (sample && f.availableUnits === null) fail("availableUnits is required for a sample bounty");
   const entered = {
     availableUnits: f.availableUnits,
     salesPerWeek: f.salesPerWeek,
@@ -691,10 +904,11 @@ export function createBounty(db, input, { estimate = null, request = null, now }
     if (!gtin) fail("The estimate's offer has no valid barcode, so it cannot become a bounty");
     if (offer.retailer && normaliseLocality(offer.retailer) !== normaliseLocality(f.retailer))
       fail(`retailer must match the offer's retailer (${offer.retailer})`);
-    const basis = capBasis(entered, estimate);
+    const basis = capBasis(entered, estimate, lookup);
     const alert = alertFrom(estimate);
     row = {
       ...f,
+      availableUnits: basis.used.availableUnits ?? 0,
       barcode: gtin,
       variant: offer.variant ?? null,
       competingListings: basis.evidence.competingListings,
@@ -704,7 +918,7 @@ export function createBounty(db, input, { estimate = null, request = null, now }
       alertEligible: alert.eligible,
       alertReasons: alert.reasons,
       opportunity: opportunitySnapshot(estimate),
-      snapshot: estimateSnapshot(estimate, request, at),
+      snapshot: estimateSnapshot(estimate, request, at, lookup),
       checkedAt: iso(at),
     };
   }
@@ -759,7 +973,7 @@ export function storedRequest(bounty) {
  * the operator's original entries and the new evidence. Pass { error } when
  * the estimate could not be re-run: the bounty then fails closed.
  */
-export function refreshBounty(db, bountyId, estimate, now) {
+export function refreshBounty(db, bountyId, estimate, now, { lookup = null } = {}) {
   const at = clock(now);
   const bounty = requireBounty(db, bountyId);
   if (bounty.sample) return bounty;
@@ -778,32 +992,58 @@ export function refreshBounty(db, bountyId, estimate, now) {
     salesPerWeek: bounty.sales_per_week,
     sellWindowWeeks: bounty.sell_window_weeks,
   };
-  const basis = capBasis(entered, estimate);
-  const alert = alertFrom(estimate);
   const gtin = estimate.offer?.gtin;
   if (gtin !== bounty.barcode) {
-    alert.eligible = false;
-    alert.reasons = ["The re-checked offer no longer has this bounty's barcode"];
+    // Never let another item's evidence replace this bounty's: keep the old
+    // snapshot and stop alerts and claims.
+    db.prepare("UPDATE bounties SET alert_eligible = 0, alert_reasons = ?, checked_at = ? WHERE id = ?").run(
+      JSON.stringify(["The re-checked offer no longer has this bounty's barcode"]),
+      iso(at),
+      bounty.id,
+    );
+    return getBounty(db, bounty.id);
   }
+  const basis = capBasis(entered, estimate, lookup);
+  const alert = alertFrom(estimate);
   const opportunity = opportunitySnapshot(estimate);
-  const snapshot = estimateSnapshot(estimate, old.request ?? null, at);
-  db.prepare(
-    `UPDATE bounties SET competing_listings = ?, competing_sellers = ?, cap = ?, cap_basis = ?, alert_eligible = ?,
- alert_reasons = ?, opportunity_tier = ?, opportunity = ?, estimate = ?, checked_at = ? WHERE id = ?`,
-  ).run(
-    basis.evidence.competingListings, basis.evidence.competingSellers, basis.cap, JSON.stringify(basis),
-    alert.eligible ? 1 : 0, JSON.stringify(alert.reasons), opportunity.tier, JSON.stringify(opportunity),
-    JSON.stringify(snapshot), iso(at), bounty.id,
-  );
+  const snapshot = estimateSnapshot(estimate, old.request ?? null, at, lookup);
+  transaction(db, () => {
+    db.prepare(
+      `UPDATE bounties SET available_units = ?, competing_listings = ?, competing_sellers = ?, cap = ?, cap_basis = ?,
+ alert_eligible = ?, alert_reasons = ?, opportunity_tier = ?, opportunity = ?, estimate = ?, checked_at = ? WHERE id = ?`,
+    ).run(
+      basis.used.availableUnits ?? 0, basis.evidence.competingListings, basis.evidence.competingSellers, basis.cap,
+      JSON.stringify(basis), alert.eligible ? 1 : 0, JSON.stringify(alert.reasons), opportunity.tier,
+      JSON.stringify(opportunity), JSON.stringify(snapshot), iso(at), bounty.id,
+    );
+    // A branch check that now finds none stops anyone already on the way.
+    const check = estimate.stock?.check;
+    if (estimate.stock?.availability === "out_of_stock" && bountyStatus(bounty, now) === "open")
+      notifyStop(db, bounty, {
+        reason: "out-of-stock",
+        // Keyed on when the shelf was seen empty, so a verified report that
+        // became this check does not notify the same members twice.
+        ref: "empty:" + (check?.checked_at ?? iso(at)),
+        message: `${TERMS.stop}: the latest branch stock check (${humanTime(check?.checked_at ?? at)}) found none on the shelf. Claims and alerts for this bounty are paused.`,
+        now,
+      });
+  });
   return getBounty(db, bounty.id);
 }
 
-/** Withdraws a bounty and releases its active claims. */
+/** Withdraws a bounty, tells everyone alerted or holding a claim, and releases its active claims. */
 export function withdrawBounty(db, bountyId, { now }) {
   const at = iso(clock(now));
   return transaction(db, () => {
     const bounty = requireBounty(db, bountyId);
     if (bounty.status === "withdrawn") fail("This bounty is already withdrawn", 409);
+    if (bountyStatus(bounty, now) === "open")
+      notifyStop(db, bounty, {
+        reason: "withdrawn",
+        ref: "withdrawn",
+        message: `${TERMS.stop}: the operator withdrew this bounty at ${humanTime(at)}. Any claim you held on it has been released.`,
+        now,
+      });
     db.prepare("UPDATE bounties SET status = 'withdrawn', withdrawn_at = ? WHERE id = ?").run(at, bounty.id);
     db.prepare("UPDATE claims SET status = 'released', ended_at = ? WHERE bounty_id = ? AND status = 'active'").run(
       at,
@@ -811,6 +1051,52 @@ export function withdrawBounty(db, bountyId, { now }) {
     );
     return getBounty(db, bounty.id);
   });
+}
+
+// ---------------------------------------------------------------- notices
+
+/**
+ * Records a "Don't make the trip" notice for every member alerted for the
+ * bounty or holding a live claim on it, except `exclude` (the member whose
+ * report caused it). One notice per member per ref, so repeating an event
+ * never duplicates it. Returns the number of notices added.
+ */
+export function notifyStop(db, bounty, { reason, ref, message, now, exclude = null }) {
+  const at = iso(clock(now));
+  const targets = db
+    .prepare(
+      `SELECT member_id FROM alerts WHERE bounty_id = ?
+ UNION SELECT member_id FROM claims WHERE bounty_id = ? AND status = 'active' AND expires_at > ?`,
+    )
+    .all(bounty.id, bounty.id, at)
+    .map((r) => r.member_id)
+    .filter((m) => m !== exclude);
+  const insert = db.prepare(
+    `INSERT OR IGNORE INTO notices(bounty_id, member_id, kind, reason, ref, message, created)
+ VALUES(?, ?, 'stop', ?, ?, ?, ?)`,
+  );
+  let added = 0;
+  for (const memberId of targets) added += insert.run(bounty.id, memberId, reason, ref, message, at).changes;
+  return added;
+}
+
+const noticeView = (n) => ({
+  id: n.id,
+  bountyId: n.bounty_id,
+  kind: n.kind,
+  reason: n.reason,
+  message: n.message,
+  created: n.created,
+});
+
+/** A member's notices, newest first, optionally for one bounty. */
+export function memberNotices(db, memberId, { bountyId = null } = {}) {
+  const rows = bountyId
+    ? db
+        .prepare("SELECT * FROM notices WHERE member_id = ? AND bounty_id = ? ORDER BY created DESC, id DESC")
+        .all(memberId, bountyId)
+    : db.prepare("SELECT * FROM notices WHERE member_id = ? ORDER BY created DESC, id DESC LIMIT 100").all(memberId);
+  return rows.map(noticeView);
 }
 
 // ----------------------------------------------------------------- claims
@@ -872,24 +1158,121 @@ function offerAge(bounty, now) {
   return observed ? ageDays(observed, now) : null;
 }
 
+const SAMPLE_BLOCKER = "Sample bounty: illustrative figures only, so there is nothing to claim, buy or alert";
+
+/**
+ * Whether the branch stock check behind a live bounty has lapsed at `now`.
+ * A check counts for CHECK_VALID_DAYS (audit.mjs), the same window the
+ * estimate uses, so a card can never keep saying "Branch stock confirmed"
+ * on an old check. Returns { lapsed, checkedAt, message } or null when the
+ * stock check does not apply (a sample, or stock was never confirmed and
+ * the alert reasons already say so).
+ */
+export function stockLapse(bounty, now) {
+  if (bounty.sample) return null;
+  const stock = json(bounty.estimate, null)?.stock;
+  if (!(stock?.confirmed === true || bounty.alert_eligible === 1)) return null;
+  const checked = Date.parse(stock?.checkedAt);
+  if (!Number.isFinite(checked))
+    return {
+      lapsed: true,
+      checkedAt: null,
+      message: "No dated branch stock check is recorded: stock must be checked before anyone travels",
+    };
+  if (checked < clock(now) - CHECK_VALID_DAYS * DAY)
+    return {
+      lapsed: true,
+      checkedAt: iso(checked),
+      message: `The branch stock check from ${humanTime(checked)} has lapsed (a check counts for ${CHECK_VALID_DAYS} days): stock must be re-checked before anyone travels`,
+    };
+  return { lapsed: false, checkedAt: iso(checked), message: null };
+}
+
+/**
+ * Whether the offer behind a bounty may be shown to members and visitors.
+ * When the permissions table exists the recorded permission decides now
+ * (displayPermitted in evidence.mjs), so a refusal takes effect at once;
+ * otherwise the permission recorded with the estimate decides. Anything
+ * missing fails closed.
+ */
+export function displayStatus(db, bounty) {
+  if (bounty.sample) return { permitted: true, basis: "Sample figures entered by hand" };
+  const snapshot = json(bounty.estimate, null);
+  const offer = snapshot?.offer;
+  if (offer?.provider && tableExists(db, "permissions")) {
+    const permitted = displayPermitted(db, offer.provider, offer.retailer ?? "");
+    const scope = offer.provider + (offer.retailer ? ` (${offer.retailer})` : "");
+    return {
+      permitted,
+      basis: permitted
+        ? snapshot.permission?.permitted === true
+          ? snapshot.permission.basis
+          : `Permitted for ${scope} by a display permission recorded in Sources`
+        : `Not permitted for ${scope}: no display permission is recorded, or it was refused. Review it in Sources`,
+    };
+  }
+  return {
+    permitted: snapshot?.permission?.permitted === true,
+    basis: snapshot?.permission?.basis ?? "No display permission was recorded with the evidence",
+  };
+}
+
+/**
+ * Progress of the locality's 30-item validation audit (audit.mjs). Until
+ * it is complete every bounty card and alert there carries a warning.
+ */
+export function validationStatus(db, locality) {
+  let found = null;
+  try {
+    if (tableExists(db, "validation_items") && tableExists(db, "availability_checks"))
+      found = auditProgress(db, locality);
+  } catch {
+    found = null;
+  }
+  const target = found?.target ?? AUDIT_TARGET;
+  const audited = found?.audited ?? 0;
+  const complete = found?.complete === true;
+  return {
+    locality,
+    complete,
+    audited,
+    passed: found?.passed ?? 0,
+    target,
+    warning: complete
+      ? null
+      : `Pilot not validated in ${locality}: the ${target}-item check of retailer and sold evidence there is not complete (${audited} of ${target} audited). Treat these figures with extra care.`,
+  };
+}
+
 /**
  * Why a bounty cannot send members on a trip right now (claims and alerts),
- * in order. Empty when it can.
+ * in order. Empty when it can. Computed at `now`, so a lapsed stock check,
+ * an expired offer, a refused display permission or an empty-shelf report
+ * stops claims and alerts without waiting for a re-check.
  */
 export function tripBlockers(db, bounty, now) {
   const blockers = [];
   const status = bountyStatus(bounty, now);
   if (status === "withdrawn") blockers.push("This bounty has been withdrawn");
   if (status === "expired") blockers.push("This bounty has expired");
-  if (!bounty.sample) {
-    if (bounty.alert_eligible !== 1)
-      blockers.push("The buy-alert checks do not pass: " + json(bounty.alert_reasons, []).join("; "));
-    const age = offerAge(bounty, now);
-    if (age === null || age < 0 || age > ALERT_RULES.maxOfferAgeDays)
-      blockers.push(`The offer price is not from the last ${ALERT_RULES.maxOfferAgeDays} days`);
+  if (bounty.sample) {
+    blockers.push(SAMPLE_BLOCKER);
+    return blockers;
   }
-  if (shelfStatus(db, bounty.id).paused)
-    blockers.push("The latest stock report found none on the shelf: paused until someone reports stock again");
+  if (bounty.alert_eligible !== 1)
+    blockers.push("The buy-alert checks do not pass: " + json(bounty.alert_reasons, []).join("; "));
+  const age = offerAge(bounty, now);
+  if (age === null || age < 0 || age > ALERT_RULES.maxOfferAgeDays)
+    blockers.push(`The offer price is not from the last ${ALERT_RULES.maxOfferAgeDays} days`);
+  const lapse = stockLapse(bounty, now);
+  if (lapse?.lapsed) blockers.push(lapse.message);
+  if (bounty.alert_eligible === 1 && !displayStatus(db, bounty).permitted)
+    blockers.push("The source no longer permits display of this offer");
+  const shelf = shelfStatus(db, bounty.id);
+  if (shelf.paused)
+    blockers.push(
+      `The latest stock report found none on the shelf at ${humanTime(shelf.at)}: ${TERMS.stop.toLowerCase()}. Claims and alerts are paused until someone reports stock again`,
+    );
   return blockers;
 }
 
@@ -905,15 +1288,97 @@ export function trialBatch(bounty) {
 }
 
 /**
+ * Units of an item (barcode) a member holds in live claims or has marked as
+ * bought, across every live bounty for that barcode.
+ */
+export function memberItemUnits(db, memberId, barcode, now) {
+  if (!barcode) return 0;
+  return db
+    .prepare(
+      `SELECT COALESCE(SUM(c.units), 0) AS n FROM claims c JOIN bounties b ON b.id = c.bounty_id
+ WHERE c.member_id = ? AND b.barcode = ? AND b.sample = 0
+ AND (c.status = 'completed' OR (c.status = 'active' AND c.expires_at > ?))`,
+    )
+    .get(memberId, barcode, iso(clock(now))).n;
+}
+
+/**
+ * How many more units a member may claim on a bounty. Until a verified
+ * trade proves the item, one member's total across claims held and units
+ * bought is a single trial batch (the bounty's, or the member's own
+ * stricter one), so repeated trial batches cannot add up.
+ */
+export function trialAllowance(db, bounty, member, now) {
+  const limit = Math.min(trialBatch(bounty), effectiveRules(memberRules(member)).trialUnits);
+  const proven = json(bounty.opportunity, null)?.provenItem === true;
+  const held = proven ? 0 : memberItemUnits(db, member.id, bounty.barcode, now);
+  return { limit, held, proven, allowance: Math.max(0, limit - held) };
+}
+
+/**
+ * Reasons a live bounty fails a member's own stricter thresholds (empty
+ * when the member set none or it passes). Unknown figures fail closed.
+ */
+export function memberRuleFailures(bounty, member) {
+  const overrides = memberRules(member);
+  if (bounty.sample || !Object.keys(overrides).length) return [];
+  const rules = effectiveRules(overrides);
+  const o = json(bounty.opportunity, null) ?? {};
+  const snapshot = json(bounty.estimate, null);
+  const unitPrice = Number.isSafeInteger(o.unitPrice) ? o.unitPrice : snapshot?.unitCost;
+  const failures = [];
+  if (!Number.isSafeInteger(unitPrice)) failures.push("Purchase price unknown, so your thresholds cannot be checked");
+  else if (unitPrice < rules.minUnitPrice || unitPrice > rules.maxUnitPrice)
+    failures.push(
+      `Purchase price ${pounds(unitPrice)} is outside your band of ${pounds(rules.minUnitPrice)} to ${pounds(rules.maxUnitPrice)}`,
+    );
+  if (!isPositive(o.weightKg)) failures.push("Unit weight unknown, so your weight limit cannot be checked");
+  else if (o.weightKg >= rules.maxWeightKg)
+    failures.push(`Unit weighs ${o.weightKg} kg, not under your limit of ${rules.maxWeightKg} kg`);
+  if (!Number.isSafeInteger(o.unitProfit)) failures.push("Profit per unit unknown, so your thresholds cannot be checked");
+  else {
+    if (o.unitProfit < rules.minUnitProfit)
+      failures.push(`Profit per unit ${pounds(o.unitProfit)} is below your ${pounds(rules.minUnitProfit)}`);
+    if (Number.isSafeInteger(unitPrice) && !meetsReturn(o.unitProfit, unitPrice, rules.minReturn))
+      failures.push(
+        `Return on purchase price ${percentDown(o.unitProfit / unitPrice)} is below your ${percentDown(rules.minReturn)}`,
+      );
+  }
+  return failures;
+}
+
+/** The promotion condition on a live bounty, or null. */
+function promotionOf(bounty) {
+  return bounty.sample ? null : (json(bounty.estimate, null)?.promotion ?? null);
+}
+
+/** What a member who does not qualify for a promotion price risks paying. */
+export function promotionRisk(promotion, unitProfit = null) {
+  if (!promotion) return null;
+  if (promotion.costedAt === "regular")
+    return `Costed at the regular price of ${pounds(promotion.regularPrice)}: the promotion price applies only if you qualify.`;
+  if (Number.isSafeInteger(promotion.regularPrice) && Number.isSafeInteger(promotion.price)) {
+    const gap = promotion.regularPrice - promotion.price;
+    const atRegular = Number.isSafeInteger(unitProfit) ? unitProfit - gap : null;
+    return `If you do not qualify you pay the regular price of ${pounds(promotion.regularPrice)}, ${pounds(gap)} more per unit${atRegular === null ? "" : `, which leaves about ${pounds(atRegular)} profit per unit`}.`;
+  }
+  return "If you do not qualify you pay more, and the regular price is not known, so the trip may lose money.";
+}
+
+/**
  * Claims units on a bounty inside BEGIN IMMEDIATE, so concurrent claims
  * serialise and the cap cannot be oversubscribed. Stale claims expire first.
- * The bounty must be open and unexpired, pass its buy-alert checks (or be a
- * labelled sample), not be paused by a negative report, and be inside the
- * member's release window. One active claim per member per bounty; at most a
- * trial batch of units; the units held plus the new units must fit the cap.
- * A claim reserves attention, not retailer stock.
+ * The bounty must be live (never a sample), open and unexpired, pass its
+ * buy-alert checks, have a fresh offer and a current stock check, not be
+ * paused by a negative report, and be inside the member's release window.
+ * It must pass the member's own stricter thresholds, and a promotion or
+ * loyalty price needs the member's own confirmation (qualifiesForPromotion)
+ * that they qualify. One active claim per member per bounty; until the item
+ * is proven, the member's units held and bought across its bounties stay
+ * within one trial batch; the units held plus the new units must fit the
+ * cap. A claim reserves attention, not retailer stock.
  */
-export function claim(db, { bountyId, memberId, units, now }) {
+export function claim(db, { bountyId, memberId, units, qualifiesForPromotion = false, now }) {
   const at = clock(now);
   return transaction(db, () => {
     expireClaims(db, now);
@@ -928,13 +1393,29 @@ export function claim(db, { bountyId, memberId, units, now }) {
     const release = releaseFor(db, bounty, member, now);
     if (!release.open)
       fail(
-        `Your release window for this bounty opens at ${release.releaseAt} (${release.tier.name}, via ${release.via === "paid" ? "paid early access" : "earned reputation"}).`,
+        `Your release window for this bounty opens at ${humanTime(release.releaseAt)} (${release.tier.name}, via ${release.via === "paid" ? "paid early access" : "earned reputation"}).`,
         409,
       );
     const existing = db
       .prepare("SELECT id FROM claims WHERE bounty_id = ? AND member_id = ? AND status = 'active'")
       .get(bounty.id, member.id);
     if (existing) fail("You already have an active claim on this bounty. Release it before claiming again.", 409);
+    const failures = memberRuleFailures(bounty, member);
+    if (failures.length) fail("This bounty fails your stricter thresholds: " + failures.join("; ") + ".", 409);
+    const trial = trialAllowance(db, bounty, member, now);
+    if (count > trial.allowance)
+      fail(
+        trial.allowance === 0
+          ? `You already hold or have bought ${plural(trial.held, "unit")} of this item. Until a verified trade exists, one member's total is a trial batch of ${plural(trial.limit, "unit")}.`
+          : `You can claim at most ${plural(trial.allowance, "more unit")} of this item: until a verified trade exists, one member's total is a trial batch of ${plural(trial.limit, "unit")}, and you hold or have bought ${trial.held}.`,
+        409,
+      );
+    const promotion = promotionOf(bounty);
+    if (promotion?.needsMemberConfirmation && qualifiesForPromotion !== true)
+      fail(
+        `This price depends on a promotion: "${promotion.condition}". Confirm that you qualify before claiming. ${promotionRisk(promotion, json(bounty.opportunity, null)?.unitProfit)}`,
+        409,
+      );
     const held = claimedUnits(db, bounty.id, now);
     const remaining = Math.max(0, bounty.cap - held.committed);
     if (count > remaining)
@@ -946,8 +1427,14 @@ export function claim(db, { bountyId, memberId, units, now }) {
         409,
       );
     const result = db
-      .prepare("INSERT INTO claims(bounty_id, member_id, units, status, created, expires_at) VALUES(?, ?, ?, 'active', ?, ?)")
-      .run(bounty.id, member.id, count, iso(at), iso(at + BOUNTY_RULES.claimHours * HOUR));
+      .prepare(
+        `INSERT INTO claims(bounty_id, member_id, units, status, created, expires_at, promotion, promotion_confirmed)
+ VALUES(?, ?, ?, 'active', ?, ?, ?, ?)`,
+      )
+      .run(
+        bounty.id, member.id, count, iso(at), iso(at + BOUNTY_RULES.claimHours * HOUR), promotion?.condition ?? null,
+        promotion && qualifiesForPromotion === true ? 1 : 0,
+      );
     return getClaim(db, Number(result.lastInsertRowid));
   });
 }
@@ -977,12 +1464,15 @@ export function releaseClaim(db, { claimId, memberId, now }) {
  * Marks an active claim as bought. unitsBought (default: the units claimed,
  * never more) stays held against the cap; any unbought units are freed.
  * Buying earns no reputation: a trade is verified only with the purchase
- * receipt and the payout record in the Ledger.
+ * receipt and the payout record in the Ledger. A claim on a sample bounty
+ * (only possible in an older database) can never be marked as bought.
  */
 export function completeClaim(db, { claimId, memberId, unitsBought, now }) {
   const at = iso(clock(now));
   return transaction(db, () => {
     const found = activeClaimFor(db, claimId, memberId, now);
+    if (requireBounty(db, found.bounty_id).sample)
+      fail("Sample bounty: illustrative figures only, so there is nothing to mark as bought. Release this claim.", 409);
     const units = unitsBought === undefined || unitsBought === null ? found.units : int(unitsBought, "units", 1, found.units);
     db.prepare("UPDATE claims SET status = 'completed', units = ?, ended_at = ? WHERE id = ?").run(units, at, found.id);
     return getClaim(db, found.id);
@@ -1055,7 +1545,9 @@ export function savePhoto(dir, photo) {
 
 /**
  * Records a stock report. unitsSeen 0 is a negative report (none on the
- * shelf), which pauses claims and alerts until a later positive report.
+ * shelf), which pauses claims and alerts until a later positive report and,
+ * when it is the latest report, sends a "Don't make the trip" notice to
+ * every other member alerted for the bounty or holding a live claim on it.
  * observedAt defaults to now, cannot be in the future and must be within the
  * last 48 hours. An optional photo ({ mediaType, data }) is stripped of
  * metadata and stored privately under options.photoDir; only its hash, size
@@ -1092,7 +1584,9 @@ export function addReport(db, input, { now, photoDir } = {}) {
           bounty.id, member.id, unitsSeen, iso(observed), note, photo?.sha256 ?? null, photo?.bytes ?? null,
           photo?.mediaType ?? null, iso(at),
         );
-      return getReport(db, Number(result.lastInsertRowid));
+      const report = getReport(db, Number(result.lastInsertRowid));
+      if (unitsSeen === 0) stopForEmptyShelf(db, bounty, report, { now, exclude: member.id });
+      return report;
     } catch (error) {
       if (saved?.created) unlinkSync(saved.path);
       throw error;
@@ -1101,6 +1595,25 @@ export function addReport(db, input, { now, photoDir } = {}) {
 }
 
 const getReport = (db, reportId) => plain(db.prepare("SELECT * FROM stock_reports WHERE id = ?").get(reportId));
+
+/**
+ * Notices for an empty-shelf report, sent only while it is the report that
+ * decides the shelf (an older report behind a newer sighting stops nobody).
+ * Keyed on the time the shelf was seen empty, so the report, its
+ * verification and the branch check it becomes notify each member once.
+ */
+function stopForEmptyShelf(db, bounty, report, { now, exclude = null, confirmed = false }) {
+  if (bounty.sample || report.units_seen !== 0) return 0;
+  const shelf = shelfStatus(db, bounty.id);
+  if (!shelf.paused || shelf.reportId !== report.id) return 0;
+  return notifyStop(db, bounty, {
+    reason: confirmed ? "verified-empty" : "empty-shelf",
+    ref: "empty:" + report.observed_at,
+    message: `${TERMS.stop}: ${confirmed ? "the operator confirmed a report of" : "a member reported"} none on the shelf at ${humanTime(report.observed_at)}. Claims and alerts for this bounty are paused until someone reports stock again.`,
+    now,
+    exclude,
+  });
+}
 
 /**
  * The shelf as the latest stock report describes it, ignoring reports the
@@ -1115,7 +1628,7 @@ export function shelfStatus(db, bountyId) {
  ORDER BY observed_at DESC, id DESC LIMIT 1`,
     )
     .get(bountyId);
-  if (!latest) return { state: "unknown", paused: false, at: null, unitsSeen: null, verified: null };
+  if (!latest) return { state: "unknown", paused: false, at: null, unitsSeen: null, verified: null, reportId: null };
   const none = latest.units_seen === 0;
   return {
     state: none ? "none" : "seen",
@@ -1123,6 +1636,7 @@ export function shelfStatus(db, bountyId) {
     at: latest.observed_at,
     unitsSeen: latest.units_seen,
     verified: latest.verified,
+    reportId: latest.id,
   };
 }
 
@@ -1136,7 +1650,9 @@ export function shelfStatus(db, bountyId) {
  *
  * options.recordCheck(db, check, { now }) (audit.mjs recordCheck) receives a
  * verified accurate report on a live bounty as an in-store availability
- * check, so the estimate's branch stock check can use it.
+ * check, so the estimate's branch stock check can use it. A verified
+ * empty-shelf report that still decides the shelf makes sure everyone
+ * alerted or holding a claim has a "Don't make the trip" notice.
  */
 export function verifyReport(db, reportId, accurate, { now, recordCheck = null } = {}) {
   const at = iso(clock(now));
@@ -1176,6 +1692,7 @@ export function verifyReport(db, reportId, accurate, { now, recordCheck = null }
         reason,
         at,
       );
+    if (isAccurate) stopForEmptyShelf(db, bounty, report, { now, exclude: report.member_id, confirmed: true });
     let check = null;
     if (isAccurate && !bounty.sample && bounty.barcode && typeof recordCheck === "function")
       check = recordCheck(
@@ -1202,9 +1719,13 @@ export function verifyReport(db, reportId, accurate, { now, recordCheck = null }
  * Sends a bounty's alerts that are due at `now`.
  *
  * Nothing is sent unless the bounty is open, unexpired, not a sample, passes
- * its buy-alert checks, has a fresh offer, is not paused by a negative stock
- * report and has room under its cap. Then only members who opted in and list
- * the bounty's locality are considered, each at most once. A member becomes
+ * its buy-alert checks, has a fresh offer and a current stock check, is not
+ * paused by a negative stock report and has room under its cap. Then only
+ * members who opted in and list the bounty's locality are considered, each
+ * at most once, and never a member who already claimed it, whose own
+ * stricter thresholds it fails, or who already holds or bought a trial
+ * batch of the item. Each alert records the promotion condition on the
+ * price and the locality's pre-validation warning. A member becomes
  * due when now is at least bounty.created plus their tier's offsetMinutes
  * (paid tier while current, or earned tier, whichever is earlier), so calling
  * again later releases further tiers. Due members are ordered by window, then
@@ -1212,7 +1733,8 @@ export function verifyReport(db, reportId, accurate, { now, recordCheck = null }
  * alerts in total per bounty, so with little stock later tiers receive
  * nothing.
  *
- * Returns { bountyId, sent, notAlerted, blockers, exposure, nextReleaseAt }.
+ * Returns { bountyId, sent, notAlerted, blockers, exposure, nextReleaseAt,
+ * promotion, warning }.
  */
 export function dispatchAlerts(db, bountyId, now) {
   const at = clock(now);
@@ -1231,11 +1753,20 @@ export function dispatchAlerts(db, bountyId, now) {
       alreadySent,
       budget: Math.max(0, limit - alreadySent),
     };
-    const blockers = [];
-    if (bounty.sample) blockers.push("Sample bounty: illustrative figures never send an alert");
-    blockers.push(...tripBlockers(db, bounty, now));
+    const blockers = [...tripBlockers(db, bounty, now)];
     if (remaining <= 0) blockers.push(capFullMessage(bounty));
-    const result = { bountyId: bounty.id, sent: [], notAlerted: [], blockers, exposure, nextReleaseAt: null };
+    const promotion = promotionOf(bounty);
+    const validation = bounty.sample ? null : validationStatus(db, bounty.locality);
+    const result = {
+      bountyId: bounty.id,
+      sent: [],
+      notAlerted: [],
+      blockers,
+      exposure,
+      nextReleaseAt: null,
+      promotion: promotion ? { condition: promotion.condition, regularPrice: promotion.regularPrice } : null,
+      warning: validation?.warning ?? null,
+    };
     if (blockers.length) return result;
 
     const locality = normaliseLocality(bounty.locality);
@@ -1269,11 +1800,23 @@ export function dispatchAlerts(db, bountyId, now) {
         result.notAlerted.push({ ...who, reason: "Already claimed this bounty" });
         continue;
       }
+      const failures = memberRuleFailures(bounty, member);
+      if (failures.length) {
+        result.notAlerted.push({ ...who, reason: "Fails the member's stricter thresholds: " + failures.join("; ") });
+        continue;
+      }
+      if (trialAllowance(db, bounty, member, now).allowance === 0) {
+        result.notAlerted.push({
+          ...who,
+          reason: "Already holds or bought a trial batch of this item, and no verified trade exists yet",
+        });
+        continue;
+      }
       const release = releaseFor(db, bounty, member, now);
       if (!release.open) {
         result.notAlerted.push({
           ...who,
-          reason: `Release window opens at ${release.releaseAt} (${release.tier.name}, via ${release.via === "paid" ? "paid early access" : "earned reputation"})`,
+          reason: `Release window opens at ${humanTime(release.releaseAt)} (${release.tier.name}, via ${release.via === "paid" ? "paid early access" : "earned reputation"})`,
           releaseAt: release.releaseAt,
         });
         if (!next || release.releaseAt < next) next = release.releaseAt;
@@ -1289,7 +1832,8 @@ export function dispatchAlerts(db, bountyId, now) {
         a.member.id - b.member.id,
     );
     const insert = db.prepare(
-      "INSERT INTO alerts(bounty_id, member_id, tier, via, release_at, reputation, created) VALUES(?, ?, ?, ?, ?, ?, ?)",
+      `INSERT INTO alerts(bounty_id, member_id, tier, via, release_at, reputation, promotion, warning, created)
+ VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     due.forEach(({ member, release }, index) => {
       const who = { memberId: member.id, name: member.name };
@@ -1300,7 +1844,10 @@ export function dispatchAlerts(db, bountyId, now) {
         });
         return;
       }
-      insert.run(bounty.id, member.id, release.tier.id, release.via, release.releaseAt, release.points, iso(at));
+      insert.run(
+        bounty.id, member.id, release.tier.id, release.via, release.releaseAt, release.points,
+        promotion?.condition ?? null, result.warning, iso(at),
+      );
       result.sent.push({
         ...who,
         tier: release.tier,
@@ -1317,30 +1864,113 @@ export function dispatchAlerts(db, bountyId, now) {
   });
 }
 
-/** A member's alerts, newest first, with the bounty they point to. */
+/**
+ * Whether a bounty can send anyone on a trip now, for the card and the
+ * alert inbox: { state, go, label, headline }. state is "go", "full" (the
+ * cap leaves nothing to claim, though members holding a claim may go),
+ * "paused" (an empty-shelf report), "out-of-stock" (the last branch check
+ * found none), "stock-unconfirmed" (the stock check lapsed), "blocked",
+ * "sample", "expired" or "withdrawn". headline is the "Don't make the trip"
+ * line.
+ */
+export function tripState(db, bounty, now, blockers = tripBlockers(db, bounty, now)) {
+  const status = bountyStatus(bounty, now);
+  const stop = (reason) => `${TERMS.stop}: ${reason}`;
+  if (status !== "open")
+    return {
+      state: status,
+      go: false,
+      label: status === "withdrawn" ? "Withdrawn" : "Expired",
+      headline: stop(status === "withdrawn" ? "this bounty has been withdrawn" : "this bounty has expired"),
+    };
+  if (bounty.sample) return { state: "sample", go: false, label: "Sample: practice only", headline: SAMPLE_BLOCKER };
+  const shelf = shelfStatus(db, bounty.id);
+  if (shelf.paused)
+    return {
+      state: "paused",
+      go: false,
+      label: "Paused: none on the shelf",
+      headline: stop(`none on the shelf at ${humanTime(shelf.at)}, in the latest stock report`),
+    };
+  const stock = json(bounty.estimate, null)?.stock;
+  if (stock?.availability === "out_of_stock")
+    return {
+      state: "out-of-stock",
+      go: false,
+      label: "Out of stock at the last branch check",
+      headline: stop(`the latest branch check (${humanTime(stock.checkedAt)}) found none on the shelf`),
+    };
+  const lapse = stockLapse(bounty, now);
+  if (lapse?.lapsed)
+    return {
+      state: "stock-unconfirmed",
+      go: false,
+      label: "Stock check lapsed",
+      headline: stop(`branch stock has not been checked in the last ${CHECK_VALID_DAYS} days`),
+    };
+  if (blockers.length) {
+    const first = blockers[0];
+    return { state: "blocked", go: false, label: "Not open for trips", headline: stop(first[0].toLowerCase() + first.slice(1)) };
+  }
+  // Members already holding a claim may go; nobody new can claim.
+  if (bounty.cap - claimedUnits(db, bounty.id, now).committed <= 0)
+    return {
+      state: "full",
+      go: true,
+      label: bounty.cap === 0 ? "Nothing to share: cap 0" : "Fully claimed",
+      headline: null,
+    };
+  return { state: "go", go: true, label: "Open for trips", headline: null };
+}
+
+const HIDDEN_TITLE = "Details not shown";
+
+/**
+ * A member's alerts, newest first, each with the bounty's state now: the
+ * trip state and its "Don't make the trip" headline, the shelf, the
+ * promotion condition recorded with the alert, the locality's
+ * pre-validation warning and the member's notices for that bounty. When
+ * the source does not permit display, the title and retailer are hidden.
+ */
 export function memberAlerts(db, memberId, { now }) {
   const member = requireMember(db, memberId);
   return db
-    .prepare(
-      `SELECT a.*, b.title, b.retailer, b.locality, b.sponsored, b.sponsor, b.sample, b.expires_at, b.status
- FROM alerts a JOIN bounties b ON b.id = a.bounty_id WHERE a.member_id = ? ORDER BY a.created DESC, a.id DESC`,
-    )
+    .prepare("SELECT * FROM alerts WHERE member_id = ? ORDER BY created DESC, id DESC")
     .all(member.id)
-    .map((a) => ({
-      id: a.id,
-      bountyId: a.bounty_id,
-      title: a.title,
-      retailer: a.retailer,
-      locality: a.locality,
-      sponsored: a.sponsored === 1,
-      sponsor: a.sponsor,
-      created: a.created,
-      releaseAt: a.release_at,
-      tier: tierSummary(membershipTier(a.tier)),
-      via: a.via,
-      label: a.via === "paid" ? "Paid early access" : "Earned release",
-      bountyStatus: bountyStatus({ status: a.status, expires_at: a.expires_at }, now),
-    }));
+    .map((a) => {
+      const bounty = getBounty(db, a.bounty_id);
+      const display = displayStatus(db, bounty);
+      const promotion = promotionOf(bounty);
+      const condition = a.promotion ?? promotion?.condition ?? null;
+      const validation = validationStatus(db, bounty.locality);
+      return {
+        id: a.id,
+        bountyId: a.bounty_id,
+        title: display.permitted ? bounty.title : HIDDEN_TITLE,
+        retailer: display.permitted ? bounty.retailer : null,
+        locality: bounty.locality,
+        sponsored: bounty.sponsored === 1,
+        sponsor: bounty.sponsor,
+        created: a.created,
+        releaseAt: a.release_at,
+        tier: tierSummary(membershipTier(a.tier)),
+        via: a.via,
+        label: a.via === "paid" ? "Paid early access" : "Earned release",
+        bountyStatus: bountyStatus(bounty, now),
+        trip: tripState(db, bounty, now),
+        shelf: shelfStatus(db, bounty.id),
+        promotion:
+          condition && display.permitted
+            ? {
+                condition,
+                regularPrice: promotion?.regularPrice ?? null,
+                note: `Promotion price: ${condition}. Confirm that you qualify before you claim. ${promotionRisk(promotion ?? { condition }, json(bounty.opportunity, null)?.unitProfit)}`,
+              }
+            : null,
+        warning: a.warning ?? validation.warning,
+        notices: memberNotices(db, member.id, { bountyId: bounty.id }),
+      };
+    });
 }
 
 // ------------------------------------------------------------------- views
@@ -1348,7 +1978,8 @@ export function memberAlerts(db, memberId, { now }) {
 /**
  * Sourcing pressure: people heading to the shelf relative to the units
  * there. Each active claimed unit and each positive stock report in the last
- * 24 hours counts once. Null ratio when available units are unknown.
+ * 24 hours counts once. Null ratio when available units are unknown or none
+ * are on the shelf.
  */
 export function sourcingPressure({ activeClaimedUnits, recentPositiveReports, availableUnits }) {
   const ratio =
@@ -1360,15 +1991,31 @@ export function sourcingPressure({ activeClaimedUnits, recentPositiveReports, av
 
 /**
  * Resale competition: competing listings relative to sales a week, as weeks
- * of supply already on the market. Null when either figure is unknown.
+ * of supply already on the market. Null when either figure is unknown, and
+ * when no listing is recorded: none recorded is never read as no
+ * competition (the same rule as estimate.mjs resaleWeeksOfSupply).
+ * recordedListings is the estimate's own count and lookup the asking-price
+ * lookup on record, so the note can say why competition is unknown.
  */
-export function resaleCompetition({ competingListings, competingSellers = null, salesPerWeek }) {
+export function resaleCompetition({
+  competingListings,
+  competingSellers = null,
+  salesPerWeek,
+  recordedListings = null,
+  lookup = null,
+}) {
   const weeksOfSupply =
-    isCount(competingListings) && isPositive(salesPerWeek) ? round2(competingListings / salesPerWeek) : null;
-  const note =
-    competingListings === 0
-      ? "No active listings recorded. That can mean nobody has looked, so it is not proof of low competition."
+    isCount(competingListings) && competingListings > 0 && isPositive(salesPerWeek)
+      ? round2(competingListings / salesPerWeek)
       : null;
+  let note = null;
+  if (competingListings === 0)
+    note = lookup
+      ? `An asking-price lookup (${lookup.provider}, ${humanTime(lookup.fetched)}) found no competing listings. That covers one marketplace at one time.`
+      : "No active listings recorded. That can mean nobody has looked, so it is not proof of low competition.";
+  else if (competingListings === null && recordedListings === 0)
+    note =
+      "No active listings recorded and no asking-price lookup for this barcode is on record, so competition is not known. Nobody may have looked.";
   return { competingListings, competingSellers, salesPerWeek, weeksOfSupply, note };
 }
 
@@ -1394,7 +2041,103 @@ export function resolveViewer(db, viewer) {
   return { kind: "member", member: requireMember(db, Number(viewer)) };
 }
 
-/** A bounty as the API shows it to a viewer. */
+/**
+ * Units on the shelf now, from evidence only: the newer of the stock check
+ * behind the estimate and the latest stock report that was not marked
+ * inaccurate, less units members marked as bought after that count. A
+ * sample uses its hand-entered figure. units is null when no count exists.
+ */
+function shelfUnitsNow(db, bounty, snapshot, basis, latestReport) {
+  if (bounty.sample)
+    return { units: basis?.used?.availableUnits ?? bounty.available_units, source: "sample", at: null, boughtSince: 0 };
+  const stock = snapshot?.stock;
+  const checkAt = Date.parse(stock?.checkedAt);
+  let units = null;
+  let source = null;
+  let at = null;
+  if (latestReport && (!Number.isFinite(checkAt) || Date.parse(latestReport.observed_at) >= checkAt)) {
+    units = latestReport.units_seen;
+    source = "stock report";
+    at = latestReport.observed_at;
+  } else if (Number.isFinite(checkAt)) {
+    source = "stock check";
+    at = iso(checkAt);
+    units =
+      stock.availability === "out_of_stock"
+        ? 0
+        : stock.availability === "in_stock" && Number.isSafeInteger(stock.unitsSeen) && stock.unitsSeen > 0
+          ? stock.unitsSeen
+          : null;
+  }
+  if (units === null) return { units: null, source, at, boughtSince: 0 };
+  const boughtSince = db
+    .prepare("SELECT COALESCE(SUM(units), 0) AS n FROM claims WHERE bounty_id = ? AND status = 'completed' AND ended_at > ?")
+    .get(bounty.id, at).n;
+  return { units: Math.max(0, units - boughtSince), source, at, boughtSince };
+}
+
+/**
+ * The stored alert checks with the ones that can change since the last
+ * re-check worked out now: branch stock and availability (an empty-shelf
+ * report or a lapsed check), offer freshness, display permission and, for
+ * a promotion price, whether this viewer confirmed they qualify.
+ */
+function liveChecks(stored, { shelf, lapse, offerStale, display, promotion, viewer, confirmed }) {
+  return stored.map((c) => {
+    if (c.id === "local-stock" || c.id === "availability") {
+      if (shelf.paused)
+        return {
+          ...c,
+          ok: false,
+          detail:
+            c.id === "local-stock"
+              ? `Branch stock not confirmed: a stock report found none on the shelf at ${humanTime(shelf.at)}`
+              : `Latest stock report found none on the shelf at ${humanTime(shelf.at)}`,
+        };
+      if (lapse?.lapsed)
+        return {
+          ...c,
+          ok: false,
+          detail:
+            c.id === "local-stock"
+              ? lapse.message
+              : `Availability not checked in the last ${CHECK_VALID_DAYS} days`,
+        };
+    }
+    if (c.id === "offer-fresh" && offerStale)
+      return { ...c, ok: false, detail: `Offer price is not from the last ${ALERT_RULES.maxOfferAgeDays} days` };
+    if (c.id === "display-permitted")
+      return {
+        ...c,
+        ok: display.permitted,
+        detail: display.permitted ? "Source permits display" : "No recorded permission to display this source",
+      };
+    if (c.id === "promotion" && promotion?.needsMemberConfirmation) {
+      if (viewer.kind === "member")
+        return confirmed
+          ? { ...c, ok: true, detail: `You confirmed you qualify for: ${promotion.condition}` }
+          : { ...c, ok: false, detail: `Promotion price (${promotion.condition}): confirm you qualify when you claim` };
+      if (viewer.kind === "operator")
+        return {
+          ...c,
+          detail: c.ok
+            ? `You confirmed you qualify (${promotion.condition}). That covers only you: each member confirms for themselves`
+            : c.detail,
+        };
+      return { ...c, ok: false, detail: `Promotion price (${promotion.condition}): each member must confirm they qualify` };
+    }
+    return c;
+  });
+}
+
+/**
+ * A bounty as the API shows it to a viewer. Everything that can change
+ * without a re-check is worked out at `now`: the trip state, the alert
+ * checks, the shelf count, sourcing pressure and the claim offer. When the
+ * offer's source does not permit display, members and visitors see no
+ * title, retailer, barcode, prices or sale figures; the operator sees them
+ * with display.label saying they are not shown to others.
+ */
 export function bountyView(db, bounty, { viewer = { kind: "public" }, now }) {
   const at = clock(now);
   const status = bountyStatus(bounty, now);
@@ -1414,10 +2157,18 @@ export function bountyView(db, bounty, { viewer = { kind: "public" }, now }) {
   const recentPositive = reports.filter(
     (r) => r.units_seen > 0 && r.verified !== "inaccurate" && r.observed_at >= since,
   ).length;
-  const usedUnits = basis?.used?.availableUnits ?? bounty.available_units;
+  const shelfUnits = shelfUnitsNow(
+    db,
+    bounty,
+    snapshot,
+    basis,
+    reports.find((r) => r.verified !== "inaccurate"),
+  );
   const usedRate = basis?.used ? basis.used.salesPerWeek : bounty.sales_per_week;
   const isOperator = viewer.kind === "operator";
   const me = viewer.kind === "member" ? viewer.member.id : null;
+  const display = displayStatus(db, bounty);
+  const hidden = !display.permitted && !isOperator;
   const reportView = (r) =>
     isOperator || r.member_id === me
       ? {
@@ -1434,6 +2185,8 @@ export function bountyView(db, bounty, { viewer = { kind: "public" }, now }) {
           points: r.points ?? 0,
         }
       : { id: r.id, mine: false, unitsSeen: r.units_seen, observedAt: r.observed_at, verified: r.verified };
+  const blockers = tripBlockers(db, bounty, now);
+  const trip = tripState(db, bounty, now, blockers);
   const claims = db
     .prepare(
       `SELECT c.*, m.name AS member_name FROM claims c JOIN members m ON m.id = c.member_id
@@ -1442,48 +2195,99 @@ export function bountyView(db, bounty, { viewer = { kind: "public" }, now }) {
     .all(bounty.id)
     .map(plain)
     .filter((c) => isOperator || c.member_id === me)
-    .map((c) => ({
-      id: c.id,
-      memberId: c.member_id,
-      memberName: c.member_name,
-      units: c.units,
-      status: c.status === "active" && Date.parse(c.expires_at) <= at ? "expired" : c.status,
-      created: c.created,
-      expiresAt: c.expires_at,
-      endedAt: c.ended_at,
-    }));
-  const blockers = tripBlockers(db, bounty, now);
+    .map((c) => {
+      const live = c.status === "active" && Date.parse(c.expires_at) > at;
+      return {
+        id: c.id,
+        memberId: c.member_id,
+        memberName: c.member_name,
+        units: c.units,
+        status: c.status === "active" && !live ? "expired" : c.status,
+        created: c.created,
+        expiresAt: c.expires_at,
+        endedAt: c.ended_at,
+        promotionConfirmed: c.promotion_confirmed === 1,
+        // A live claim on a bounty that cannot send anyone on a trip now.
+        paused: live && !trip.go,
+      };
+    });
   const alertBlockers = [...blockers];
-  if (bounty.sample) alertBlockers.unshift("Sample bounty: illustrative figures never send an alert");
   if (remaining <= 0) alertBlockers.push(capFullMessage(bounty));
   const alertsSent = db.prepare("SELECT COUNT(*) AS n FROM alerts WHERE bounty_id = ?").get(bounty.id).n;
+  const promotion = promotionOf(bounty);
+  const opportunity = json(bounty.opportunity, null);
+  const lapse = stockLapse(bounty, now);
+  const age = offerAge(bounty, now);
+  const offerStale = !bounty.sample && (age === null || age < 0 || age > ALERT_RULES.maxOfferAgeDays);
   let viewerInfo = null;
   if (viewer.kind === "member") {
     const release = releaseFor(db, bounty, viewer.member, now);
     const alert = db
       .prepare("SELECT created FROM alerts WHERE bounty_id = ? AND member_id = ?")
       .get(bounty.id, viewer.member.id);
+    const active = claims.find((c) => c.status === "active") ?? null;
+    const ruleFailures = memberRuleFailures(bounty, viewer.member);
+    const trial = bounty.sample
+      ? { limit: 0, held: 0, proven: false, allowance: 0 }
+      : trialAllowance(db, bounty, viewer.member, now);
+    const own = [];
+    if (!blockers.length) {
+      if (ruleFailures.length) own.push("This bounty fails your stricter thresholds: " + ruleFailures.join("; "));
+      if (trial.allowance === 0 && !active)
+        own.push(
+          `You already hold or have bought ${plural(trial.held, "unit")} of this item: until a verified trade exists, one member's total is a trial batch of ${plural(trial.limit, "unit")}`,
+        );
+      if (!release.open)
+        own.push(
+          `Your release window opens at ${humanTime(release.releaseAt)} (${release.tier.name}, via ${release.via === "paid" ? "paid early access" : "earned reputation"})`,
+        );
+    }
     viewerInfo = {
       memberId: viewer.member.id,
       release,
       alertedAt: alert?.created ?? null,
-      activeClaim: claims.find((c) => c.status === "active") ?? null,
-      canClaim: !blockers.length && release.open && remaining > 0 && !claims.some((c) => c.status === "active"),
+      activeClaim: active,
+      canClaim: !blockers.length && !own.length && remaining > 0 && !active && trial.allowance > 0,
+      blockers: own,
+      ruleFailures: hidden ? ruleFailures.map(() => "Fails one of your stricter thresholds") : ruleFailures,
+      trial,
+      maxClaimUnits: Math.max(0, Math.min(trial.allowance, remaining)),
+      promotion:
+        promotion?.needsMemberConfirmation && !hidden
+          ? {
+              condition: promotion.condition,
+              confirmed: Boolean(active?.promotionConfirmed),
+              risk: promotionRisk(promotion, opportunity?.unitProfit),
+            }
+          : null,
+      stop: trip.go ? null : trip.headline,
+      notices: memberNotices(db, viewer.member.id, { bountyId: bounty.id }),
     };
   }
+  const checks = liveChecks(Array.isArray(snapshot?.alert?.checks) ? snapshot.alert.checks : [], {
+    shelf,
+    lapse,
+    offerStale,
+    display,
+    promotion,
+    viewer,
+    confirmed: Boolean(viewerInfo?.activeClaim?.promotionConfirmed),
+  });
   const economics = snapshot?.economics ?? null;
+  const validation = bounty.sample ? null : validationStatus(db, bounty.locality);
   return {
     id: bounty.id,
-    title: bounty.title,
-    barcode: bounty.barcode,
-    variant: bounty.variant,
-    retailer: bounty.retailer,
+    title: hidden ? HIDDEN_TITLE : bounty.title,
+    barcode: hidden ? null : bounty.barcode,
+    variant: hidden ? null : bounty.variant,
+    retailer: hidden ? null : bounty.retailer,
     locality: bounty.locality,
     sample: bounty.sample === 1,
     sponsored: bounty.sponsored === 1,
     sponsor: bounty.sponsor,
     placement: bounty.sponsored === 1 ? `Sponsored by ${bounty.sponsor}` : null,
     status,
+    trip,
     created: bounty.created,
     expiresAt: bounty.expires_at,
     withdrawnAt: bounty.withdrawn_at,
@@ -1502,21 +2306,56 @@ export function bountyView(db, bounty, { viewer = { kind: "public" }, now }) {
       exposureLimit: BOUNTY_RULES.exposurePerUnit * remaining,
     },
     claimBlockers: blockers,
-    maxClaimUnits: trialBatch(bounty),
-    opportunity: json(bounty.opportunity, null),
+    // The largest single claim: the trial batch (the member's own when
+    // stricter). viewer.maxClaimUnits is what this member can claim now.
+    maxClaimUnits: viewerInfo && !bounty.sample ? viewerInfo.trial.limit : trialBatch(bounty),
+    opportunity: hidden && opportunity ? { tier: opportunity.tier, reasons: [], meetsThresholds: opportunity.meetsThresholds } : opportunity,
     pressure: {
-      sourcing: sourcingPressure({
-        activeClaimedUnits: held.active,
-        recentPositiveReports: recentPositive,
-        availableUnits: usedUnits,
-      }),
+      sourcing: {
+        ...sourcingPressure({
+          activeClaimedUnits: held.active,
+          recentPositiveReports: recentPositive,
+          availableUnits: shelfUnits.units,
+        }),
+        unitsSource: shelfUnits.source,
+        unitsAt: shelfUnits.at,
+        boughtSince: shelfUnits.boughtSince,
+      },
       resale: resaleCompetition({
         competingListings: bounty.competing_listings,
         competingSellers: bounty.competing_sellers,
         salesPerWeek: usedRate,
+        recordedListings: snapshot?.competition?.activeListings ?? null,
+        lookup: snapshot?.askingLookup ?? basis?.evidence?.askingLookup ?? null,
       }),
     },
     shelf,
+    shelfUnits,
+    display: {
+      permitted: display.permitted,
+      // The basis names the source and programme, so only the operator sees it.
+      basis: hidden ? "No display permission for this source" : display.basis,
+      hidden,
+      label: display.permitted
+        ? null
+        : isOperator
+          ? "Not shown to members or visitors: " + display.basis
+          : TERMS.hidden,
+    },
+    validation,
+    promotion:
+      promotion && !hidden
+        ? {
+            condition: promotion.condition,
+            price: promotion.price,
+            regularPrice: promotion.regularPrice,
+            costedAt: promotion.costedAt,
+            needsMemberConfirmation: promotion.needsMemberConfirmation,
+            note: promotion.needsMemberConfirmation
+              ? `The purchase price is a promotion price: ${promotion.condition}. ${TERMS.promotion} ${promotionRisk(promotion, opportunity?.unitProfit)}`
+              : promotionRisk(promotion),
+          }
+        : null,
     reports: {
       total: reports.length,
       positive: reports.filter((r) => r.units_seen > 0).length,
@@ -1525,20 +2364,34 @@ export function bountyView(db, bounty, { viewer = { kind: "public" }, now }) {
       items: reports.map(reportView),
     },
     claims,
-    estimate: snapshot
-      ? {
-          checkedAt: snapshot.checkedAt,
-          offer: snapshot.offer,
-          unitCost: snapshot.unitCost,
-          match: snapshot.match,
-          sample: snapshot.sample,
-          competition: snapshot.competition,
-          economics,
-          stock: snapshot.stock,
-          checks: snapshot.alert?.checks ?? [],
-          warnings: snapshot.warnings ?? [],
-        }
-      : null,
+    estimate:
+      snapshot && !hidden
+        ? {
+            checkedAt: snapshot.checkedAt,
+            offer: snapshot.offer,
+            unitCost: snapshot.unitCost,
+            match: snapshot.match,
+            sample: snapshot.sample,
+            competition: snapshot.competition,
+            economics,
+            stock: snapshot.stock,
+            checks,
+            warnings: snapshot.warnings ?? [],
+          }
+        : snapshot
+          ? {
+              checkedAt: snapshot.checkedAt,
+              offer: null,
+              unitCost: null,
+              match: snapshot.match,
+              sample: null,
+              competition: null,
+              economics: null,
+              stock: snapshot.stock,
+              checks,
+              warnings: [],
+            }
+          : null,
     viewer: viewerInfo,
     terms: TERMS,
   };

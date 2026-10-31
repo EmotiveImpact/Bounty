@@ -16,9 +16,11 @@ import {
   monthParam,
   proofTarget,
   recordProof,
+  relinkProof,
+  removeProof,
   summary,
 } from "./ledger.mjs";
-import { decodeBase64, ProofError, PROOF_TYPES, storeProof } from "./proofs.mjs";
+import { decodeBase64, deleteProofFile, ProofError, PROOF_TYPES, storeProof } from "./proofs.mjs";
 
 // A 5 MB file is about 6.7 MB as base64, plus the label and JSON framing.
 export const PROOF_BODY_LIMIT = 7 * 1024 * 1024;
@@ -85,6 +87,31 @@ export function routes(db, { proofDir, now = () => new Date() } = {}) {
         return reply(created ? 201 : 200, { proof, ...getTrip(db, trip.id) });
       },
       { limit: PROOF_BODY_LIMIT },
+    ],
+    [
+      "PATCH",
+      "/api/ledger/trips/:id/proofs/:proofId",
+      ({ params, body }) => relinkProof(db, idParam(params.id), idParam(params.proofId, "proofId"), body),
+    ],
+    [
+      "DELETE",
+      "/api/ledger/trips/:id/proofs/:proofId",
+      ({ params }) => {
+        const tripId = idParam(params.id);
+        const proofId = idParam(params.proofId, "proofId");
+        const { sha256, fileUnused } = removeProof(db, tripId, proofId);
+        // The stored file goes only when no other proof refers to it.
+        let file = "in use";
+        if (fileUnused) {
+          try {
+            file = deleteProofFile(proofs(), sha256);
+          } catch (error) {
+            console.error(error);
+            file = "error";
+          }
+        }
+        return { removed: { id: proofId, file }, ...getTrip(db, tripId) };
+      },
     ],
     [
       "GET",

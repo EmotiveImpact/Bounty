@@ -42,16 +42,46 @@ const TABS = {
 } as const;
 type Tab = keyof typeof TABS;
 
+// The tab named in the address, or null. Only the tabs themselves count
+// (never inherited names such as "constructor"), and a malformed escape in
+// the hash is ignored rather than breaking the page.
+function tabFromHash(): Tab | null {
+  let hash: string;
+  try {
+    hash = decodeURIComponent(location.hash.slice(1));
+  } catch {
+    return null;
+  }
+  return Object.hasOwn(TABS, hash) ? (hash as Tab) : null;
+}
+
+// Keeps a failure in one tab from blanking the whole page.
+class TabBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: string | null }
+> {
+  state = { error: null as string | null };
+  static getDerivedStateFromError(error: unknown) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+  render() {
+    if (this.state.error)
+      return (
+        <p role="alert">
+          This tab hit an error and stopped ({this.state.error}). Reload the page, or choose another tab.
+        </p>
+      );
+    return this.props.children;
+  }
+}
+
 function App() {
-  const [tab, setTab] = useState<Tab>(() => {
-    const hash = decodeURIComponent(location.hash.slice(1));
-    return hash in TABS ? (hash as Tab) : "Planner";
-  });
+  const [tab, setTab] = useState<Tab>(() => tabFromHash() ?? "Planner");
   // Follow in-page links such as the Planner's "Open the basket plan in Goals".
   useEffect(() => {
     const follow = () => {
-      const hash = decodeURIComponent(location.hash.slice(1));
-      if (hash in TABS) setTab(hash as Tab);
+      const next = tabFromHash();
+      if (next) setTab(next);
     };
     window.addEventListener("hashchange", follow);
     return () => window.removeEventListener("hashchange", follow);
@@ -81,9 +111,9 @@ function App() {
             </button>
           ))}
         </nav>
-        <React.Fragment key={tab}>
+        <TabBoundary key={tab}>
           <View />
-        </React.Fragment>
+        </TabBoundary>
       </main>
     </>
   );

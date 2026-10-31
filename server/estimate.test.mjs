@@ -8,9 +8,14 @@ import {
 } from "./contract.mjs";
 import { memoryDb, serve } from "./test-support.mjs";
 import { HttpError } from "./http.mjs";
+import { readFileSync } from "node:fs";
 import { schema as auditSchema, recordCheck } from "./audit.mjs";
+import { schema as goalsSchema, saveGoals } from "./goals.mjs";
+import { upsertObservations, upsertResearch } from "./evidence.mjs";
+import { awin, openPrices, sold } from "./sources.mjs";
 import {
   UNSTATED_DISCOUNT,
+  applyOfferAttributes,
   candidatesFor,
   displayPermission,
   estimateFromEvidence,
@@ -19,10 +24,11 @@ import {
   observationPromotion,
   resaleWeeksOfSupply,
   salesPerWeek,
+  suggestCategory,
   thresholdsFor,
   validateEstimateRequest,
 } from "./estimate.mjs";
-import { OPPORTUNITY_RULES } from "./opportunity.mjs";
+import { CATEGORY_RULES, OPPORTUNITY_RULES } from "./opportunity.mjs";
 import * as researchRoutes from "./routes-research.mjs";
 
 // Evidence tables straight from the contract, so these tests do not depend
@@ -303,6 +309,16 @@ test("two independent sales block the alert", () => {
   assert.equal(r.opportunity.tier, "Review");
 });
 
+test("sales with no seller name are reported apart and never counted as independent", () => {
+  const db = fixture({ sales: ["s1", "s2", "s3", "s4"] });
+  db.prepare("UPDATE research SET seller = NULL WHERE source_id IN ('s3', 's4')").run();
+  const r = estimateFromEvidence(db, request({ sales: ["s1", "s2", "s3", "s4"].map((sourceId) => ({ provider: "manual", sourceId })) }));
+  assert.equal(r.sample.count, 4);
+  assert.equal(r.sample.independent, 2);
+  assert.equal(r.sample.withoutSeller, 2, "the Research page shows this count beside the independent sellers");
+  assert.ok(failing(r).includes("independent-sales"));
+});
+
 test("costs that wipe out the margin, missing postage or a late cash date block the alert", () => {
   const db = fixture();
   const loss = estimateFromEvidence(db, request({ costs: { ...request().costs, journeyCost: 9000 } }));
@@ -346,7 +362,11 @@ test("a promotion price needs confirmed eligibility and is costed at the regular
   // Open Prices has no pack or model, so the match can only be research.
   assert.equal(r.match, "research");
   assert.equal(r.permission.permitted, true);
-  assert.ok(failing(r).includes("promotion"));
+  // Costed at the known regular price, the trip no longer depends on the
+  // loyalty price, so the promotion check passes and says why.
+  assert.ok(!failing(r).includes("promotion"));
+  assert.equal(r.unitCost, 1400);
+  assert.match(r.alert.checks.find((c) => c.id === "promotion").detail, /regular price/);
 
   const eligible = estimateFromEvidence(db, request({ offer: { provider: "openprices", sourceId: "77" }, promotionEligible: true }));
   assert.ok(!failing(eligible).includes("promotion"));
@@ -600,9 +620,10 @@ test("short profit or return gives Watch with the target purchase price", () => 
   const db = fixture();
   db.prepare("UPDATE research SET price = 1500 WHERE source_id = 'offer-1'").run();
   const r = estimateFromEvidence(db, request({ hourlyFloor: 0 }));
-  // 3000 - 1500 - 40 - 300 - 430 - 150 - 150 = 430 per unit; 430 / 1500 = 28.7%.
+  // 3000 - 1500 - 40 - 300 - 430 - 150 - 150 = 430 per unit; 430 / 1500 is
+  // 28.67%, rounded down to 28.6% so a return never reads higher than it is.
   assert.equal(r.opportunity.unitProfit, 430);
-  assert.equal(r.opportunity.returnOnCost, 0.287);
+  assert.equal(r.opportunity.returnOnCost, 0.286);
   assert.ok(r.economics.contribution > 0);
   assert.equal(tierOf(r), "Watch");
   // Profit at a zero price is 1930: £5 profit needs 1430 or less and a 35%
@@ -780,4 +801,615 @@ test("routes publish the thresholds in force and validate overrides", async () =
   } finally {
     await api.close();
   }
+});
+
+// ---------------------------------------------------------------------------
+// Journey: a blank cost or time is never a free, instant trip (M6, qa:Q1).
+
+test("a blank journey cost or time fails closed; an entered 0 is accepted", () => {
+  const db = fixture();
+  const { journeyCost: _c, journeyMinutes: _m, ...noJourney } = request().costs;
+  const blank = estimateFromEvidence(db, request({ costs: noJourney }));
+  assert.equal(blank.journey.known, false);
+  assert.deepEqual(blank.journey.missing, ["journeyCost", "journeyMinutes"]);
+  // The figures are still shown, but the gate cannot rely on them.
+  assert.ok(blank.economics.contribution > 0);
+  assert.equal(blank.economics.costs.travel, 0);
+  assert.deepEqual(failing(blank), ["positive-contribution", "hourly-floor", "journey", "buying-thresholds"]);
+  assert.equal(blank.alert.eligible, false);
+  assert.equal(tierOf(blank), "Review");
+  assert.match(blank.opportunity.reasons[0], /Journey cost or time not entered/);
+  assert.equal(blank.opportunity.meetsThresholds, false);
+  assert.ok(blank.warnings.some((w) => /No return journey cost entered/.test(w)));
+  assert.ok(blank.warnings.some((w) => /No journey time entered/.test(w)));
+
+  // Only the time missing: the cost is known, so the contribution counts, but
+  // earnings per hour do not.
+  const { journeyMinutes: _x, ...noMinutes } = request().costs;
+  const timeless = estimateFromEvidence(db, request({ costs: noMinutes }));
+  assert.deepEqual(failing(timeless), ["hourly-floor", "journey", "buying-thresholds"]);
+  assert.deepEqual(timeless.journey.missing, ["journeyMinutes"]);
+
+  // Walking: a cost of 0 entered on purpose, with the time, is a real journey.
+  const walk = estimateFromEvidence(
+    db,
+    request({ costs: { ...request().costs, journeyCost: 0, journeyMinutes: 40 } }),
+  );
+  assert.equal(walk.journey.known, true);
+  assert.ok(walk.alert.checks.some((c) => c.id === "journey" && c.ok));
+  assert.equal(walk.alert.eligible, true);
+  assert.equal(tierOf(walk), "Priority 2");
+});
+
+// ---------------------------------------------------------------------------
+// Cash date: compared with the payout, not the sale (M8).
+
+test("the cash date is checked against the payout date from the saved goals", () => {
+  const db = fixture();
+  // Sold sample: 4 days to sell. Saturday 31 October: listed today, sold
+  // Wednesday 4 November, posted the same day, delivered 6th, paid out 8th.
+  const r = estimateFromEvidence(db, request({ cashNeededDays: undefined, cashNeededBy: "2026-11-05" }));
+  assert.equal(r.sample.daysToSell, 4);
+  assert.equal(r.cashNeededDays, 4);
+  assert.equal(r.payout.start, "2026-10-31");
+  assert.equal(r.payout.sold, "2026-11-04");
+  assert.equal(r.payout.date, "2026-11-08");
+  assert.equal(r.payout.days, 7);
+  assert.equal(r.payout.timing.status, "late");
+  assert.equal(r.payout.timing.daysLate, 3);
+  assert.match(r.payout.note, /payout on 2026-11-08/);
+  assert.equal(r.payout.goals.saved, false);
+  const check = r.alert.checks.find((c) => c.id === "days-to-sell");
+  assert.equal(check.ok, false);
+  assert.match(check.detail, /Expected payout in 7 days, after the date the cash is needed/);
+  assert.equal(r.alert.eligible, false);
+
+  // A number of days (API callers) is compared the same way.
+  const days = estimateFromEvidence(db, request({ cashNeededDays: 2 }));
+  assert.equal(days.payout.timing.status, "late");
+  assert.equal(days.payout.timing.daysLate, 5);
+  assert.equal(checkOk(days, "days-to-sell"), false);
+
+  // A payout on the day the cash is needed is in time.
+  const onTime = estimateFromEvidence(db, request({ cashNeededDays: undefined, cashNeededBy: "2026-11-08" }));
+  assert.equal(onTime.payout.timing.status, "on time");
+  assert.equal(checkOk(onTime, "days-to-sell"), true);
+  assert.equal(onTime.alert.eligible, true);
+
+  // No cash date: only a known time to sell is needed, and the payout date is
+  // still shown.
+  const free = estimateFromEvidence(db, request({ cashNeededDays: undefined }));
+  assert.equal(free.payout.date, "2026-11-08");
+  assert.equal(free.payout.timing.status, "unknown");
+  assert.equal(checkOk(free, "days-to-sell"), true);
+});
+
+test("saved goals move the payout; no dispatch days leave it unknown and fail the cash date", () => {
+  const db = memoryDb(evidenceTables, auditSchema, goalsSchema);
+  insert(db, offerRow());
+  ["s1", "s2", "s3"].forEach((id, i) => insert(db, saleRow(id, { price: 2800 + i * 200 })));
+  db.prepare("INSERT INTO permissions(provider, programme, display) VALUES('awin', 'Argos', 1)").run();
+  recordCheck(
+    db,
+    { barcode: BARCODE, retailer: "Argos", locality: "Leeds", method: "in_store", inStock: true, checkedAt: daysBefore(0) + "T09:00:00Z" },
+    { now: NOW },
+  );
+  const goals = {
+    targetType: "income",
+    monthlyTarget: 0,
+    dispatchDays: [6],
+    storageUnits: 10,
+    cashNeededBy: null,
+    daysToSell: 7,
+    deliveryDays: 2,
+    payoutDelayDays: 2,
+  };
+  saveGoals(db, goals, { now: NOW });
+  // Sold Wednesday 4th, posted only on Saturday 7th, delivered 9th, paid 11th.
+  const saturday = estimateFromEvidence(db, request({ cashNeededDays: undefined, cashNeededBy: "2026-11-10" }));
+  assert.equal(saturday.payout.goals.saved, true);
+  assert.deepEqual(saturday.payout.goals.dispatchDays, [6]);
+  assert.equal(saturday.payout.dispatch, "2026-11-07");
+  assert.equal(saturday.payout.date, "2026-11-11");
+  assert.equal(checkOk(saturday, "days-to-sell"), false);
+  assert.equal(checkOk(estimateFromEvidence(db, request({ cashNeededDays: 14 })), "days-to-sell"), true);
+
+  saveGoals(db, { ...goals, dispatchDays: [] }, { now: NOW });
+  const none = estimateFromEvidence(db, request({ cashNeededDays: 14 }));
+  assert.equal(none.payout.date, null);
+  assert.match(none.payout.note, /No dispatch days/);
+  const check = none.alert.checks.find((c) => c.id === "days-to-sell");
+  assert.equal(check.ok, false);
+  assert.match(check.detail, /Payout date unknown/);
+});
+
+// ---------------------------------------------------------------------------
+// Promotion and branch availability feed the tier (M17, P14).
+
+test("an unconfirmed promotion with no regular price goes to Review, not Priority 2", () => {
+  const db = fixture();
+  db.prepare("UPDATE research SET promotion = 'Clubcard price', price = 1000 WHERE source_id = 'offer-1'").run();
+  const r = estimateFromEvidence(db, request());
+  assert.equal(r.unitCost, 1000);
+  assert.equal(tierOf(r), "Review");
+  assert.ok(r.opportunity.reasons.some((x) => /promotion you have not confirmed/.test(x)));
+  assert.equal(r.alert.eligible, false);
+  const confirmed = estimateFromEvidence(db, request({ promotionEligible: true }));
+  assert.equal(tierOf(confirmed), "Priority 2");
+  assert.equal(confirmed.alert.eligible, true);
+});
+
+test("a recent check that found none on the shelf gives Review, never Priority 2", () => {
+  const db = fixture({ check: false });
+  recordCheck(
+    db,
+    { barcode: BARCODE, retailer: "Argos", locality: "Leeds", method: "in_store", inStock: false, checkedAt: daysBefore(0) + "T09:00:00Z" },
+    { now: NOW },
+  );
+  const r = estimateFromEvidence(db, request());
+  assert.equal(r.stock.availability, "out_of_stock");
+  assert.equal(tierOf(r), "Review");
+  assert.ok(r.opportunity.reasons.includes("Latest check found none on the shelf"));
+  // With no check at all the stock is unknown, which still allows Priority 2.
+  const unknown = estimateFromEvidence(fixture({ check: false }), request());
+  assert.equal(unknown.stock.availability, "unknown");
+  assert.equal(tierOf(unknown), "Priority 2");
+});
+
+test("without a locality no branch check can count, and the estimate says so", () => {
+  const db = fixture();
+  const r = estimateFromEvidence(db, request({ locality: undefined }));
+  assert.ok(r.warnings.some((w) => /No locality given/.test(w)));
+  assert.equal(r.stock.confirmed, false);
+  // With a locality, the warning is stockStatus's own reason.
+  const elsewhere = estimateFromEvidence(db, request({ locality: "York" }));
+  assert.ok(elsewhere.warnings.some((w) => /No availability check in York/.test(w)));
+  assert.equal(r.inputs.locality, null);
+});
+
+// ---------------------------------------------------------------------------
+// Category rules (P6).
+
+test("the category comes from the request, else from a clear title word", () => {
+  assert.equal(suggestCategory({ title: "Cotton crew-neck jumper, navy" }).id, "clothing");
+  assert.equal(suggestCategory({ title: "Yorkshire heather honey 340g" }).id, "food");
+  assert.equal(suggestCategory({ title: "Tefal Ingenio frying pan 28cm" }).id, "general");
+  assert.equal(suggestCategory({ title: "Laptop stand" }).id, "general");
+
+  const db = fixture();
+  const general = estimateFromEvidence(db, request());
+  assert.equal(general.category.id, "general");
+  assert.equal(general.category.chosen, "suggested");
+  assert.deepEqual(general.category.failures, []);
+  assert.equal(general.offer.suggestedCategory.id, "general");
+
+  db.prepare("UPDATE research SET title = 'Navy wool jumper' WHERE source_id = 'offer-1'").run();
+  const suggested = estimateFromEvidence(db, request());
+  assert.equal(suggested.category.id, "clothing");
+  assert.equal(suggested.category.chosen, "suggested");
+  const overridden = estimateFromEvidence(db, request({ category: "general" }));
+  assert.equal(overridden.category.id, "general");
+  assert.equal(overridden.category.chosen, "request");
+
+  for (const category of ["shoes", 1, "__proto__"])
+    assert.throws(
+      () => validateEstimateRequest(request({ category })),
+      (e) => e instanceof HttpError && e.status === 400,
+    );
+});
+
+test("clothing raises the returns allowance and needs a size", () => {
+  const db = fixture();
+  const r = estimateFromEvidence(db, request({ category: "clothing" }));
+  assert.equal(r.category.returnsRate, CATEGORY_RULES.clothing.minReturnsRate);
+  assert.equal(r.category.returnsRaised, true);
+  // 15% of the £30 sale per unit, two units.
+  assert.equal(r.economics.costs.returns, 2 * 450);
+  assert.ok(r.assumptions.some((a) => /Clothing returns allowance raised to 15%/.test(a)));
+  assert.deepEqual(r.category.failures, []);
+
+  db.prepare("UPDATE research SET size = NULL WHERE source_id = 'offer-1'").run();
+  const sizeless = estimateFromEvidence(db, request({ category: "clothing", offerAttributes: {} }));
+  assert.ok(sizeless.category.failures.some((f) => /needs a size/.test(f)));
+  assert.equal(tierOf(sizeless), "Review");
+  assert.equal(sizeless.alert.eligible, false);
+});
+
+test("food needs checked packaging and enough shelf life after the expected sale", () => {
+  const db = fixture();
+  const unchecked = estimateFromEvidence(db, request({ category: "food" }));
+  assert.equal(tierOf(unchecked), "Review");
+  assert.ok(unchecked.category.failures.some((f) => /packaging not checked/.test(f)));
+  assert.ok(unchecked.category.failures.some((f) => /Best-before date not recorded/.test(f)));
+  assert.equal(unchecked.alert.eligible, false);
+
+  // 4 days to sell: 33 days left leaves 29 after the sale, under 30.
+  const short = estimateFromEvidence(
+    db,
+    request({ category: "food", packagingChecked: true, bestBefore: "2026-12-03" }),
+  );
+  assert.deepEqual(short.category.failures, [
+    "Less than 30 days left on the best-before date after the expected sale",
+  ]);
+  const ok = estimateFromEvidence(
+    db,
+    request({ category: "food", packagingChecked: true, bestBefore: "2027-03-01" }),
+  );
+  assert.deepEqual(ok.category.failures, []);
+  assert.equal(tierOf(ok), "Priority 2");
+  assert.equal(ok.alert.eligible, true);
+  assert.throws(
+    () => validateEstimateRequest(request({ bestBefore: "soon" })),
+    (e) => e instanceof HttpError && e.status === 400,
+  );
+  assert.throws(
+    () => validateEstimateRequest(request({ packagingChecked: "yes" })),
+    (e) => e instanceof HttpError && e.status === 400,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Imported offers reach an exact match only once the operator confirms the
+// blank attributes (P3, qa:Q3, tests:Q1).
+
+const FIXTURES = new URL("./fixtures/sources/", import.meta.url);
+
+/** The Awin fixture feed and manual sales through the real adapters. */
+function importedFixture() {
+  const db = memoryDb(evidenceTables, auditSchema);
+  upsertResearch(db, "awin", awin(readFileSync(new URL("awin-sample.csv", FIXTURES), "utf8")), { now: NOW });
+  const sale = (reference, totalPence, soldDate, listedDate, seller) => ({
+    reference,
+    title: "Cotton crew neck jumper navy M",
+    variant: "Navy, medium",
+    barcode: "5012345678900",
+    size: "M",
+    pack: "1",
+    model: "CJ-200",
+    condition: "New",
+    currency: "GBP",
+    totalPence,
+    soldDate,
+    listedDate,
+    seller,
+  });
+  upsertResearch(
+    db,
+    "manual",
+    sold(
+      [
+        sale("ebay-1", 3400, "2026-10-20", "2026-10-15", "alpha"),
+        sale("ebay-2", 3600, "2026-10-22", "2026-10-18", "bravo"),
+        sale("ebay-3", 3500, "2026-10-25", "2026-10-21", "charlie"),
+      ],
+      { now: NOW },
+    ),
+    { now: NOW },
+  );
+  db.prepare("INSERT INTO permissions(provider, programme, display) VALUES('awin', 'Example Outfitters', 1)").run();
+  recordCheck(
+    db,
+    { barcode: "5012345678900", retailer: "Example Outfitters", locality: "Leeds", method: "in_store", inStock: true, checkedAt: daysBefore(0) + "T09:00:00Z" },
+    { now: NOW },
+  );
+  return db;
+}
+const importedRequest = (extra = {}) =>
+  request({
+    offer: { provider: "awin", sourceId: "1001" },
+    sales: ["ebay-1", "ebay-2", "ebay-3"].map((sourceId) => ({ provider: "manual", sourceId })),
+    weightKg: 0.4,
+    ...extra,
+  });
+
+test("an imported Awin offer matches imported sales only after the operator confirms its pack", () => {
+  const db = importedFixture();
+  const row = db.prepare("SELECT pack, model, size, condition FROM research WHERE provider = 'awin' AND source_id = '1001'").get();
+  assert.deepEqual({ ...row }, { pack: null, model: "cj-200", size: "m", condition: "new" });
+
+  // Fails closed without the confirmation: the feed never states the pack.
+  const before = estimateFromEvidence(db, importedRequest());
+  assert.equal(before.match, "research");
+  assert.equal(before.economics, null);
+  assert.equal(before.sample.count, 0);
+  assert.ok(before.sample.excluded.every((x) => /Pack not stated for the offer/.test(x.reason)));
+  assert.equal(before.alert.eligible, false);
+  assert.equal(candidatesFor(db, { provider: "awin", sourceId: "1001", now: NOW }).sales.every((s) => !s.confirmable), true);
+
+  // The operator looked at the item: one jumper in the pack.
+  const after = estimateFromEvidence(db, importedRequest({ offerAttributes: { pack: "single" } }));
+  assert.equal(after.match, "exact");
+  assert.equal(after.sample.count, 3);
+  assert.equal(after.sample.independent, 3);
+  assert.equal(after.offer.pack, "single");
+  assert.equal(after.offer.attributeSource.pack, "operator");
+  assert.equal(after.offer.attributeSource.model, "source");
+  assert.deepEqual(after.offer.operatorConfirmed, ["pack"]);
+  assert.deepEqual(after.offerAttributes.applied, { pack: "single" });
+  assert.ok(after.assumptions.some((a) => /You confirmed pack single after looking at the item/.test(a)));
+  // The feed names a jumper, so clothing rules apply: size M is stated and
+  // returns are raised to 15%.
+  assert.equal(after.category.id, "clothing");
+  assert.deepEqual(after.category.failures, []);
+  assert.equal(after.opportunity.tier, "Priority 2");
+  assert.deepEqual(failing(after), []);
+  assert.equal(after.alert.eligible, true);
+
+  const confirmable = candidatesFor(db, {
+    provider: "awin",
+    sourceId: "1001",
+    now: NOW,
+    offerAttributes: { pack: "1" },
+  });
+  assert.ok(confirmable.sales.every((s) => s.confirmable && s.status === "exact"));
+});
+
+test("operator attributes never override a stored value and must be recognised", () => {
+  const db = importedFixture();
+  const r = estimateFromEvidence(
+    db,
+    importedRequest({ offerAttributes: { pack: "1", model: "CJ-999", size: "L" } }),
+  );
+  // The feed states model CJ-200 and size M, so those are kept.
+  assert.equal(r.offer.model, "cj-200");
+  assert.equal(r.offer.size, "m");
+  assert.deepEqual(r.offerAttributes.applied, { pack: "1" });
+  assert.deepEqual(r.offerAttributes.ignored.map((x) => x.key), ["size", "model"]);
+  assert.ok(r.warnings.some((w) => /Model you confirmed \(CJ-999\) differs from the source \(cj-200\)/.test(w)));
+  assert.equal(r.match, "exact");
+  // The same value spelt differently is not a conflict.
+  assert.deepEqual(applyOfferAttributes({ model: "cj-200", kind: KIND.RETAIL }, { model: "CJ 200" }).ignored, []);
+
+  for (const offerAttributes of [
+    { pack: "several" },
+    { condition: "mint" },
+    { colour: "navy" },
+    { pack: { toString: 1 } },
+    JSON.parse('{"__proto__": {"pack": "1"}}'),
+    "pack 1",
+  ])
+    assert.throws(
+      () => validateEstimateRequest(importedRequest({ offerAttributes })),
+      (e) => e instanceof HttpError && e.status === 400,
+      JSON.stringify(offerAttributes),
+    );
+});
+
+test("an Open Prices offer, imported through the adapter, matches once pack and model are confirmed", () => {
+  const db = memoryDb(evidenceTables, auditSchema);
+  const page = JSON.parse(readFileSync(new URL("openprices-page.json", FIXTURES), "utf8"));
+  const rows = openPrices(page).map((r) => (r.id === 1 ? { ...r, day: daysBefore(1) } : r));
+  upsertObservations(db, rows, { now: NOW });
+  upsertResearch(
+    db,
+    "manual",
+    sold(
+      ["a", "b", "c"].map((seller, i) => ({
+        reference: "flapjack-" + seller,
+        title: "Vegan cherry coconut oat flapjack 120g",
+        variant: "120 g bar",
+        barcode: "5060006200021",
+        size: "120 g",
+        pack: "1",
+        model: "VCF-120",
+        condition: "new",
+        currency: "GBP",
+        totalPence: 900 + i * 50,
+        soldDate: daysBefore(5),
+        listedDate: daysBefore(8),
+        seller,
+      })),
+      { now: NOW },
+    ),
+    { now: NOW },
+  );
+  const offer = { provider: "openprices", sourceId: "1" };
+  const sales = ["a", "b", "c"].map((s) => ({ provider: "manual", sourceId: "flapjack-" + s }));
+  const before = estimateFromEvidence(db, request({ offer, sales }));
+  assert.equal(before.match, "research");
+  assert.ok(before.sample.excluded.every((x) => /Pack not stated for the offer; Model not stated for the offer/.test(x.reason)));
+  const after = estimateFromEvidence(
+    db,
+    request({ offer, sales, offerAttributes: { pack: "1", model: "VCF-120" } }),
+  );
+  assert.equal(after.match, "exact");
+  assert.equal(after.sample.count, 3);
+  assert.equal(after.offer.attributeSource.size, "source");
+  assert.deepEqual(after.offer.operatorConfirmed, ["pack", "model"]);
+  // A flapjack is food: the packaging and best-before checks apply.
+  assert.equal(after.category.id, "food");
+  assert.ok(after.category.failures.length > 0);
+});
+
+// ---------------------------------------------------------------------------
+// Sample sales mixed into live evidence (tests:Q8).
+
+test("a live offer whose sold sample includes a sample sale is never alert-eligible", () => {
+  const db = fixture();
+  insert(db, saleRow("sample-4", { price: 3100 }));
+  const sales = [...request().sales, { provider: "manual", sourceId: "sample-4" }];
+  const r = estimateFromEvidence(db, request({ sales }));
+  assert.equal(r.offer.sample, false);
+  assert.equal(r.sample.count, 4);
+  assert.ok(r.sample.used.some((u) => u.source_id === "sample-4"));
+  assert.equal(checkOk(r, "live-evidence"), false);
+  assert.equal(r.sampleData, true);
+  assert.equal(estimateFromEvidence(db, request()).sampleData, false);
+  assert.ok(r.warnings.includes("Sample data: illustrative only and never a buy alert"));
+  assert.equal(r.opportunity.tier, "Review");
+  assert.equal(r.alert.eligible, false);
+});
+
+// ---------------------------------------------------------------------------
+// Three prices side by side (P8).
+
+test("the claimed, observed and sold prices are reported apart with their classes and dates", () => {
+  const db = memoryDb(evidenceTables, auditSchema);
+  db.prepare(
+    `INSERT INTO observations(id, title, store, price, regular_price, discounted, discount_type, day, unit, quantity, barcode)
+ VALUES(77, 'Tefal pan', 'Argos', 1200, 1600, 1, 'LOYALTY_PROGRAM', ?, 'UNKNOWN', '28cm', ?)`,
+  ).run(daysBefore(1), BARCODE);
+  db.prepare(
+    `INSERT INTO observations(id, title, store, price, day, unit, quantity, barcode)
+ VALUES(78, 'Tefal pan', 'Argos', 1500, ?, 'UNKNOWN', '28cm', ?), (79, 'Tefal pan', 'Argos', 300, ?, 'KILOGRAM', '28cm', ?)`,
+  ).run(daysBefore(40), "0" + BARCODE, daysBefore(2), BARCODE);
+  insert(db, offerRow({ source_id: "argos-old", price: 1400, observed: daysBefore(20) }));
+  insert(db, saleRow("amz-1", { kind: KIND.AMAZON, provider: "keepa", price: 1999, observed: daysBefore(3) }));
+  ["s1", "s2", "s3"].forEach((id, i) => insert(db, saleRow(id, { price: 2800 + i * 200 })));
+  insert(db, saleRow("s4", { price: 5000 }));
+  const r = estimateFromEvidence(
+    db,
+    request({ offer: { provider: "openprices", sourceId: "77" }, offerAttributes: { pack: "1", model: "L15006" } }),
+  );
+  const p = r.prices;
+  assert.deepEqual(
+    { ...p.claimed, basis: undefined },
+    { evidenceClass: KIND.RETAIL, kind: "regular", price: 1600, observed: daysBefore(1), basis: undefined },
+  );
+  // Over time: the chosen observation, an older one and a retail offer; the
+  // per-kilogram price is left out.
+  assert.deepEqual(
+    p.observed.points.map((x) => [x.provider + ":" + x.sourceId, x.price, x.observed, x.evidenceClass, x.chosen]),
+    [
+      ["openprices:77", 1200, daysBefore(1), KIND.RETAIL, true],
+      ["awin:argos-old", 1400, daysBefore(20), KIND.RETAIL, false],
+      ["openprices:78", 1500, daysBefore(40), KIND.RETAIL, false],
+    ],
+  );
+  assert.equal(p.observed.lowest, 1200);
+  assert.equal(p.observed.highest, 1500);
+  assert.equal(p.observed.oldest, daysBefore(40));
+  // Amazon history is research context, never mixed with retail prices.
+  assert.equal(p.observed.amazon.evidenceClass, KIND.AMAZON);
+  assert.deepEqual(p.observed.amazon.points.map((x) => x.price), [1999]);
+  // Completed sales: the confirmed sample, with the unconfirmed exact sale counted apart.
+  assert.equal(p.sold.evidenceClass, KIND.SOLD);
+  assert.equal(p.sold.count, 3);
+  assert.equal(p.sold.lowerMedian, 3000);
+  assert.equal(p.sold.highest, 3200);
+  assert.equal(p.sold.exactNotInSample, 1);
+  // A source without a regular price claims nothing.
+  assert.equal(estimateFromEvidence(fixture(), request()).prices.claimed, null);
+});
+
+// ---------------------------------------------------------------------------
+// Inherited object keys are client errors (B4).
+
+test("rule keys named after Object.prototype members give 400, never 500", async () => {
+  for (const rules of [{ toString: 1 }, { constructor: 1 }, { hasOwnProperty: 1 }, JSON.parse('{"__proto__": 1}')])
+    assert.throws(
+      () => validateEstimateRequest(request({ rules })),
+      (e) => e instanceof HttpError && e.status === 400 && /rules can only set/.test(e.message),
+      JSON.stringify(rules),
+    );
+  const now = new Date().toISOString();
+  const db = fixture({ now });
+  const api = await serve(db, [researchRoutes]);
+  try {
+    for (const raw of ['{"toString": 1}', '{"constructor": 1}', '{"__proto__": 1}']) {
+      const body = { ...request({ now: undefined }), rules: JSON.parse(raw) };
+      const res = await api.call("POST", "/api/research/estimate", body);
+      assert.equal(res.status, 400, raw);
+    }
+    const attr = await api.call("POST", "/api/research/estimate", {
+      ...request({ now: undefined }),
+      offerAttributes: JSON.parse('{"__proto__": {"pack": "1"}}'),
+    });
+    assert.equal(attr.status, 400);
+    // The candidates route takes confirmed attributes from the query.
+    const bad = await api.call("GET", "/api/research/candidates?provider=awin&sourceId=offer-1&pack=lots");
+    assert.equal(bad.status, 400);
+    const ok = await api.call("GET", "/api/research/candidates?provider=awin&sourceId=offer-1&pack=2");
+    assert.equal(ok.status, 200);
+    assert.deepEqual(ok.body.offerAttributes.ignored.map((x) => x.key), ["pack"]);
+    const rules = await api.call("GET", "/api/research/rules");
+    assert.deepEqual(Object.keys(rules.body.categories), ["general", "clothing", "food"]);
+  } finally {
+    await api.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Claimed prices from a feed are claims, never the cost.
+
+test("an Awin previous price or RRP is the claimed price, never the regular price used as cost", () => {
+  const db = memoryDb(evidenceTables, auditSchema);
+  const feed = [
+    "aw_product_id,product_name,currency,search_price,ean,merchant_name,last_updated,condition,Fashion:size,model_number,product_price_old,rrp_price,promotional_text",
+    `5001,Tefal Ingenio frying pan 28cm,GBP,12.00,${BARCODE},Argos,${daysBefore(1)},new,28cm,L15006,18.00,20.00,Clubcard price`,
+    `5002,Tefal Ingenio frying pan 28cm,GBP,12.00,${BARCODE},Argos,${daysBefore(1)},new,28cm,L15006,,20.00,`,
+  ].join("\n");
+  upsertResearch(db, "awin", awin(feed), { now: NOW });
+  ["s1", "s2", "s3"].forEach((id, i) => insert(db, saleRow(id, { price: 2800 + i * 200 })));
+  const offer = (sourceId) => ({ provider: "awin", sourceId });
+  const was = estimateFromEvidence(db, request({ offer: offer("5001"), offerAttributes: { pack: "1" } }));
+  assert.equal(was.offer.wasPrice, 1800);
+  assert.equal(was.offer.rrpPrice, 2000);
+  assert.equal(was.offer.regularPrice, null);
+  assert.deepEqual(
+    { ...was.prices.claimed },
+    {
+      evidenceClass: KIND.RETAIL,
+      kind: "previous",
+      price: 1800,
+      observed: daysBefore(1),
+      basis: "Previous price claimed by the retailer in the Awin feed",
+    },
+  );
+  // An unconfirmed promotion is not costed at the claimed price: nobody pays
+  // a was-price, so the real cost stays unknown and the tier is Review.
+  assert.equal(was.unitCost, 1200);
+  assert.equal(was.opportunity.tier, "Review");
+  assert.ok(was.opportunity.reasons.some((x) => /promotion you have not confirmed/.test(x)));
+
+  const rrp = estimateFromEvidence(db, request({ offer: offer("5002"), offerAttributes: { pack: "1" } }));
+  assert.equal(rrp.prices.claimed.kind, "rrp");
+  assert.equal(rrp.prices.claimed.price, 2000);
+  assert.equal(rrp.prices.claimed.basis, "Recommended retail price in the Awin feed");
+  assert.equal(rrp.unitCost, 1200);
+});
+
+// ---------------------------------------------------------------------------
+// An item with no model number matches only once the operator confirms it.
+
+test("a no-model item reaches an exact match only when the operator confirms it has none", () => {
+  const db = memoryDb(evidenceTables, auditSchema);
+  const honey = "5000128104517";
+  db.prepare(
+    `INSERT INTO observations(id, title, store, place, city, price, day, unit, quantity, barcode)
+ VALUES(501, 'Yorkshire heather honey', 'Tesco', 'SE1 7PB', 'London', 750, ?, 'UNKNOWN', '340 g', ?)`,
+  ).run(daysBefore(1), honey);
+  const sale = (id, extra = {}) =>
+    saleRow(id, { barcode: honey, title: "Yorkshire heather honey 340g", size: "340g", model: null, price: 1900, ...extra });
+  ["h1", "h2", "h3"].forEach((id) => insert(db, sale(id)));
+  insert(db, sale("h-model", { model: "YH-340" }));
+  const offer = { provider: "openprices", sourceId: "501" };
+  const sales = ["h1", "h2", "h3", "h-model"].map((sourceId) => ({ provider: "manual", sourceId }));
+  const food = { category: "food", packagingChecked: true, bestBefore: "2027-06-01" };
+
+  // Pack alone is not enough: neither side states a model.
+  const packOnly = estimateFromEvidence(db, request({ offer, sales, ...food, offerAttributes: { pack: "1" } }));
+  assert.equal(packOnly.match, "research");
+  assert.ok(packOnly.sample.excluded.some((x) => /Model not stated for the offer/.test(x.reason)));
+
+  const none = estimateFromEvidence(
+    db,
+    request({ offer, sales, ...food, offerAttributes: { pack: "1", model: "none" } }),
+  );
+  assert.equal(none.match, "exact");
+  assert.equal(none.sample.count, 3);
+  assert.equal(none.offer.model, "none");
+  assert.equal(none.offer.attributeSource.model, "operator");
+  // A sale that states a model is still a different variant.
+  const stated = none.sample.excluded.find((x) => x.row.source_id === "h-model");
+  assert.match(stated.reason, /Model differs/);
+  assert.equal(none.category.id, "food");
+  assert.deepEqual(none.category.failures, []);
+
+  // The candidates view agrees once the same confirmation is given.
+  const c = candidatesFor(db, { ...offer, now: NOW, offerAttributes: { pack: "1", model: "none" } });
+  assert.deepEqual(
+    c.sales.map((x) => [x.row.source_id, x.status]).sort(),
+    [["h-model", "research"], ["h1", "exact"], ["h2", "exact"], ["h3", "exact"]],
+  );
 });

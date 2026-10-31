@@ -12,7 +12,9 @@ type Predicted = {
   cashRequired: number;
   activeMinutes: number;
   payoutBy: string | null;
+  sample?: boolean | null;
 };
+type Basis = "live" | "sample" | "unknown";
 type Trip = {
   id: number;
   label: string;
@@ -24,17 +26,23 @@ type Trip = {
   created: string;
   closed_at: string | null;
   legacy: boolean;
+  // Where the prediction came from; only "live" counts in potential proceeds
+  // and the prediction accuracy measures.
+  predictionBasis: Basis | null;
+  sample: boolean;
 };
 type TripRow = Trip & {
   entries: number;
   proofs: number;
   realisedContribution: number | null;
   householdSavings: number;
+  netHouseholdSaving: number | null;
   pendingPayout: number;
   unsoldUnits: number | null;
   complete: boolean;
   discrepancies: number;
   verified: boolean;
+  verificationMissing: string[];
 };
 type Entry = {
   id: number;
@@ -78,7 +86,7 @@ type Reconciliation = {
   realisedContribution: number | null;
   realisedHourly: number | null;
   pendingPayout: number;
-  pendingBasis: "units" | "amount" | "no payouts" | null;
+  pendingBasis: "units" | "dates" | "no payouts" | null;
   impliedFees: number | null;
   cashTiedUp: number;
   householdSavings: number;
@@ -98,7 +106,11 @@ type Reconciliation = {
   discrepancies: { code: string; message: string }[];
   verified: boolean;
   verificationMissing: string[];
+  // Receipt and payout entries whose own proof counts towards verification.
+  proofedEntries: number[];
   forecast: {
+    basis: Basis;
+    counted: boolean;
     final: boolean;
     predictedUnits: number;
     predictedProceeds: number;
@@ -118,9 +130,13 @@ type Detail = { trip: Trip; entries: Entry[]; proofs: Proof[]; reconciliation: R
 type Summary = {
   month: string;
   realisedEarnings: number;
+  // Net of household trip costs; the gross figure and costs are its parts.
   householdSavings: number;
+  householdSavingsGross: number;
+  householdTripCosts: number;
   pendingPayouts: number;
   potentialProceeds: number;
+  potentialProceedsLeftOut: { sample: number; basisUnknown: number; nothingBought: number };
   cashTiedUp: number;
   unsoldUnits: number;
   realisedMinutes: number;
@@ -143,6 +159,7 @@ type Metrics = {
     minutesTrips: number;
     meanAbsoluteMinutesError: number | null;
     meanMinutesError: number | null;
+    leftOut: { sample: number; basisUnknown: number; notTaken: number };
   };
   cash: { spend: number; payouts: number; verifiedPayouts: number; recoveryRate: number | null };
   payoutTrips: number;
@@ -315,20 +332,29 @@ function SummaryPanel({ version }: { version: number }) {
             />
             <Stat
               label="Household savings"
-              value={money(data.householdSavings)}
-              note="Savings against usual prices on things for your home. Not earnings."
+              value={signed(data.householdSavings)}
+              note={
+                "Saved against usual prices on things for your home, less those trips' costs such as travel and parking" +
+                (data.householdTripCosts > 0
+                  ? ": " + money(data.householdSavingsGross) + " saved, " + money(data.householdTripCosts) + " costs."
+                  : ".") +
+                " Not earnings."
+              }
             />
             <Stat
               label="Pending payouts"
               value={money(data.pendingPayouts)}
               tone="pending"
-              note="Sales recorded on open trips and not yet paid out. Not realised: the marketplace may still keep fees."
+              note="Sales on open trips that no payout covers yet. Not realised until the marketplace pays them out."
             />
             <Stat
               label="Potential proceeds"
               value={money(data.potentialProceeds)}
               tone="estimate"
-              note="Estimate only: predicted sales on open trips with no payout yet, less sales already recorded. Never counted as earned."
+              note={
+                "Estimate only, never counted as earned: live-evidence predictions for stock bought on open trips with no payout yet, less sales recorded." +
+                leftOutText(data.potentialProceedsLeftOut)
+              }
             />
             <Stat
               label="Cash tied up"
@@ -355,7 +381,9 @@ function SummaryPanel({ version }: { version: number }) {
             expenses and refunds dated this month, so stock bought in one month and paid out in the
             next shows as a cost first and income later. Only payouts count as earned. Pending
             payouts, potential proceeds, cash tied up and unsold units describe open trips as they
-            stand today, whatever the month.{" "}
+            stand today, whatever the month. Potential proceeds count a prediction only when it came
+            from live evidence and stock has been bought, scaled to the units bought. Household
+            savings are net of those trips&apos; own costs.{" "}
             {data.verifiedTrips + data.unverifiedTrips > 0 &&
               `This month: ${data.verifiedTrips} verified and ${data.unverifiedTrips} unverified resale trips. Verified earnings: ${signed(data.verifiedEarnings)}.`}
           </p>
@@ -363,6 +391,17 @@ function SummaryPanel({ version }: { version: number }) {
       )}
     </article>
   );
+}
+
+/** Names the open trips left out of potential proceeds, if any. */
+function leftOutText(left: Summary["potentialProceedsLeftOut"] | undefined) {
+  if (!left) return "";
+  const parts = [
+    left.sample && plural(left.sample, "trip") + " with a sample prediction",
+    left.basisUnknown && plural(left.basisUnknown, "trip") + " whose evidence is unknown",
+    left.nothingBought && plural(left.nothingBought, "trip") + " with nothing bought yet",
+  ].filter(Boolean);
+  return parts.length ? " Left out: " + parts.join(", ") + "." : "";
 }
 
 function TaxNote() {
@@ -458,6 +497,33 @@ function VerifiedBadge({ verified, kind, legacy }: { verified: boolean; kind: Ki
   );
 }
 
+function PredictionBadge({ basis }: { basis: Basis | null }) {
+  if (basis === "sample") return <span className="badge sample">Sample prediction</span>;
+  if (basis === "unknown") return <span className="badge sample">Evidence unknown</span>;
+  return null;
+}
+
+/** Why a trip's prediction is left out of potential proceeds and the measures. */
+function PredictionNotice({ trip }: { trip: Trip }) {
+  if (trip.predictionBasis === "sample")
+    return (
+      <p className="notice">
+        Sample prediction: this trip was tracked with figures from sample or illustrative data, not
+        live evidence. Its prediction is not counted in potential proceeds or in the prediction
+        accuracy measures. Receipts, sales and payouts you record here are real and count as usual.
+      </p>
+    );
+  if (trip.predictionBasis === "unknown")
+    return (
+      <p className="notice">
+        This trip was tracked without saying whether its prediction came from live evidence, so it
+        is treated like a sample: not counted in potential proceeds or in the prediction accuracy
+        measures. Receipts, sales and payouts you record here count as usual.
+      </p>
+    );
+  return null;
+}
+
 function TripList({
   trips,
   selected,
@@ -483,6 +549,7 @@ function TripList({
             <span className="badges">
               <span className={"badge" + (t.legacy ? " sample" : "")}>{SOURCE_LABEL[t.source]}</span>
               {t.kind === "household" && <span className="badge">Household</span>}
+              <PredictionBadge basis={t.predictionBasis} />
               <span className="badge">{t.status === "open" ? "Open" : "Closed"}</span>
               <VerifiedBadge verified={t.verified} kind={t.kind} legacy={t.legacy} />
               {t.discrepancies > 0 && <span className="badge warn">{t.discrepancies} to check</span>}
@@ -491,8 +558,8 @@ function TripList({
           <span>
             {t.kind === "household" ? (
               <>
-                {money(t.householdSavings)}
-                <span className="muted ledger-sub">saved</span>
+                {signed(t.netHouseholdSaving ?? t.householdSavings)}
+                <span className="muted ledger-sub">saved after costs</span>
               </>
             ) : (
               <>
@@ -543,7 +610,7 @@ function TripDetail({ id, version, onChanged }: { id: number; version: number; o
 
   async function remove(entry: Entry) {
     const proofNote = proofs.some((p) => p.entry_id === entry.id)
-      ? " Its proof stays stored but will no longer count towards verification."
+      ? " Its proof stays stored as a whole-trip proof, which does not count towards verification until you link it to another entry."
       : "";
     if (!window.confirm("Remove this " + TYPE_LABEL[entry.type].toLowerCase() + " entry?" + proofNote)) return;
     try {
@@ -568,6 +635,7 @@ function TripDetail({ id, version, onChanged }: { id: number; version: number; o
       <p className="badges">
         <span className={"badge" + (trip.legacy ? " sample" : "")}>{SOURCE_LABEL[trip.source]}</span>
         <span className="badge">{trip.kind === "household" ? "Household" : "Resale"}</span>
+        <PredictionBadge basis={trip.predictionBasis} />
         <span className="badge">
           {trip.status === "open" ? "Open" : "Closed " + (trip.closed_at || "").slice(0, 10)}
         </span>
@@ -581,15 +649,30 @@ function TripDetail({ id, version, onChanged }: { id: number; version: number; o
           reconciled or verified, and they are left out of the forecast measures.
         </p>
       )}
+      <PredictionNotice trip={trip} />
 
       {trip.kind === "resale" ? <ResaleFigures r={r} /> : <HouseholdFigures r={r} />}
       <Checklist r={r} />
       {trip.kind === "resale" && !trip.legacy && <Verification r={r} />}
       {r.forecast && <Forecast r={r} />}
 
-      <EntriesTable entries={entries} proofs={proofs} onRemove={editable ? remove : undefined} />
+      <EntriesTable
+        entries={entries}
+        proofs={proofs}
+        proofed={trip.kind === "resale" && !trip.legacy ? r.proofedEntries : null}
+        onRemove={editable ? remove : undefined}
+      />
       {editable && <EntryForm key={"entry-" + trip.id} trip={trip} onSaved={onChanged} />}
-      {!trip.legacy && <Proofs key={"proofs-" + trip.id} trip={trip} entries={entries} proofs={proofs} onSaved={onChanged} />}
+      {!trip.legacy && (
+        <Proofs
+          key={"proofs-" + trip.id}
+          trip={trip}
+          entries={entries}
+          proofs={proofs}
+          proofed={r.proofedEntries}
+          onSaved={onChanged}
+        />
+      )}
     </div>
   );
 }
@@ -643,10 +726,11 @@ function ResaleFigures({ r }: { r: Reconciliation }) {
             ? BLANK
             : "not paid out yet"}
       </dd>
-      {r.status !== "closed" && r.pendingBasis === "amount" && (
+      {r.pendingBasis === "dates" && r.impliedFees !== null && (
         <dd className="ledger-figures-note muted">
-          Pending payout is recorded sales minus payouts, so it still includes fees the marketplace
-          keeps. Give the units each payout covers to separate the two.
+          A payout without a unit count is taken to cover every sale recorded up to its date, so the
+          gap is shown as fees rather than as a payout still to come. If part of it is still to be
+          paid, give the units each payout covers.
         </dd>
       )}
     </dl>
@@ -732,16 +816,20 @@ function Verification({ r }: { r: Reconciliation }) {
         {r.verified ? <span className="badge ok">Verified</span> : <span className="badge warn">Unverified</span>}
       </b>
       <p className="muted">
-        A trade counts as verified only when the purchase receipt and the payout each have a proof
-        attached. Unverified figures still count in your totals, but the summary and measures say
-        how much is verified.
+        A trade is verified only when every purchase receipt and every payout has its own proof
+        attached to that entry, a sold listing is recorded and the records reconcile with nothing
+        left to check. Whole-trip proofs do not count. Unverified figures still count in your
+        totals, but the summary and measures say how much is verified.
       </p>
       {!r.verified && (
-        <ul className="checks">
-          {r.verificationMissing.map((m) => (
-            <li key={m}>{m}</li>
-          ))}
-        </ul>
+        <>
+          <b>Not verified because:</b>
+          <ul className="checks">
+            {r.verificationMissing.map((m) => (
+              <li key={m}>{m}</li>
+            ))}
+          </ul>
+        </>
       )}
     </div>
   );
@@ -753,7 +841,15 @@ function Forecast({ r }: { r: Reconciliation }) {
     <div>
       <b>
         Realised against predicted{" "}
-        {!f.final && <span className="badge">Provisional until the trip is closed</span>}
+        {f.basis === "sample" ? (
+          <span className="badge sample">Sample: not measured</span>
+        ) : f.basis !== "live" ? (
+          <span className="badge sample">Evidence unknown: not measured</span>
+        ) : !f.counted ? (
+          <span className="badge">Nothing recorded yet</span>
+        ) : (
+          !f.final && <span className="badge">Provisional until the trip is closed</span>
+        )}
       </b>
       <div className="scroll">
         <table>
@@ -804,7 +900,8 @@ function Forecast({ r }: { r: Reconciliation }) {
         </table>
       </div>
       <p className="muted">
-        Predicted proceeds were {money(f.predictedProceeds)}. Predictions are never counted as
+        Predicted proceeds were {money(f.predictedProceeds)}
+        {f.basis === "sample" ? ", from sample figures" : ""}. Predictions are never counted as
         realised cash.
         {f.payoutBy && " Payout was expected by " + longDate(f.payoutBy) + "."}
         {f.payoutLateDays !== null && " The last payout came " + plural(f.payoutLateDays, "day") + " later than that."}
@@ -816,14 +913,28 @@ function Forecast({ r }: { r: Reconciliation }) {
 function EntriesTable({
   entries,
   proofs,
+  proofed,
   onRemove,
 }: {
   entries: Entry[];
   proofs: Proof[];
+  // Receipt and payout ids whose proof counts; null when nothing is verified (household, legacy).
+  proofed: number[] | null;
   onRemove?: (entry: Entry) => void;
 }) {
   if (!entries.length) return <p className="muted">No entries yet.</p>;
   const proofCount = (id: number) => proofs.filter((p) => p.entry_id === id).length;
+  const proofBadge = (e: Entry) => {
+    const attached = proofCount(e.id) > 0;
+    if (!proofed || (e.type !== "receipt" && e.type !== "payout"))
+      return attached ? <span className="badge ok">Proof</span> : null;
+    if (proofed.includes(e.id)) return <span className="badge ok">Proof</span>;
+    return attached ? (
+      <span className="badge warn">Proof not counted</span>
+    ) : (
+      <span className="badge warn">Needs proof</span>
+    );
+  };
   return (
     <div className="scroll">
       <table>
@@ -843,7 +954,7 @@ function EntriesTable({
               <td>{longDate(e.occurred)}</td>
               <td>
                 {TYPE_LABEL[e.type]}
-                {proofCount(e.id) > 0 && <span className="badge ok">Proof</span>}
+                <span className="ledger-sub">{proofBadge(e)}</span>
               </td>
               <td className="num">{e.type === "work" ? hours(e.minutes || 0) : money(e.amount)}</td>
               <td className="num">{e.units ?? ""}</td>
@@ -977,19 +1088,41 @@ function readBase64(file: File): Promise<string> {
   });
 }
 
+/**
+ * The entry a new proof most likely supports: the newest receipt or payout
+ * still without a counting proof, then the newest receipt or payout, then the
+ * newest entry. "" (whole trip) only when the trip has no entries.
+ */
+function suggestedEntry(entries: Entry[], proofed: number[]): string {
+  const newest = (list: Entry[]) => (list.length ? list.reduce((a, b) => (b.id > a.id ? b : a)) : null);
+  const verifiable = entries.filter((e) => e.type === "receipt" || e.type === "payout");
+  const pick =
+    newest(verifiable.filter((e) => !proofed.includes(e.id))) ?? newest(verifiable) ?? newest(entries);
+  return pick ? String(pick.id) : "";
+}
+
+const WHOLE_TRIP = "Whole trip (does not count towards verification)";
+
 function Proofs({
   trip,
   entries,
   proofs,
+  proofed,
   onSaved,
 }: {
   trip: Trip;
   entries: Entry[];
   proofs: Proof[];
+  proofed: number[];
   onSaved: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  // null until the member picks an entry themselves; the suggestion follows
+  // new entries until then.
+  const [choice, setChoice] = useState<string | null>(null);
+  const resale = trip.kind === "resale";
   const entryName = useMemo(() => {
     const names = new Map<number, string>();
     for (const e of entries)
@@ -1003,6 +1136,10 @@ function Proofs({
       );
     return names;
   }, [entries]);
+  const typeOf = useMemo(() => new Map(entries.map((e) => [e.id, e.type])), [entries]);
+  const valid = (value: string | null) =>
+    value !== null && (value === "" || entries.some((e) => String(e.id) === value));
+  const supports = valid(choice) ? (choice as string) : suggestedEntry(entries, proofed);
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -1014,15 +1151,16 @@ function Proofs({
     if (file.size > MAX_PROOF_BYTES) return setError("Proof files must be 5 MB or smaller.");
     setBusy(true);
     setError("");
+    setNotice("");
     try {
-      const entryId = String(f.get("entryId") || "");
       await api("ledger/trips/" + trip.id + "/proofs", {
         label: String(f.get("label") || "").trim() || file.name.slice(0, 120),
         mediaType: file.type,
         data: await readBase64(file),
-        entryId: entryId ? Number(entryId) : undefined,
+        entryId: supports ? Number(supports) : undefined,
       });
       form.reset();
+      setChoice(null);
       onSaved();
     } catch (err) {
       setError((err as Error).message);
@@ -1030,6 +1168,54 @@ function Proofs({
       setBusy(false);
     }
   }
+
+  async function relink(proof: Proof, value: string) {
+    setError("");
+    setNotice("");
+    try {
+      await api("ledger/trips/" + trip.id + "/proofs/" + proof.id, { entryId: value ? Number(value) : null }, "PATCH");
+      setNotice('"' + proof.label + '" now supports ' + (value ? entryName.get(Number(value)) : "the whole trip") + ".");
+      onSaved();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function remove(proof: Proof) {
+    if (!window.confirm('Remove the proof "' + proof.label + '"? The stored file is deleted unless another proof uses the same file.'))
+      return;
+    setError("");
+    setNotice("");
+    try {
+      const result = await api<{ removed: { file: string } }>("ledger/trips/" + trip.id + "/proofs/" + proof.id, {}, "DELETE");
+      const file = result.removed.file;
+      setNotice(
+        '"' + proof.label + '" removed. ' +
+          (file === "in use"
+            ? "The stored file is kept because another proof uses the same file."
+            : file === "error"
+              ? "The stored file could not be deleted from this computer. Check the API log."
+              : "The stored file was deleted from this computer."),
+      );
+      onSaved();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  /** Whether a stored proof counts towards verification, in words. */
+  const standing = (p: Proof) => {
+    if (!resale) return null;
+    if (p.entry_id === null) return <span className="warn">Does not count towards verification</span>;
+    const type = typeOf.get(p.entry_id);
+    if (type !== "receipt" && type !== "payout")
+      return <span className="muted">Kept as evidence. Only receipt and payout proofs count towards verification.</span>;
+    return proofed.includes(p.entry_id) ? (
+      <span className="ok">Counts towards verification</span>
+    ) : (
+      <span className="warn">Does not count: the same file is attached to another receipt or payout</span>
+    );
+  };
 
   return (
     <fieldset>
@@ -1042,38 +1228,37 @@ function Proofs({
         properties, such as author and creation date, are kept.
       </p>
       {proofs.length > 0 && (
-        <div className="scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>Label</th>
-                <th>Supports</th>
-                <th>Type</th>
-                <th className="num">Size</th>
-                <th>Fingerprint</th>
-              </tr>
-            </thead>
-            <tbody>
-              {proofs.map((p) => (
-                <tr key={p.id}>
-                  <td>{p.label}</td>
-                  <td>{p.entry_id === null ? "Whole trip" : entryName.get(p.entry_id) || "Entry " + p.entry_id}</td>
-                  <td>
-                    {p.media_type === "application/pdf" ? "PDF" : p.media_type === "image/png" ? "PNG" : "JPEG"}
-                    <span className="muted ledger-sub">
-                      {p.metadataRemoved ? "Location data removed" : "Document properties kept"}
-                    </span>
-                  </td>
-                  <td className="num">{size(p.bytes)}</td>
-                  <td>
-                    <code title={p.sha256}>{p.sha256.slice(0, 12)}…</code>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <ul className="ledger-proofs">
+          {proofs.map((p) => (
+            <li key={p.id}>
+              <div className="ledger-proof-file">
+                <b>{p.label}</b>
+                <span className="muted">
+                  {p.media_type === "application/pdf" ? "PDF" : p.media_type === "image/png" ? "PNG" : "JPEG"},{" "}
+                  {size(p.bytes)}, {p.metadataRemoved ? "location data removed" : "document properties kept"}.
+                  Fingerprint <code title={p.sha256}>{p.sha256.slice(0, 12)}…</code>
+                </span>
+              </div>
+              <label className="ledger-proof-link">
+                Supports
+                <select value={p.entry_id === null ? "" : String(p.entry_id)} onChange={(e) => relink(p, e.target.value)}>
+                  {entries.map((e) => (
+                    <option key={e.id} value={e.id}>
+                      {entryName.get(e.id)}
+                    </option>
+                  ))}
+                  <option value="">{WHOLE_TRIP}</option>
+                </select>
+                {standing(p)}
+              </label>
+              <button type="button" className="ledger-remove" onClick={() => remove(p)}>
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
       )}
+      {notice && <p role="status">{notice}</p>}
       <form className="ledger-form" onSubmit={submit}>
         <label>
           File (JPEG, PNG or PDF, up to 5 MB)
@@ -1081,24 +1266,43 @@ function Proofs({
         </label>
         <label>
           Supports
-          <select name="entryId" defaultValue={entries.find((e) => e.type === "receipt")?.id ?? ""}>
+          <select name="entryId" value={supports} onChange={(e) => setChoice(e.target.value)}>
             {entries.map((e) => (
               <option key={e.id} value={e.id}>
                 {entryName.get(e.id)}
               </option>
             ))}
-            <option value="">Whole trip (does not count towards verification)</option>
+            <option value="">{WHOLE_TRIP}</option>
           </select>
         </label>
         <label>
           Label (optional)
           <input name="label" maxLength={120} placeholder="Till receipt" />
         </label>
+        {resale && (
+          <p className={"ledger-form-wide " + (supports === "" ? "warn" : "muted")}>
+            {supports !== ""
+              ? "Attach each document to the entry it records. Only proofs on the purchase receipt and payout entries count towards verification, one file per entry. Whole-trip proofs do not count."
+              : entries.length
+                ? "A whole-trip proof is kept with the trip but does not count towards verification. Choose the purchase receipt or payout entry this document records."
+                : "A whole-trip proof is kept with the trip but does not count towards verification. Add the purchase receipt or payout entry first, then attach its document to that entry."}
+          </p>
+        )}
         <button disabled={busy}>{busy ? "Storing" : "Store proof"}</button>
         {error && <p role="alert">{error}</p>}
       </form>
     </fieldset>
   );
+}
+
+function metricsLeftOut(left: Metrics["forecast"]["leftOut"] | undefined) {
+  if (!left) return "";
+  const parts = [
+    left.sample && plural(left.sample, "trip") + " with a sample prediction",
+    left.basisUnknown && plural(left.basisUnknown, "trip") + " whose evidence is unknown",
+    left.notTaken && plural(left.notTaken, "trip") + " closed with nothing recorded",
+  ].filter(Boolean);
+  return parts.length ? " Left out of the prediction measures: " + parts.join(", ") + "." : "";
 }
 
 function MetricsPanel({ version }: { version: number }) {
@@ -1128,13 +1332,14 @@ function MetricsPanel({ version }: { version: number }) {
         Closed resale trips only: {data.closedTrips} closed, {data.verifiedTrips} of them verified.
         {data.legacyTrips > 0 && ` Legacy totals (${data.legacyTrips}) are left out because they cannot be reconciled.`}{" "}
         Differences are realised minus predicted, so a negative figure means a trip did worse than
-        predicted.
+        predicted. Only predictions from live evidence on trips that were taken are measured.
+        {metricsLeftOut(f.leftOut)}
       </p>
       {data.closedTrips === 0 ? (
         <p className="muted">Close a trip to start measuring.</p>
       ) : (
         <dl className="ledger-figures">
-          <dt>Trips with a prediction</dt>
+          <dt>Trips with a measured prediction</dt>
           <dd>{f.trips}</dd>
           <dt>Average contribution error (size)</dt>
           <dd>{f.meanAbsoluteContributionError === null ? BLANK : money(f.meanAbsoluteContributionError)}</dd>

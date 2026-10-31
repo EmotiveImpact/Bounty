@@ -14,6 +14,10 @@ import {
   offerFreshness,
   similarTitles,
   soldSample,
+  clean,
+  sellerName,
+  NO_MODEL,
+  INDEPENDENCE_RULE,
 } from "./matching.mjs";
 
 // Appends a GS1 check digit to the data digits of a code.
@@ -314,4 +318,104 @@ test("offer freshness follows the seven-day rule and fails closed", () => {
   assert.equal(offerFreshness(null, now).freshness, "unknown");
   assert.equal(offerFreshness(null, now).expired, true);
   assert.equal(offerFreshness("2026-11-02", now).freshness, "future");
+});
+
+test("independent sellers are distinct named sellers, never listing ids", () => {
+  const now = "2026-10-31T12:00:00Z";
+  // One seller's three listings recorded by listing id only (the importer
+  // stores them as "listing:<id>") show no independence at all.
+  const byListing = [
+    sale("l1", { seller: "listing:110011" }),
+    sale("l2", { seller: "listing:110012" }),
+    sale("l3", { seller: "listing:110013" }),
+  ];
+  const keys = (rows) => rows.map((r) => "manual|" + r.source_id);
+  const s = soldSample(offer, byListing, { now, confirmed: keys(byListing) });
+  assert.equal(s.count, 3);
+  assert.equal(s.independent, 0, "listing ids are not sellers");
+  assert.equal(s.withoutSeller, 3);
+  assert.equal(s.independenceRule, INDEPENDENCE_RULE);
+  // The same seller named on one row and by listing id on another counts once.
+  const mixed = [
+    sale("m1", { seller: "Jumper Shop" }),
+    sale("m2", { seller: "listing:110012" }),
+    sale("m3", { seller: null }),
+    sale("m4", { seller: "jumper shop " }),
+    sale("m5", { seller: "other_seller" }),
+  ];
+  const m = soldSample(offer, mixed, { now, confirmed: keys(mixed) });
+  assert.equal(m.count, 5);
+  assert.equal(m.independent, 2);
+  assert.equal(m.withoutSeller, 2, "the unnamed and listing-only sales are left out, not counted once");
+  assert.equal(sellerName("listing:1"), null);
+  assert.equal(sellerName("  Shop  One "), "shop one");
+  assert.equal(sellerName({ toString: 1 }), null);
+});
+
+test("competition treats a listing id as an unnamed seller", () => {
+  const rows = [
+    { ...sale("a1"), kind: KIND.ASKING, price: 1800, seller: "listing:1" },
+    { ...sale("a2"), kind: KIND.ASKING, price: 1900, seller: "listing:1" },
+    { ...sale("a3"), kind: KIND.ASKING, price: 2000, seller: "named" },
+  ];
+  // Unknown sellers are assumed different for competition: the cautious side.
+  assert.equal(competition(offer, rows).sellers, 3);
+});
+
+test("non-text input never throws and is never a value", () => {
+  const hostile = [{ toString: 1 }, { valueOf: 1, toString: 1 }, [], ["5012345678900"], {}, true, Symbol("x"), () => 1, NaN, Infinity];
+  for (const value of hostile) {
+    const label = typeof value === "symbol" ? "symbol" : typeof value;
+    assert.equal(normaliseBarcode(value), null, label);
+    assert.equal(clean(value), null, label);
+    assert.equal(normaliseSize(value), null, label);
+    assert.equal(normaliseModel(value), null, label);
+    assert.equal(normaliseCondition(value), null, label);
+    assert.doesNotThrow(() => normalisePack(value), label);
+    assert.doesNotThrow(() => attributes({ barcode: value, size: value, pack: value, model: value, condition: value }), label);
+    assert.doesNotThrow(() => compare({ barcode: value, title: value }, { barcode: value, title: value }), label);
+  }
+  assert.equal(clean(12), "12");
+  assert.equal(normaliseBarcode(5449000000996), "05449000000996");
+  assert.equal(normaliseBarcode(-5449000000996), null);
+});
+
+test("placeholders are not stated; an explicit no-model is never inferred from them", () => {
+  for (const placeholder of ["n/a", "N/A", "-", "unknown", "TBC", "Model: n/a"])
+    assert.equal(normaliseModel(placeholder), null, placeholder);
+  for (const none of ["None", "No model", "no model number", "Not applicable", "Model: none"])
+    assert.equal(normaliseModel(none), NO_MODEL, none);
+  assert.equal(normaliseSize("n/a"), null);
+  assert.equal(normaliseSize("one size"), "one size");
+  const honey = { ...offer, size: "340g", model: "none" };
+  const sold = sale("h1", { size: "340 g", model: "No model" });
+  assert.equal(compare(honey, sold).status, "exact");
+  // A placeholder on both sides never makes a match.
+  const vague = compare({ ...offer, model: "n/a" }, sale("h2", { model: "N/A" }));
+  assert.equal(vague.status, "research");
+  assert.ok(vague.reasons.some((r) => r.startsWith("Model")), vague.reasons.join("; "));
+});
+
+test("an operator-confirmed no-model on the offer covers a sale that states no model", () => {
+  const honey = { ...offer, size: "340g", model: "none" };
+  // The sale states no model: with the offer confirmed as having none, it matches.
+  for (const model of [null, "", "n/a", "No model"]) {
+    const result = compare(honey, sale("h", { size: "340g", model }));
+    assert.equal(result.status, "exact", String(model));
+  }
+  const covered = compare(honey, sale("h3", { size: "340g", model: null }));
+  assert.ok(covered.reasons.some((r) => r.startsWith("No model number: confirmed")), covered.reasons.join("; "));
+  // A model on the sale against a confirmed no-model differs.
+  const modelled = compare(honey, sale("h4", { size: "340g", model: "HX-340" }));
+  assert.equal(modelled.status, "research");
+  assert.ok(modelled.reasons.includes("Model differs: offer none, sale hx340"), modelled.reasons.join("; "));
+  // A model on the offer against a sale that states none still fails.
+  const offerModel = compare({ ...honey, model: "HX-340" }, sale("h5", { size: "340g", model: "none" }));
+  assert.equal(offerModel.status, "research");
+  // No model stated on the offer: a sale saying "none" does not cover it.
+  const unstated = compare({ ...honey, model: null }, sale("h6", { size: "340g", model: "none" }));
+  assert.equal(unstated.status, "research");
+  assert.ok(unstated.reasons.includes("Model not stated for the offer"), unstated.reasons.join("; "));
+  // The other attributes are still required.
+  assert.equal(compare(honey, sale("h7", { size: null, model: null })).status, "research");
 });

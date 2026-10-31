@@ -10,7 +10,7 @@
 // describe the cleaned image. PDFs are stored unchanged: their document
 // properties (author, creation software, dates) are kept, and the UI says so.
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { stripMetadata } from "./metadata.mjs";
 
@@ -105,4 +105,22 @@ export function storeProof(dir, buffer, mediaType) {
   }
   chmodSync(file, 0o600);
   return { sha256, bytes, metadataRemoved };
+}
+
+/**
+ * Deletes the stored file for a fingerprint. Call it only once no proof
+ * record refers to that file any more (ledger.removeProof says so). The name
+ * must be a SHA-256 in lower-case hex, so nothing outside the proof directory
+ * can be reached. Returns "deleted", or "missing" when there was no file.
+ */
+export function deleteProofFile(dir, sha256) {
+  if (typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256))
+    throw new ProofError("Not a proof fingerprint");
+  try {
+    unlinkSync(join(dir, sha256));
+    return "deleted";
+  } catch (error) {
+    if (error.code === "ENOENT") return "missing";
+    throw error;
+  }
 }

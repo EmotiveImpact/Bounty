@@ -52,6 +52,7 @@ export const TIERS = Object.freeze([
 // opportunity goes to Review rather than being judged on its numbers.
 const EVIDENCE_CHECKS = new Set([
   "live-evidence",
+  "journey",
   "exact-match",
   "offer-fresh",
   "independent-sales",
@@ -65,14 +66,96 @@ const STOCK_CHECKS = new Set(["local-stock", "availability"]);
  * Profit per unit and return on purchase price. Profit per unit is the trip
  * contribution divided by units, so it already carries fees, postage,
  * packaging, the returns allowance and the unit's share of travel.
+ *
+ * returnOnCost is rounded down to three decimals, never up, so a return of
+ * 34.96% reads as 34.9% and fails a 35% minimum. Compare it with
+ * meetsReturn(), which works in whole pence.
  */
 export function unitReturns(economics) {
   if (!economics || !economics.units) return { unitProfit: null, returnOnCost: null };
   const unitProfit = Math.floor(economics.contribution / economics.units);
   const returnOnCost = economics.unitCost
-    ? Math.round((unitProfit / economics.unitCost) * 1000) / 1000
+    ? Math.floor((unitProfit / economics.unitCost) * 1000 + 1e-9) / 1000
     : null;
   return { unitProfit, returnOnCost };
+}
+
+/**
+ * True when profit per unit is at least minReturn of the purchase price,
+ * compared without rounding: 699p on a £20 unit is 34.95% and fails 35%.
+ */
+export function meetsReturn(unitProfit, unitCost, minReturn = OPPORTUNITY_RULES.minReturn) {
+  if (!Number.isFinite(unitProfit) || !Number.isFinite(unitCost) || unitCost <= 0) return false;
+  // Basis points keep the comparison in integers for thresholds such as 0.35.
+  return unitProfit * 10000 >= Math.round(minReturn * 10000) * unitCost;
+}
+
+// Category rules apply on top of the buying thresholds (PRD "Opportunity
+// rules"). Clothing needs size-specific demand and a higher returns
+// allowance; food needs weight, packaging and shelf-life checks. The
+// numbers are configuration and still to be confirmed by Edem.
+export const CATEGORY_RULES = Object.freeze({
+  general: Object.freeze({ id: "general", name: "General" }),
+  clothing: Object.freeze({
+    id: "clothing",
+    name: "Clothing",
+    minReturnsRate: 0.15, // returns allowance floor, as a share of the sale price
+    needsSize: true,
+  }),
+  food: Object.freeze({
+    id: "food",
+    name: "Food",
+    needsPackaging: true, // sealed, undamaged and allowed to be posted
+    minShelfLifeDays: 30, // left on the best-before date after the expected sale
+  }),
+});
+export const CATEGORY_IDS = Object.freeze(Object.keys(CATEGORY_RULES));
+
+/** The category rule for an id; unknown or missing ids are general. */
+export function categoryRule(id) {
+  return CATEGORY_RULES[id] || CATEGORY_RULES.general;
+}
+
+/** The returns allowance to use: the category floor or the member's figure. */
+export function categoryReturnsRate(category, returnsRate) {
+  const floor = categoryRule(category).minReturnsRate || 0;
+  const rate = Number.isFinite(returnsRate) ? returnsRate : 0;
+  return Math.max(rate, floor);
+}
+
+/**
+ * Category checks that fail closed. Returns the failures as reasons.
+ *  category          "general" | "clothing" | "food"
+ *  size              size attribute of the offer (clothing)
+ *  returnsRate       returns allowance used in the economics
+ *  packagingChecked  true once the packaging was checked (food)
+ *  bestBefore        ISO date on the pack (food)
+ *  daysToSell        expected days to sell, null when unknown
+ *  now               ISO time of the decision
+ */
+export function categoryChecks(input = {}) {
+  const rule = categoryRule(input.category);
+  const failures = [];
+  if (rule.needsSize && !(typeof input.size === "string" && input.size.trim()))
+    failures.push("Clothing needs a size, because demand and sales are size-specific");
+  if (rule.minReturnsRate && !(Number.isFinite(input.returnsRate) && input.returnsRate >= rule.minReturnsRate))
+    failures.push(
+      `Clothing needs a returns allowance of at least ${Math.round(rule.minReturnsRate * 100)}%`,
+    );
+  if (rule.needsPackaging && input.packagingChecked !== true)
+    failures.push("Food packaging not checked as sealed, undamaged and fit to post");
+  if (rule.minShelfLifeDays) {
+    const left = Date.parse(input.bestBefore) - Date.parse(input.now);
+    const days = Number.isFinite(left) ? Math.floor(left / 86400000) : null;
+    if (days === null) failures.push("Best-before date not recorded");
+    else if (!Number.isFinite(input.daysToSell))
+      failures.push("Shelf life cannot be checked without a known time to sell");
+    else if (days - input.daysToSell < rule.minShelfLifeDays)
+      failures.push(
+        `Less than ${rule.minShelfLifeDays} days left on the best-before date after the expected sale`,
+      );
+  }
+  return failures;
 }
 
 /**
@@ -86,7 +169,8 @@ export function targetPrice(economics, rules = OPPORTUNITY_RULES) {
   if (unitProfit === null) return null;
   const headroom = unitProfit + economics.unitCost; // profit at a zero price
   const byProfit = headroom - rules.minUnitProfit;
-  const byReturn = Math.floor(headroom / (1 + rules.minReturn));
+  const bp = Math.round(rules.minReturn * 10000); // basis points, integer maths
+  const byReturn = Math.floor((headroom * 10000) / (10000 + bp));
   const target = Math.min(byProfit, byReturn);
   return target >= rules.minUnitPrice ? target : null;
 }
@@ -122,6 +206,13 @@ export function hardFilters({ unitPrice, weightKg }, rules = OPPORTUNITY_RULES) 
  *               available units (0 to 1+), null when unknown
  *  resaleWeeksOfSupply  competing listings divided by sales per week, null
  *               when unknown
+ *  availability latest branch availability ("in_stock", "out_of_stock",
+ *               "unknown"); a check that found none is never Priority 2
+ *  promotionUnconfirmed  true when the unit price is a promotion or loyalty
+ *               price the member has not confirmed they qualify for and no
+ *               regular price is known, so the real cost is unknown
+ *  categoryFailures  categoryChecks(...) for the item; missing means the
+ *               category rules were not run, which fails closed
  *
  * Returns { tier, reasons, unitProfit, returnOnCost, targetPrice,
  * meetsThresholds, trialUnits }. meetsThresholds is true only for Priority 1
@@ -150,13 +241,19 @@ export function classifyOpportunity(input, rules = OPPORTUNITY_RULES) {
     ? failed(EVIDENCE_CHECKS)
     : ["No completed-sale price for this exact variant"];
   if (!checks.length) evidenceGaps.push("Evidence checks were not run");
+  if (input.promotionUnconfirmed === true)
+    evidenceGaps.push("Price depends on a promotion you have not confirmed, and the regular price is unknown");
+  if (Array.isArray(input.categoryFailures)) evidenceGaps.push(...input.categoryFailures);
+  else evidenceGaps.push("Category rules were not checked");
+  if (input.availability === "out_of_stock")
+    evidenceGaps.push("Latest check found none on the shelf");
   if (evidenceGaps.length) return result("Review", evidenceGaps);
 
   const short = [];
   if (unitProfit < rules.minUnitProfit)
     short.push(`Profit per unit below £${rules.minUnitProfit / 100}`);
-  if (returnOnCost === null || returnOnCost < rules.minReturn)
-    short.push(`Return below ${Math.round(rules.minReturn * 100)}% of purchase price`);
+  if (!meetsReturn(unitProfit, input.economics.unitCost, rules.minReturn))
+    short.push(`Return below ${Math.round(rules.minReturn * 1000) / 10}% of purchase price`);
   if (short.length) {
     const target = targetPrice(input.economics, rules);
     if (target === null)

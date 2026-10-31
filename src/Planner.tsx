@@ -2,10 +2,14 @@ import React, { useEffect, useState } from "react";
 import {
   api,
   hours,
+  loadMemberRules,
   loadProfile,
+  MemberRules,
   money,
   percent,
   Profile,
+  RuleKey as ApiRuleKey,
+  saveMemberRules,
   saveProfile,
   toPence,
 } from "./api";
@@ -58,22 +62,49 @@ export type Thresholds = {
   ok: boolean;
   failures: string[];
 };
+export type AccessNeed = { id: string; label: string; detail: string };
+export type Checked = { price: string | null; stock: string | null };
+export type Payout = {
+  sold: string | null;
+  dispatch: string | null;
+  delivered: string | null;
+  date: string | null;
+  note: string;
+};
+export type CashTiming = { status: "on time" | "late" | "unknown"; daysLate: number | null; note: string };
+type TripTiming = {
+  start: string;
+  daysToSell: number;
+  payout: Payout;
+  payoutDays: number | null;
+  cashNeededBy: string | null;
+  cashNeededDays: number | null;
+  cash: CashTiming;
+};
 type ModeSummary = {
   mode: string;
   carry: number;
   units: number;
   limit: string;
+  loadKg: number;
+  miles: number;
   travelCost: number;
+  parking: number;
   travelMinutes: number;
   cashRequired: number;
   contribution: number;
   hourly: number | null;
+  fareMissing: boolean;
   reason: string;
+  fits: boolean;
 };
+type Limit = "trial" | "quantity" | "demand" | "stock" | "carry" | "storage" | "cash";
 type Trip = {
   sku: string;
   name: string;
   variant: string;
+  category: string;
+  size: string | null;
   shop: string;
   area: string;
   miles: number;
@@ -84,17 +115,32 @@ type Trip = {
   stock: number;
   handlingMinutes: number;
   sales: number[];
+  salesPerWeek: number | null;
+  competingListings: number | null;
   sample: true;
   salePrice: number | null;
+  returnsRate: number;
+  categoryFailures: string[];
   transport: string;
   carry: number;
+  carryEntered: number;
   units: number;
-  limit: "quantity" | "stock" | "carry" | "storage" | "cash";
+  limit: Limit;
+  caps: Record<Limit, number>;
+  trialUnits: number;
+  afterTrial: number;
+  sellWindowWeeks: number;
   weightKg: number;
   journey: { mode: string; miles: number; cost: number; minutes: number };
+  fareMissing: boolean;
   economics: Economics;
   downside: { nothingSells: number; halfSellsUnits: number; halfSells: number };
   thresholds: Thresholds;
+  hardFilters: string[];
+  accessNeeds: AccessNeed[];
+  checked: Checked;
+  mainUncertainty: string;
+  timing: TripTiming | null;
   reason: string;
   fits: boolean;
   alert: { eligible: boolean; reasons: string[]; checks: Check[] };
@@ -104,24 +150,57 @@ type Trip = {
     current: ModeSummary;
     alternative: ModeSummary;
     difference: Record<string, number | null>;
+    timeSaved: number | null;
     assumptions: string[];
   };
 };
-export type RuleKey =
-  | "minUnitPrice"
-  | "maxUnitPrice"
-  | "maxWeightKg"
-  | "minUnitProfit"
-  | "minReturn"
-  | "trialUnits";
-export type Rules = Partial<Record<RuleKey, number>>;
+type Rejected = {
+  sku: string;
+  name: string;
+  variant: string;
+  shop: string;
+  area: string;
+  miles: number;
+  buy: number;
+  weight: number;
+  reasons: string[];
+  tier: string;
+  accessNeeds: AccessNeed[];
+};
+type DriveOption = {
+  sku: string;
+  name: string;
+  shop: string;
+  units: number;
+  loadKg: number;
+  contribution: number;
+  hourly: number | null;
+  reason: string;
+};
+type Drive = {
+  heading: string;
+  current: string;
+  alternative: string;
+  extra: DriveOption[];
+  lost: DriveOption[];
+};
+export type RuleKey = ApiRuleKey;
+export type Rules = MemberRules;
 type RulesInfo = {
   agreed: Record<RuleKey, number>;
   overrides: Rules;
   effective: Record<RuleKey, number>;
   ignored: { key: RuleKey; label: string; value: number; applied: number }[];
 };
-type PlanResponse = { sample: true; trips: Trip[]; rules: RulesInfo };
+type PlanResponse = {
+  sample: true;
+  trips: Trip[];
+  rejected: Rejected[];
+  drive: Drive;
+  timing: TripTiming | null;
+  accessNeeds: { id: string; label: string }[];
+  rules: RulesInfo;
+};
 
 /** Pence as pounds, saying "not known" rather than showing a dash. */
 export const pounds = (pence: number | null | undefined) =>
@@ -130,13 +209,25 @@ export const pounds = (pence: number | null | undefined) =>
     : money(pence);
 const signed = (pence: number | null) =>
   pence === null ? "not comparable" : (pence > 0 ? "+" : "") + money(pence);
+const signedNumber = (n: number | null, unit: string) =>
+  n === null ? "not comparable" : (n > 0 ? "+" : "") + n + unit;
 const perHour = (pence: number | null) => (pence === null ? "no trip" : money(pence) + " an hour");
 const perHourShort = (pence: number | null) => (pence === null ? "no trip" : money(pence) + "/h");
 const minutesText = (m: number) => m + " min";
+export const plural = (n: number, one: string, many = one + "s") => n + " " + (n === 1 ? one : many);
 
-// Member threshold overrides, kept in this browser. The server applies them
-// only where they are stricter than the agreed thresholds.
-const RULES_KEY = "bounty-rules";
+/** "13 days (payout expected 2026-11-13)", or why it is not known. */
+export function paymentText(payoutDays: number | null | undefined, date: string | null | undefined) {
+  if (payoutDays === null || payoutDays === undefined || !date) return "not known: no payout date can be scheduled";
+  return `${plural(payoutDays, "day")} (payout expected ${date})`;
+}
+/** When a price or stock check was made, or "never". */
+export const checkedText = (date: string | null) => (date ? date.slice(0, 10) : "never");
+
+// The member's stricter thresholds are shared with Research through api.ts
+// (one store for every tab). The server applies them only where they are
+// stricter than the agreed thresholds.
+export const loadRules = loadMemberRules;
 const RULE_INPUTS: {
   key: RuleKey;
   label: string;
@@ -150,34 +241,14 @@ const RULE_INPUTS: {
   { key: "minReturn", label: "Lowest return on purchase price (%)", unit: "percent", hint: "Higher is stricter" },
   { key: "trialUnits", label: "Trial batch for a first purchase (units)", unit: "units", hint: "Lower is stricter" },
 ];
-const RULE_KEYS = RULE_INPUTS.map((f) => f.key);
 
-export function loadRules(): Rules {
-  try {
-    const saved = JSON.parse(localStorage.getItem(RULES_KEY) || "{}");
-    const rules: Rules = {};
-    if (saved && typeof saved === "object")
-      for (const key of RULE_KEYS)
-        if (typeof saved[key] === "number" && Number.isFinite(saved[key])) rules[key] = saved[key];
-    return rules;
-  } catch {
-    return {};
-  }
-}
-function saveRules(rules: Rules) {
-  try {
-    localStorage.setItem(RULES_KEY, JSON.stringify(rules));
-  } catch {
-    /* storage unavailable: the thresholds last for this visit only */
-  }
-}
 function ruleText(key: RuleKey, value: number | undefined) {
   if (value === undefined) return "not set";
   const unit = RULE_INPUTS.find((f) => f.key === key)!.unit;
   if (unit === "pounds") return money(value);
   if (unit === "percent") return percent(value);
   if (unit === "kg") return value + " kg";
-  return value + (value === 1 ? " unit" : " units");
+  return plural(value, "unit");
 }
 const toDraft = (rules: Rules) =>
   Object.fromEntries(
@@ -190,11 +261,20 @@ const toDraft = (rules: Rules) =>
     }),
   ) as Record<RuleKey, string>;
 
+// The profile as saved in this browser. fareFree records that a fare of £0
+// was meant (a bus pass, for example), as opposed to a fare not entered.
+export type PlannerProfile = Profile & { fareFree?: boolean };
+
+/** True when travelling by public transport with no fare entered. */
+export const fareNotEntered = (p: PlannerProfile) =>
+  p.transport === "Public transport" && !(p.fare > 0) && p.fareFree !== true;
+
 /**
  * The profile as the API expects it: money in whole pence, rates as shares,
- * and the member's stricter thresholds.
+ * and the member's stricter thresholds. A fare of £0 is sent as null (not
+ * entered) unless the member said their travel is free.
  */
-export function planProfile(p: Profile, rules: Rules) {
+export function planProfile(p: PlannerProfile, rules: Rules) {
   return {
     area: p.area,
     budget: toPence(p.budget),
@@ -202,7 +282,7 @@ export function planProfile(p: Profile, rules: Rules) {
     transport: p.transport,
     carry: p.carry,
     quantity: p.quantity,
-    fare: toPence(p.fare),
+    fare: p.fare > 0 || p.fareFree === true ? toPence(p.fare) : null,
     perMile: Math.round(p.perMile),
     extra: toPence(p.extra),
     storage: p.storage,
@@ -242,13 +322,62 @@ export function TierBadge({ tier }: { tier: string }) {
   );
 }
 
-const LIMIT_TEXT: Record<Trip["limit"], string> = {
-  quantity: "your maximum units",
-  stock: "the stock on the shelf",
-  carry: "your carry limit",
-  storage: "your storage at home",
-  cash: "your available cash",
+/** Access-need labels as badges; the detail is the tooltip and screen-reader text. */
+export function AccessBadges({ needs }: { needs: AccessNeed[] }) {
+  return (
+    <>
+      {needs.map((n) => (
+        <span
+          key={n.id}
+          className={"badge planner-access" + (n.id === "widely-accessible" ? " open" : "")}
+          title={n.detail}
+        >
+          {n.label}
+          <span className="planner-sr">: {n.detail}</span>
+        </span>
+      ))}
+    </>
+  );
+}
+
+const limitText = (t: Trip) => {
+  const text: Record<Limit, string> = {
+    trial: `the trial batch of ${plural(t.trialUnits, "unit")} for a first purchase`,
+    quantity: "your maximum units",
+    demand: `expected demand: about ${t.salesPerWeek ?? "an unknown number of"} sales a week over ${plural(t.sellWindowWeeks, "week")}, less ${plural(t.competingListings ?? 0, "competing listing")}`,
+    stock: "the stock on the shelf",
+    carry: VEHICLES.has(t.transport)
+      ? `the ${t.carry} kg load limit by ${t.transport.toLowerCase()}`
+      : `your ${t.carry} kg load limit`,
+    storage: "your storage at home",
+    cash: "your available cash",
+  };
+  return text[t.limit];
 };
+
+// Access needs the member asked to hide, kept in this browser only.
+const ACCESS_KEY = "bounty-access-hide";
+function loadHidden(): string[] {
+  try {
+    const saved = JSON.parse(localStorage.getItem(ACCESS_KEY) || "[]");
+    return Array.isArray(saved) ? saved.filter((s) => typeof s === "string") : [];
+  } catch {
+    return [];
+  }
+}
+function saveHidden(ids: string[]) {
+  try {
+    localStorage.setItem(ACCESS_KEY, JSON.stringify(ids));
+  } catch {
+    /* storage unavailable: the filter lasts for this visit only */
+  }
+}
+const ACCESS_FILTERS: [string, string][] = [
+  ["vehicle-required", "Vehicle required"],
+  ["heavy-handling", "Heavy handling"],
+  ["limited-stock", "Limited local stock"],
+  ["specialist-storage", "Specialist storage"],
+];
 
 function NumberField({
   label,
@@ -263,7 +392,7 @@ function NumberField({
   onChange: (v: number) => void;
   step?: number | "any";
   min?: number;
-  note?: string;
+  note?: React.ReactNode;
 }) {
   return (
     <label>
@@ -285,15 +414,18 @@ function NumberField({
 const asPercent = (share: number) => (Number.isFinite(share) ? Math.round(share * 10000) / 100 : NaN);
 
 export default function Planner() {
-  const [profile, setProfile] = useState<Profile>(loadProfile);
-  const [rules, setRules] = useState<Rules>(loadRules);
+  const [profile, setProfile] = useState<PlannerProfile>(loadProfile);
+  const [rules, setRules] = useState<Rules>(loadMemberRules);
+  const [hidden, setHidden] = useState<string[]>(loadHidden);
   const [result, setResult] = useState<PlanResponse | null>(null);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState("");
-  const set = (patch: Partial<Profile>) => setProfile({ ...profile, ...patch });
+  const set = (patch: Partial<PlannerProfile>) => setProfile({ ...profile, ...patch });
   const problem = profileProblem(profile);
+  const noFare = fareNotEntered(profile);
 
   useEffect(() => saveProfile(profile), [profile]);
+  useEffect(() => saveHidden(hidden), [hidden]);
   useEffect(() => {
     if (problem) {
       setError(problem);
@@ -321,7 +453,10 @@ export default function Planner() {
     };
   }, [profile, rules, problem]);
 
-  const trips = result?.trips ?? [];
+  const all = result?.trips ?? [];
+  const isHidden = (t: { accessNeeds: AccessNeed[] }) => t.accessNeeds.some((n) => hidden.includes(n.id));
+  const trips = all.filter((t) => !isHidden(t));
+  const hiddenTrips = all.filter(isHidden);
   const trip = trips.find((t) => t.sku === selected) ?? trips[0];
 
   return (
@@ -348,6 +483,7 @@ export default function Planner() {
             label="Comfortable carry limit (kg)"
             value={profile.carry}
             onChange={(carry) => set({ carry })}
+            note={`What you can carry by hand. By car or van the load limit is the larger of this and 25 kg; by public transport, the smaller of this and 10 kg.`}
           />
           <NumberField
             label="Maximum units per trip"
@@ -355,6 +491,7 @@ export default function Planner() {
             step={1}
             min={1}
             onChange={(quantity) => set({ quantity })}
+            note="A first purchase of any item is still a small trial batch."
           />
           <NumberField
             label="Storage at home (units)"
@@ -370,6 +507,20 @@ export default function Planner() {
               onChange={(fare) => set({ fare })}
               note="Used when you travel by public transport."
             />
+            <label className="planner-check">
+              <input
+                type="checkbox"
+                checked={profile.fareFree === true}
+                onChange={(e) => set({ fareFree: e.target.checked })}
+              />
+              My public transport is free (for example a bus pass)
+            </label>
+            {noFare && (
+              <p className="notice warn" role="status">
+                Enter your return fare, or tick the box if your travel is free. Until then the
+                journey is costed as free and no trip is called a fit.
+              </p>
+            )}
             <NumberField
               label="Car or van cost per mile (p)"
               value={profile.perMile}
@@ -388,8 +539,8 @@ export default function Planner() {
             <legend>Your selling assumptions</legend>
             <p className="muted">
               These are your assumptions. The cautious sample defaults are a 13% marketplace fee plus
-              40p per item sold and a 5% returns allowance. Replace them with your own marketplace's
-              fees.
+              40p per item sold and a 5% returns allowance. Clothing always uses at least 15% for
+              returns. Replace them with your own marketplace's fees.
             </p>
             <NumberField
               label="Marketplace fee (% of the sale)"
@@ -408,6 +559,22 @@ export default function Planner() {
               onChange={(v) => set({ returnsRate: v / 100 })}
             />
           </fieldset>
+          <fieldset>
+            <legend>Access needs to avoid</legend>
+            <p className="muted">Hide trips with any need you tick.</p>
+            {ACCESS_FILTERS.map(([id, label]) => (
+              <label key={id} className="planner-check">
+                <input
+                  type="checkbox"
+                  checked={hidden.includes(id)}
+                  onChange={(e) =>
+                    setHidden(e.target.checked ? [...hidden, id] : hidden.filter((h) => h !== id))
+                  }
+                />
+                {label}
+              </label>
+            ))}
+          </fieldset>
         </aside>
         <section>
           <small>02 / RANKED OPPORTUNITIES</small>
@@ -417,6 +584,9 @@ export default function Planner() {
             earnings are simulated, so nothing here is ever a buy alert.
           </p>
           {error && <p role="alert">{error}</p>}
+          {result && !all.length && (
+            <p className="warn">No offer passes the price and weight limits for the shortlist.</p>
+          )}
           {trips.map((t) => (
             <button
               key={t.sku}
@@ -433,8 +603,20 @@ export default function Planner() {
                 <span className="planner-badges">
                   <span className="badge sample">Sample</span>
                   <TierBadge tier={t.opportunity.tier} />
+                  <AccessBadges needs={t.accessNeeds} />
                 </span>
-                <em className={t.fits ? "ok" : "warn"}>{t.reason}</em>
+                <em className={t.fits ? "ok" : "warn"}>
+                  {t.reason}
+                  {t.units ? `: ${plural(t.units, "unit")}` : ""}
+                </em>
+                <em>
+                  Price checked: {checkedText(t.checked.price)}. Stock checked:{" "}
+                  {checkedText(t.checked.stock)}. Main uncertainty: {t.mainUncertainty}.
+                </em>
+                <em>
+                  Time until payment:{" "}
+                  {t.units ? paymentText(t.timing?.payoutDays, t.timing?.payout.date) : "no trip"}
+                </em>
               </span>
               <span>
                 <b>{money(t.economics.contribution)}</b>
@@ -442,19 +624,46 @@ export default function Planner() {
               </span>
             </button>
           ))}
+          {hiddenTrips.length > 0 && (
+            <p className="muted">
+              Hidden by your access needs: {hiddenTrips.map((t) => t.name).join(", ")}. Untick a need
+              in the profile to show {hiddenTrips.length === 1 ? "it" : "them"}.
+            </p>
+          )}
+          {result && result.rejected.length > 0 && <RejectedList rejected={result.rejected} />}
           {trip && <TripView key={trip.sku} trip={trip} profile={profile} />}
+          {result && <DriveSummary drive={result.drive} />}
           <BasketsLink />
           <StricterThresholds
             rules={rules}
             info={result?.rules ?? null}
             onSave={(next) => {
-              saveRules(next);
+              saveMemberRules(next);
               setRules(next);
             }}
           />
         </section>
       </div>
     </div>
+  );
+}
+
+function RejectedList({ rejected }: { rejected: Rejected[] }) {
+  return (
+    <details className="planner-rejected">
+      <summary>Not shortlisted: {plural(rejected.length, "offer")} outside the price or weight limits</summary>
+      <ul>
+        {rejected.map((r) => (
+          <li key={r.sku}>
+            <b>{r.name}</b> at {r.shop} ({money(r.buy)}, {r.weight} kg): {r.reasons.join("; ")}.{" "}
+            <span className="planner-badges">
+              <span className="badge sample">Sample</span>
+              <AccessBadges needs={r.accessNeeds} />
+            </span>
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }
 
@@ -471,7 +680,7 @@ function Figures({ rows }: { rows: [string, React.ReactNode][] }) {
   );
 }
 
-function TripView({ trip: t, profile }: { trip: Trip; profile: Profile }) {
+function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile }) {
   const e = t.economics;
   const [ledger, setLedger] = useState({ busy: false, notice: "" });
   const failing = t.alert.checks.filter((c) => !c.ok).length;
@@ -490,6 +699,8 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: Profile }) {
           contribution: e.contribution,
           cashRequired: e.cashRequired,
           activeMinutes: e.activeMinutes,
+          ...(t.timing?.payout.date ? { payoutBy: t.timing.payout.date } : {}),
+          sample: true,
         },
       });
       setLedger({
@@ -497,7 +708,7 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: Profile }) {
         notice:
           "Tracked in the ledger as trip " +
           saved.id +
-          ". These are predictions from sample data, not realised cash: record receipts and payouts in Ledger.",
+          ". The predictions are sample figures: they never count as potential proceeds or in prediction accuracy. Record real receipts and payouts in Ledger.",
       });
     } catch (err) {
       setLedger({ busy: false, notice: "Could not track this trip: " + (err as Error).message });
@@ -512,19 +723,39 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: Profile }) {
         <span className="badge sample">Sample</span>
         <TierBadge tier={t.opportunity.tier} />
         <span className={t.fits ? "badge ok" : "badge warn"}>{t.reason}</span>
+        <AccessBadges needs={t.accessNeeds} />
       </p>
       <p>
         {t.variant} at {t.shop}, {t.miles} miles from the centre of {t.area}.{" "}
         {t.units
-          ? `${t.units} unit${t.units === 1 ? "" : "s"} (${t.weightKg} kg), limited by ${LIMIT_TEXT[t.limit]}. Return journey by ${t.journey.mode.toLowerCase()}: ${t.journey.miles} miles, ${t.journey.minutes} minutes.`
-          : `No units fit: limited by ${LIMIT_TEXT[t.limit]}.`}
+          ? `${plural(t.units, "unit")} (${t.weightKg} kg), limited by ${limitText(t)}. Return journey by ${t.journey.mode.toLowerCase()}: ${t.journey.miles} miles, ${t.journey.minutes} minutes.`
+          : `No units fit: limited by ${limitText(t)}.`}
       </p>
+      {t.units > 0 && t.afterTrial > t.units && t.limit === "trial" && (
+        <p className="muted">
+          A first purchase is a trial batch. Once a verified trade (receipt and payout) proves the
+          item, your other limits would allow {plural(t.afterTrial, "unit")}.
+        </p>
+      )}
+      {t.fareMissing && (
+        <p className="notice warn">
+          No public transport fare is entered, so this journey is costed as free and the trip is not
+          called a fit. Enter your return fare in the profile (or tick that your travel is free).
+        </p>
+      )}
       {t.reason === "Outside your area" && (
         <p className="notice">
           This shop is outside your area. Travel is measured from the centre of {t.area}, so the
           figures leave out your journey to get there.
         </p>
       )}
+      <p>
+        <strong>Access needs:</strong> {t.accessNeeds.map((n) => `${n.label} (${n.detail})`).join("; ")}.
+      </p>
+      <p>
+        <strong>Last checked:</strong> price {checkedText(t.checked.price)}, stock{" "}
+        {checkedText(t.checked.stock)}. <strong>Main uncertainty:</strong> {t.mainUncertainty}.
+      </p>
       <div className="grid2">
         <div>
           <h3>Money</h3>
@@ -533,10 +764,10 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: Profile }) {
               ["Cash required before payout", <strong key="c">{money(e.cashRequired)}</strong>],
               ["Stock", money(e.costs.stock)],
               ["Packaging", money(e.costs.packaging)],
-              ["Parcel costs", money(e.costs.postage)],
+              ["Parcel costs (illustrative)", money(e.costs.postage)],
               ["Marketplace fees", money(e.costs.fees)],
-              ["Returns allowance", money(e.costs.returns)],
-              ["Travel (one journey)", money(e.costs.travel)],
+              [`Returns allowance (${percent(t.returnsRate)})`, money(e.costs.returns)],
+              ["Travel (one journey)", t.fareMissing ? "fare not entered" : money(e.costs.travel)],
               ["Travel per unit", money(e.journeyPerUnit)],
               ["Proceeds if every unit sells (estimate)", money(e.proceeds)],
               ["Contribution", <strong key="p">{money(e.contribution)}</strong>],
@@ -549,6 +780,10 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: Profile }) {
             rows={[
               ["Active hours", hours(e.activeMinutes)],
               ["Earnings per hour", perHour(e.hourly)],
+              [
+                "Time until payment",
+                t.units ? paymentText(t.timing?.payoutDays, t.timing?.payout.date) : "no trip",
+              ],
               ["Loss if nothing sells", money(t.downside.nothingSells)],
               [
                 `If only ${t.downside.halfSellsUnits} of ${t.units} sell`,
@@ -561,6 +796,13 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: Profile }) {
           />
         </div>
       </div>
+      <p className="muted">
+        Active hours are your working time. Time until payment is when the cash comes back:{" "}
+        {t.timing
+          ? `${t.timing.payout.note} It uses your Goals assumptions (${plural(t.timing.daysToSell, "day")} to sell, your dispatch days, delivery and payout delay), not sold evidence for this item.`
+          : "set your selling rhythm in Goals to see it."}
+        {t.timing?.cashNeededBy ? " " + t.timing.cash.note : ""}
+      </p>
 
       <h3>Buying thresholds</h3>
       <p>
@@ -613,14 +855,17 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: Profile }) {
         </p>
         <p>
           Per unit: shelf price {money(t.buy)}, parcel {money(t.post)}, packaging {money(t.pack)},{" "}
-          {t.weight} kg. {t.stock} assumed on the shelf.
+          {t.weight} kg. {t.stock} assumed on the shelf. Modelled demand: about {t.salesPerWeek ?? "an unknown number of"}{" "}
+          sales a week and {t.competingListings ?? "an unknown number of"} competing listings, so about{" "}
+          {plural(t.caps.demand, "unit")} could sell in {plural(t.sellWindowWeeks, "week")}.
         </p>
         <p>
           Fees use your assumptions: {percent(profile.feeRate)} of the sale plus{" "}
-          {money(profile.feeFixed)} per item sold, and a {percent(profile.returnsRate)} returns
-          allowance. Contribution assumes every unit sells; the loss if nothing sells and the
-          half-sold figure show the downside. Postage is paid at dispatch, before the payout, so it
-          counts in the cash required.
+          {money(profile.feeFixed)} per item sold, and a {percent(t.returnsRate)} returns allowance
+          {t.returnsRate > profile.returnsRate ? " (the clothing minimum)" : ""}. Contribution
+          assumes every unit sells; the loss if nothing sells and the half-sold figure show the
+          downside. Postage is paid at dispatch, before the payout, so it counts in the cash
+          required.
         </p>
         <p>
           Time: a return journey of {t.journey.minutes} minutes, 10 minutes in the shop and{" "}
@@ -632,6 +877,12 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: Profile }) {
         Track this trip in the ledger
       </button>
       {!t.units && <p className="muted">No units fit, so there is nothing to track.</p>}
+      {t.units > 0 && (
+        <p className="muted">
+          A tracked sample trip is labelled sample in the Ledger, so its prediction never counts as
+          potential proceeds.
+        </p>
+      )}
       {ledger.notice && <p role="status">{ledger.notice}</p>}
     </article>
   );
@@ -641,16 +892,15 @@ function DriveComparison({ compare: c }: { compare: Trip["compare"] }) {
   const a = c.current;
   const b = c.alternative;
   const d = c.difference;
+  const travel = (s: ModeSummary) => (s.fareMissing ? "fare not entered" : money(s.travelCost));
   const rows: [string, string, string, string][] = [
-    ["Carry limit", a.carry + " kg", b.carry + " kg", ""],
-    ["Units", String(a.units), String(b.units), (d.units! > 0 ? "+" : "") + d.units],
-    ["Travel cost", money(a.travelCost), money(b.travelCost), signed(d.travelCost)],
-    [
-      "Travel time",
-      minutesText(a.travelMinutes),
-      minutesText(b.travelMinutes),
-      (d.travelMinutes! > 0 ? "+" : "") + d.travelMinutes + " min",
-    ],
+    ["Load limit", a.carry + " kg", b.carry + " kg", ""],
+    ["Units", String(a.units), String(b.units), signedNumber(d.units, "")],
+    ["Total load", a.loadKg + " kg", b.loadKg + " kg", signedNumber(d.loadKg, " kg")],
+    ["Mileage (return)", a.miles + " mi", b.miles + " mi", signedNumber(d.miles, " mi")],
+    ["Travel cost", travel(a), travel(b), signed(d.travelCost)],
+    ["Parking or tolls (in travel cost)", money(a.parking), money(b.parking), signed(d.parking)],
+    ["Travel time", minutesText(a.travelMinutes), minutesText(b.travelMinutes), signedNumber(d.travelMinutes, " min")],
     ["Cash required before payout", money(a.cashRequired), money(b.cashRequired), signed(d.cashRequired)],
     ["Contribution", money(a.contribution), money(b.contribution), signed(d.contribution)],
     ["Earnings per hour", perHourShort(a.hourly), perHourShort(b.hourly), signed(d.hourly)],
@@ -658,9 +908,17 @@ function DriveComparison({ compare: c }: { compare: Trip["compare"] }) {
   return (
     <>
       <h3>{c.heading}</h3>
-      {VEHICLES.has(a.mode) && (
-        <p>You already travel by {a.mode.toLowerCase()}, so this shows the same trip by public transport.</p>
-      )}
+      <p>
+        {VEHICLES.has(a.mode)
+          ? `You already travel by ${a.mode.toLowerCase()}, so this shows the same trip by public transport.`
+          : `Your ${a.mode.toLowerCase()} plan beside the same trip by car. Choosing Car as your transport shows exactly the car figures here.`}{" "}
+        {c.timeSaved !== null &&
+          (c.timeSaved > 0
+            ? `${b.mode} saves ${c.timeSaved} minutes of travel.`
+            : c.timeSaved < 0
+              ? `${b.mode} takes ${-c.timeSaved} minutes longer.`
+              : "Travel time is the same.")}
+      </p>
       <div className="scroll">
         <table className="planner-compare">
           <thead>
@@ -701,6 +959,51 @@ function DriveComparison({ compare: c }: { compare: Trip["compare"] }) {
         ))}
       </ul>
     </>
+  );
+}
+
+function DriveSummary({ drive }: { drive: Drive }) {
+  const line = (o: DriveOption) =>
+    `${o.name} at ${o.shop}: ${plural(o.units, "unit")}, ${o.loadKg} kg, ${money(o.contribution)}, ${perHour(o.hourly)}`;
+  return (
+    <article>
+      <small>WHAT CHANGES IF I {drive.alternative === "Car" ? "DRIVE" : "TAKE PUBLIC TRANSPORT"}?</small>
+      <h2>
+        {drive.alternative === "Car" ? "Extra opportunities by car" : "Opportunities by public transport"}
+      </h2>
+      {drive.extra.length ? (
+        <>
+          <p>
+            {drive.alternative === "Car"
+              ? "These fit your profile by car but not by " + drive.current.toLowerCase() + ":"
+              : "These fit by public transport but not by " + drive.current.toLowerCase() + ":"}
+          </p>
+          <ul>
+            {drive.extra.map((o) => (
+              <li key={o.sku}>{line(o)}</li>
+            ))}
+          </ul>
+        </>
+      ) : (
+        <p>
+          No further shortlisted trip fits your profile by {drive.alternative.toLowerCase()}. The trip
+          calculation above shows the figures for each trip both ways.
+        </p>
+      )}
+      {drive.lost.length > 0 && (
+        <>
+          <p>These fit now but would not by {drive.alternative.toLowerCase()}:</p>
+          <ul>
+            {drive.lost.map((o) => (
+              <li key={o.sku}>
+                {o.name} at {o.shop}: {o.reason}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      <p className="muted">Sample data: a comparison, never a buy alert.</p>
+    </article>
   );
 }
 
@@ -826,7 +1129,8 @@ function StricterThresholds({
       )}
       {notice && <p role="status">{notice}</p>}
       <p className="muted">
-        Saved in this browser only. They apply to the planner trips and the baskets in Goals.
+        Saved in this browser only. They apply to the planner trips, the baskets in Goals and the
+        Research desk.
       </p>
     </article>
   );

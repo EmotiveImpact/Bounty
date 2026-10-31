@@ -184,6 +184,30 @@ test("recordRun redacts credential values from errors and queries", () => {
   assert.throws(() => recordRun(db, { provider: "keepa", mode: "nightly" }), /Unknown run mode/);
 });
 
+test("recordRun redacts a raw credential value in the query and the error", () => {
+  const db = memoryDb(schema);
+  // No key= or Bearer prefix: only the redaction by value can catch these.
+  const env = { HOBNIGHT_API_KEY: "hob-raw-secret-9081", EBAY_ACCESS_TOKEN: "ebay-raw-token-4471" };
+  recordRun(
+    db,
+    {
+      provider: "hobnight",
+      mode: "lookup",
+      query: "milk hob-raw-secret-9081",
+      ok: false,
+      error: "Upstream said: token ebay-raw-token-4471 is not valid for hob-raw-secret-9081",
+    },
+    { env },
+  );
+  const stored = db.prepare("SELECT query, error FROM import_runs").get();
+  for (const value of Object.values(env)) {
+    assert.ok(!stored.query.includes(value), "query keeps " + value);
+    assert.ok(!stored.error.includes(value), "error keeps " + value);
+  }
+  assert.equal(stored.query, "milk [redacted]");
+  assert.match(stored.error, /token \[redacted\] is not valid for \[redacted\]/);
+});
+
 const hobnightBody = () => JSON.parse(fixture("hobnight-products.json"));
 
 test("lookup cache: a repeat reuses stored rows with no network call; --refresh fetches", async () => {
@@ -362,13 +386,49 @@ test("manual sales file import is all or nothing and recorded", () => {
   const now = at("2026-10-31T12:00:00Z");
   assert.throws(() => importFile(db, "sales", JSON.stringify([sale, { ...sale, reference: "r2", condition: "" }]), { now }), /index 1/);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM research").get().n, 0);
-  assert.deepEqual(importFile(db, "sales", JSON.stringify([sale]), { now }), { saved: 1, parsed: 1 });
+  assert.deepEqual(importFile(db, "sales", JSON.stringify([sale]), { now }), { saved: 1, parsed: 1, skipped: 0, withoutSeller: 0 });
   const row = db.prepare("SELECT * FROM research").get();
   assert.deepEqual([row.kind, row.price, row.shipping, row.seller, row.licence], [KIND.SOLD, 1085, 285, "a_seller", LICENCE.SELF]);
   assert.deepEqual(recentRuns(db).map((r) => r.ok), [true, false]);
   assert.throws(() => importFile(db, "sales", "not json", { now }), /not valid JSON/);
   assert.ok(isFixture(new URL("./fixtures/sources/awin-sample.csv", import.meta.url).pathname));
   assert.ok(!isFixture("/tmp/feed.csv"));
+});
+
+test("a sale with a total of 0 rejects the whole sales file instead of being skipped", () => {
+  const db = memoryDb(schema);
+  const sale = {
+    reference: "z1",
+    title: "Honey",
+    variant: "340g glass jar",
+    barcode: "12345670",
+    condition: "new",
+    currency: "GBP",
+    totalPence: 1085,
+    soldDate: "2026-10-12",
+  };
+  const now = at("2026-10-31T12:00:00Z");
+  const file = JSON.stringify([sale, { ...sale, reference: "z2", totalPence: 0 }]);
+  assert.throws(() => importFile(db, "sales", file, { now }), /index 1: totalPence must be a positive whole number/);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM research").get().n, 0, "nothing is saved");
+  const [run] = recentRuns(db);
+  assert.equal(run.ok, false);
+  assert.match(run.error, /index 1: totalPence/);
+  // Sales with no seller name, or only a listing id, are saved and counted
+  // as not showing independence.
+  const result = importFile(
+    db,
+    "sales",
+    JSON.stringify([sale, { ...sale, reference: "z3", listingId: "110011" }, { ...sale, reference: "z4", seller: "honey_shop" }]),
+    { now },
+  );
+  assert.deepEqual(result, { saved: 3, parsed: 3, skipped: 0, withoutSeller: 2 });
+});
+
+test("an Awin import reports the rows it skipped", () => {
+  const db = memoryDb(schema);
+  const feed = "aw_product_id,product_name,currency,search_price\n1,Kettle,GBP,24.50\n2,Free sample,GBP,0\n,No id,GBP,3.00\n";
+  assert.deepEqual(importFile(db, "awin", feed, { now: at(T0) }), { saved: 1, parsed: 3, skipped: 2, withoutSeller: 0 });
 });
 
 test("routes: /api/evidence returns rows and total and validates input", async () => {
@@ -426,13 +486,19 @@ test("routes: /api/sources and /api/observations", async () => {
   recordRun(db, { provider: "openprices", mode: "manual", started: T0, ok: true, rows: 3 });
   const previous = process.env.EBAY_ACCESS_TOKEN;
   process.env.EBAY_ACCESS_TOKEN = "route-secret-token";
+  // A failed lookup whose query and error echo the raw token (no key= or
+  // Bearer prefix), recorded with the server environment.
+  recordRun(db, { provider: "ebay", mode: "lookup", query: "jumper route-secret-token", started: T1, ok: false, error: "eBay rejected route-secret-token" });
   const api = await serve(db, [evidenceRoutes]);
   try {
     const sources = await api.call("GET", "/api/sources");
     assert.equal(sources.status, 200);
     assert.equal(sources.body.sources.length, 6);
-    assert.equal(sources.body.runs.length, 1);
+    assert.equal(sources.body.runs.length, 2);
     assert.ok(!JSON.stringify(sources.body).includes("route-secret-token"));
+    const failed = sources.body.runs.find((r) => r.provider === "ebay");
+    assert.deepEqual([failed.query, failed.error], ["jumper [redacted]", "eBay rejected [redacted]"]);
+    assert.equal(sources.body.sources.find((s) => s.provider === "ebay").lastError, "eBay rejected [redacted]");
     assert.equal(sources.body.sources.find((s) => s.provider === "ebay").status, "Credential configured");
     const obs = await api.call("GET", "/api/observations?barcode=5060108452137");
     assert.equal(obs.body.total, 1);

@@ -143,3 +143,39 @@
   padding: 2px 8px;
   font-size: 13px;
 }
+/* Stored proofs: one row each, wrapping on narrow screens. */
+.ledger-proofs {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0;
+}
+.ledger-proofs li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) auto;
+  gap: 4px 14px;
+  align-items: start;
+  padding: 8px 0;
+  border-bottom: 1px solid #dce0d6;
+}
+.ledger-proof-file {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ledger-proofs .ledger-proof-link {
+  margin: 0;
+}
+.ledger-proof-link select {
+  width: 100%;
+}
+.ledger-proofs .ledger-remove {
+  margin-top: 18px;
+}
+@media (max-width: 740px) {
+  .ledger-proofs li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ledger-proofs .ledger-remove {
+    margin-top: 0;
+    justify-self: start;
+  }
+}

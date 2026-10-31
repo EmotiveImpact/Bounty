@@ -31,14 +31,20 @@ export const LICENCE = Object.freeze({
 //            postage component of price when known. Null when unknown.
 // observed   Source date of the observation (not the import time).
 // listed     Sold only: when the sold listing started, for days-to-sell.
-// seller     Asking: seller id. Sold: seller or listing id used to count
-//            independent sales. Null means independence is unknown.
+// seller     Asking: seller id. Sold: the seller's name, used to count
+//            independent sales. Only a named seller counts; a listing id
+//            ("listing:<id>") is not a seller. Null means independence is
+//            unknown.
 // location   Branch or postcode when the source states one. Null means the
 //            branch is unknown, which never establishes local stock.
 // availability  As reported by the source; never treated as verified stock.
 // promotion  Promotion or loyalty condition attached to the price, if any.
 // size/pack/model/condition  Normalised lower-case match attributes; null when
 //            the source does not say. Matching fails closed on nulls.
+// was_price, rrp_price  Retail only: a previous price or recommended retail
+//            price the source claims (Awin product_price_old, rrp_price), in
+//            pence. Shown as a claimed price for comparison and never used
+//            as the cost of stock.
 export const RESEARCH_TABLE = `CREATE TABLE IF NOT EXISTS research (
  provider TEXT NOT NULL,
  source_id TEXT NOT NULL,
@@ -61,6 +67,8 @@ export const RESEARCH_TABLE = `CREATE TABLE IF NOT EXISTS research (
  seller TEXT,
  url TEXT,
  licence TEXT,
+ was_price INTEGER,
+ rrp_price INTEGER,
  imported TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
  first_imported TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
  PRIMARY KEY(provider, source_id)
@@ -69,7 +77,7 @@ export const RESEARCH_COLUMNS = Object.freeze([
   "provider", "source_id", "kind", "title", "barcode", "variant", "size",
   "pack", "model", "condition", "price", "shipping", "observed", "listed",
   "retailer", "location", "availability", "promotion", "seller", "url",
-  "licence", "imported", "first_imported",
+  "licence", "was_price", "rrp_price", "imported", "first_imported",
 ]);
 
 // Open Prices (ODbL) observations. Kept apart from licensed feed data.
@@ -138,6 +146,8 @@ export const OBSERVATION_TYPES = Object.freeze({
 export const RESEARCH_TYPES = Object.freeze({
   price: "INTEGER",
   shipping: "INTEGER",
+  was_price: "INTEGER",
+  rrp_price: "INTEGER",
   imported: "TEXT",
   first_imported: "TEXT",
 });
