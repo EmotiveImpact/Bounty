@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { api, loadMemberRules, money, toPence, type MemberRules, type RuleKey } from "./api";
+import { api, dateTime, loadMemberRules, money, toPence, type MemberRules, type RuleKey } from "./api";
 import "./Bounties.css";
 
 // Shapes returned by server/routes-bounties.mjs. Money is integer pence.
@@ -27,7 +27,8 @@ type Member = {
   alertsOptIn: boolean;
   alertLocalities: string[];
   created: string;
-  paid: { label: string; tier: Tier | null; until: string | null; current: boolean; note: string };
+  // until is the form value; untilLabel the UK date for people.
+  paid: { label: string; tier: Tier | null; until: string | null; untilLabel?: string | null; current: boolean; note: string };
   earned: { label: string; points: number; tier: Tier; next: (Tier & { pointsNeeded: number }) | null };
   release: { tier: Tier; via: "paid" | "earned"; offsetMinutes: number };
   rules: MemberRules;
@@ -65,15 +66,60 @@ type Claim = {
   endedAt: string | null;
   promotionConfirmed?: boolean;
   paused?: boolean;
+  // The member's own journey and the figures the claim was checked on.
+  journeyCost?: number | null;
+  journeyMinutes?: number | null;
+  figures?: OwnFigures | null;
 };
+type OwnFigures = {
+  units: number;
+  unitCost: number | null;
+  salePrice: number | null;
+  contribution: number | null;
+  unitProfit: number | null;
+  returnOnCost: number | null;
+  hourly: number | null;
+  cashRequired: number | null;
+  activeMinutes: number | null;
+  tier: string | null;
+};
+type TripCheck = { ok: boolean; units: number; journey: { cost: number; minutes: number }; figures: OwnFigures | null; reasons: string[] };
 type Check = { id: string; ok: boolean; detail: string };
-type Notice = { id: number; bountyId: number; kind: string; reason: string; message: string; created: string };
+// kind "stop" ("Don't make the trip") or "reopen"; superseded marks a stop
+// notice a later reopen replaced.
+type Notice = {
+  id: number;
+  bountyId: number;
+  kind: string;
+  reason: string;
+  message: string;
+  created: string;
+  superseded?: boolean;
+};
 type TripState = {
   state: "go" | "full" | "paused" | "out-of-stock" | "stock-unconfirmed" | "blocked" | "sample" | "expired" | "withdrawn";
   go: boolean;
   label: string;
   headline: string | null;
 };
+type Eligibility = {
+  condition: string;
+  firstOrder: boolean;
+  retailer: string;
+  answer: "qualifies" | "not" | "used" | null;
+  usedHere: boolean;
+  confirmed: boolean;
+  question: string;
+};
+type AccessNeed = { id: string; label: string; detail: string };
+type Category = {
+  applied: string | null;
+  chosen: string | null;
+  suggested: string | null;
+  reason: string | null;
+  warning: string | null;
+};
+type AttributeNote = { key: string; by: "operator" | "assumed"; text: string };
 type Opportunity = {
   tier: string | null;
   reasons: string[];
@@ -122,8 +168,24 @@ type Bounty = {
     canSend: boolean;
     blockers: string[];
     sent: number;
+    questions?: number;
     exposureLimit: number;
   };
+  // What the figures are for: the units one member can claim, with the
+  // operator's journey. hidden while a promotion price is not confirmed.
+  figures?: {
+    units: number | null;
+    claimable: number | null;
+    journey: { whose: string; cost: number | null; minutes: number | null; known: boolean } | null;
+    label: string | null;
+    hidden: boolean;
+    note: string | null;
+  } | null;
+  category?: Category | null;
+  attributes?: AttributeNote[];
+  checked?: { price: string | null; priceLabel: string | null; stock: string | null; stockLabel: string | null };
+  mainUncertainty?: string | null;
+  accessNeeds?: AccessNeed[];
   claimBlockers: string[];
   maxClaimUnits: number;
   opportunity: Opportunity | null;
@@ -154,6 +216,7 @@ type Bounty = {
     regularPrice: number | null;
     costedAt: "promotion" | "regular";
     needsMemberConfirmation: boolean;
+    firstOrder?: boolean;
     note: string | null;
   } | null;
   reports: { total: number; positive: number; negative: number; latestAt: string | null; items: Report[] };
@@ -185,6 +248,8 @@ type Bounty = {
     trial: { limit: number; held: number; allowance: number; proven: boolean };
     maxClaimUnits: number;
     promotion: { condition: string; confirmed: boolean; risk: string | null } | null;
+    eligibility?: Eligibility | null;
+    askedAt?: string | null;
     stop: string | null;
     notices: Notice[];
   } | null;
@@ -193,6 +258,7 @@ type Bounty = {
 type BountiesResponse = { bounties: Bounty[]; terms: Terms; rules: { maxClaimUnits: number; maxDays: number } };
 type Dispatch = {
   sent: { memberId: number; name: string; tier: Tier; label: string; reputation: number }[];
+  asked?: { memberId: number; name: string; condition: string | null }[];
   notAlerted: { memberId: number; name: string; reason: string }[];
   blockers: string[];
   exposure: { cap: number; remaining: number; limit: number; alreadySent: number; budget: number };
@@ -203,6 +269,15 @@ type Dispatch = {
 type MemberAlert = {
   id: number;
   bountyId: number;
+  // "question": the price is a promotion the member has not said they
+  // qualify for, so there are no figures yet.
+  kind?: "alert" | "question";
+  eligibility?: Eligibility | null;
+  questionNote?: string | null;
+  figures?: { label: string | null; units: number | null; unitProfit: number | null; contribution: number | null; cashRequired: number | null } | null;
+  category?: Category | null;
+  attributes?: AttributeNote[];
+  accessNeeds?: AccessNeed[];
   title: string;
   retailer: string | null;
   locality: string;
@@ -246,6 +321,8 @@ const percentDown = (share: number) =>
 const minutes = (m: number) =>
   m === 0 ? "at once" : m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+// Server text as a sentence with one full stop at the end.
+const sentence = (text: string) => text.replace(/[.\s]+$/, "") + ".";
 
 function readStorage(key: string): string | null {
   try {
@@ -291,7 +368,7 @@ function StatusBadges({ member }: { member: Member }) {
       {member.paid.tier ? (
         <span className={"badge paid" + (member.paid.current ? "" : " lapsed")}>
           Paid early access: {member.paid.tier.name}
-          {member.paid.until ? (member.paid.current ? ` to ${member.paid.until}` : " (ended)") : ""}
+          {member.paid.until ? (member.paid.current ? ` to ${member.paid.untilLabel ?? dateTime(member.paid.until)}` : " (ended)") : ""}
         </span>
       ) : (
         <span className="badge">No paid early access</span>
@@ -421,7 +498,7 @@ function MemberForm({
           </select>
         </label>
         <label>
-          Paid until (inclusive, UTC)
+          Last paid day (lasts to midnight UK time)
           <input type="date" value={paidUntil} disabled={!paidTier} onChange={(e) => setPaidUntil(e.target.value)} />
         </label>
         <small className="muted">
@@ -468,7 +545,7 @@ function MemberSummary({ member }: { member: Member }) {
         <dt>Paid status</dt>
         <dd>
           {member.paid.tier
-            ? `${member.paid.tier.name}${member.paid.until ? `, paid until ${member.paid.until}` : ", no end date recorded"}${member.paid.current ? "" : " (not current)"}`
+            ? `${member.paid.tier.name}${member.paid.until ? `, paid to the end of ${member.paid.untilLabel ?? dateTime(member.paid.until)} (UK time)` : ", no end date recorded"}${member.paid.current ? "" : " (not current)"}`
             : "None"}
         </dd>
         <dt>Earned status</dt>
@@ -810,17 +887,145 @@ function ReportForm({ bounty, memberId, onDone }: { bounty: Bounty; memberId: nu
   );
 }
 
+/**
+ * "Don't make the trip" and reopen notices. A stop notice a later reopen
+ * replaced is kept for the record but folded away, so the list never leads
+ * with a stop that no longer applies.
+ */
 function NoticeList({ notices }: { notices: Notice[] }) {
   if (!notices.length) return null;
+  const current = notices.filter((n) => !n.superseded);
+  const old = notices.length - current.length;
   return (
-    <ul className="stop-notices">
-      {notices.map((n) => (
-        <li key={n.id}>
-          <b>{n.message}</b>
-          <small className="muted">Sent {when(n.created)}</small>
-        </li>
+    <>
+      {current.length > 0 && (
+        <ul className="stop-notices">
+          {current.map((n) => (
+            <li key={n.id} className={n.kind === "reopen" ? "reopen" : undefined}>
+              <b>{n.message}</b>
+              <small className="muted">Sent {when(n.created)}</small>
+            </li>
+          ))}
+        </ul>
+      )}
+      {old > 0 && (
+        <small className="muted">
+          {old === 1 ? "1 earlier notice no longer applies" : `${old} earlier notices no longer apply`}: the bounty reopened after it.
+        </small>
+      )}
+    </>
+  );
+}
+
+/** Access needs as badges, with the detail for screen readers and on hover. */
+function AccessList({ needs }: { needs: AccessNeed[] | undefined }) {
+  if (!needs?.length) return null;
+  return (
+    <span className="access-needs">
+      {needs.map((n) => (
+        <span key={n.id} className={"badge access" + (n.id === "widely-accessible" ? " open" : "")} title={n.detail}>
+          {n.label}
+          <span className="sr-only">: {n.detail}</span>
+        </span>
       ))}
-    </ul>
+    </span>
+  );
+}
+
+/** The category whose rules the figures use, and any warning about it. */
+function CategoryLine({ category }: { category: Category | null | undefined }) {
+  if (!category?.applied) return null;
+  return (
+    <p className={category.warning ? "notice category-warning" : "muted category"}>
+      {category.warning
+        ? `Category: ${category.applied}. ${sentence(category.warning)}`
+        : `Costed under the ${category.applied.toLowerCase()} rules.`}
+    </p>
+  );
+}
+
+/**
+ * The promotion question for a member: whether they qualify for the price
+ * the figures use. A first-order or new-customer offer can also be answered
+ * "already used at this retailer", which stops such offers there.
+ */
+function EligibilityQuestion({
+  bountyId,
+  memberId,
+  eligibility,
+  onDone,
+}: {
+  bountyId: number;
+  memberId: number;
+  eligibility: Eligibility;
+  onDone: (m: string, err?: boolean) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const answer = async (value: "qualifies" | "not" | "used") => {
+    setBusy(true);
+    try {
+      const res = await api<{ message: string }>(`bounties/${bountyId}/eligibility`, { memberId, answer: value });
+      onDone(res.message);
+    } catch (err) {
+      onDone((err as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const said =
+    eligibility.usedHere
+      ? `You said you have already used a first-order offer at ${eligibility.retailer}.`
+      : eligibility.answer === "qualifies"
+        ? "You said you qualify."
+        : eligibility.answer === "not"
+          ? "You said you do not qualify."
+          : null;
+  return (
+    <div className="eligibility">
+      <p>{eligibility.question}</p>
+      {said && <small className="muted">{said} You can change your answer.</small>}
+      <span className="actions">
+        <button type="button" disabled={busy} onClick={() => answer("qualifies")}>
+          Yes, I qualify
+        </button>
+        <button type="button" disabled={busy} onClick={() => answer("not")}>
+          No
+        </button>
+        {eligibility.firstOrder && (
+          <button type="button" disabled={busy} onClick={() => answer("used")}>
+            I have already used one at {eligibility.retailer}
+          </button>
+        )}
+      </span>
+      <small className="muted">The figures are shown once you say you qualify. Nothing is claimed by answering.</small>
+    </div>
+  );
+}
+
+/** A member's own figures for a trip, in plain words. */
+function OwnFiguresText({ check }: { check: TripCheck }) {
+  const f = check.figures;
+  return (
+    <div className={check.ok ? "own-figures ok" : "own-figures warn"} role="status">
+      <b>
+        {check.ok ? "Your figures pass every check" : "Your figures fail"} for {plural(check.units, "unit")} with your journey (
+        {cash(check.journey.cost)}, {plural(check.journey.minutes, "minute")})
+      </b>
+      {f && (
+        <span>
+          Profit per unit {cash(f.unitProfit)}
+          {f.returnOnCost === null ? "" : `, return ${percentDown(f.returnOnCost)}`}
+          {f.hourly === null ? "" : `, ${cash(f.hourly)} an active hour`}, cash needed before payout {cash(f.cashRequired)}.
+        </span>
+      )}
+      {!check.ok && (
+        <ul className="checks">
+          {check.reasons.map((r) => (
+            <li key={r}>{r}</li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -828,6 +1033,10 @@ function ClaimPanel({ bounty, memberId, onDone }: { bounty: Bounty; memberId: nu
   const [units, setUnits] = useState("1");
   const [bought, setBought] = useState("");
   const [qualifies, setQualifies] = useState(false);
+  const [fare, setFare] = useState("");
+  const [travel, setTravel] = useState("");
+  const [own, setOwn] = useState<TripCheck | null>(null);
+  const [formError, setFormError] = useState("");
   const v = bounty.viewer;
   if (!v) return null;
   if (bounty.sample)
@@ -843,10 +1052,27 @@ function ClaimPanel({ bounty, memberId, onDone }: { bounty: Bounty; memberId: nu
       onDone((err as Error).message, true);
     }
   };
+  // The member's own return journey: both figures are required, and a blank
+  // is never counted as zero.
+  const journey = () => {
+    const cost = fare.trim() === "" ? NaN : Number(fare);
+    const mins = travel.trim() === "" ? NaN : Number(travel);
+    if (!Number.isFinite(cost) || cost < 0 || !Number.isInteger(mins) || mins < 0) {
+      setFormError(
+        "Enter your own return journey cost in pounds and time in minutes. A blank is never counted as zero: enter 0 only if the trip really costs nothing, for example walking.",
+      );
+      return null;
+    }
+    setFormError("");
+    return { journeyCost: toPence(cost), journeyMinutes: mins };
+  };
   const max = Math.max(1, v.maxClaimUnits);
   // While the shelf is reported empty (or the last branch check found none)
-  // nobody should be buying, so the panel stops offering "I bought them".
+  // nobody should set off, but a member who bought before that can still
+  // record the purchase.
   const emptyShelf = bounty.trip.state === "paused" || bounty.trip.state === "out-of-stock";
+  const eligibility = v.eligibility ?? null;
+  const confirmed = Boolean(eligibility?.confirmed || v.promotion?.confirmed);
   const reasons = [
     ...bounty.claimBlockers,
     ...v.blockers,
@@ -875,65 +1101,117 @@ function ClaimPanel({ bounty, memberId, onDone }: { bounty: Bounty; memberId: nu
           ? `Open to you since ${when(v.release.releaseAt)}`
           : `Opens for you at ${when(v.release.releaseAt)}`}{" "}
         ({v.release.tier.name}, via {v.release.via === "paid" ? "paid early access" : "earned reputation"})
-        {v.alertedAt ? `. You were alerted at ${when(v.alertedAt)}.` : "."}
+        {v.alertedAt ? `. You were alerted at ${when(v.alertedAt)}.` : v.askedAt ? `. You were asked about the price at ${when(v.askedAt)}.` : "."}
       </p>
+      {eligibility && !v.activeClaim && !eligibility.confirmed && (
+        <EligibilityQuestion bountyId={bounty.id} memberId={memberId} eligibility={eligibility} onDone={onDone} />
+      )}
       {v.activeClaim ? (
         <div className="row">
           <span>
             Your claim: {plural(v.activeClaim.units, "unit")} until {when(v.activeClaim.expiresAt)}
-            {v.activeClaim.paused ? " (paused: " + bounty.trip.label.toLowerCase() + ")" : ""}
+            {v.activeClaim.paused ? " (" + bounty.trip.label.toLowerCase() + ")" : ""}
             {v.activeClaim.promotionConfirmed && bounty.promotion ? `. You confirmed you qualify for: ${bounty.promotion.condition}.` : ""}
+            {v.activeClaim.figures && v.activeClaim.journeyCost !== null && v.activeClaim.journeyCost !== undefined
+              ? `. Checked on your journey (${cash(v.activeClaim.journeyCost)}, ${plural(v.activeClaim.journeyMinutes ?? 0, "minute")}): profit per unit ${cash(v.activeClaim.figures.unitProfit)}.`
+              : ""}
           </span>
           <span className="actions">
             <button type="button" onClick={() => run(() => api(`claims/${v.activeClaim!.id}/release`, { memberId }))}>
               Release
             </button>
-            {!emptyShelf && (
-              <>
-                <input
-                  aria-label="Units bought"
-                  type="number"
-                  min={1}
-                  max={v.activeClaim.units}
-                  placeholder={String(v.activeClaim.units)}
-                  value={bought}
-                  onChange={(e) => setBought(e.target.value)}
-                />
-                <button
-                  type="button"
-                  onClick={() =>
-                    run(() => api(`claims/${v.activeClaim!.id}/complete`, { memberId, units: bought ? Number(bought) : undefined }))
-                  }
-                >
-                  I bought them
-                </button>
-              </>
-            )}
+            <input
+              aria-label="Units bought"
+              type="number"
+              min={1}
+              max={v.activeClaim.units}
+              placeholder={String(v.activeClaim.units)}
+              value={bought}
+              onChange={(e) => setBought(e.target.value)}
+            />
+            <button
+              type="button"
+              onClick={() =>
+                run(() => api(`claims/${v.activeClaim!.id}/complete`, { memberId, units: bought ? Number(bought) : undefined }))
+              }
+            >
+              I bought them
+            </button>
           </span>
+          {emptyShelf && (
+            <small className="muted">
+              Only if you bought before the shelf was reported empty. Do not set off for this bounty now.
+            </small>
+          )}
         </div>
-      ) : v.canClaim ? (
+      ) : v.canClaim && !(eligibility && !eligibility.confirmed) ? (
         <form
           className="claim-form"
           onSubmit={(e) => {
             e.preventDefault();
+            const trip = journey();
+            if (!trip) return;
             run(() =>
               api(`bounties/${bounty.id}/claims`, {
                 memberId,
                 units: Number(units),
-                qualifiesForPromotion: v.promotion ? qualifies : undefined,
+                ...trip,
+                qualifiesForPromotion: v.promotion ? qualifies || confirmed : undefined,
               }),
             );
           }}
         >
           <label>
             Units to claim (your trial batch: up to {plural(max, "unit")} now)
-            <select value={units} onChange={(e) => setUnits(e.target.value)}>
+            <select
+              value={units}
+              onChange={(e) => {
+                setUnits(e.target.value);
+                setOwn(null);
+              }}
+            >
               {Array.from({ length: max }, (_, i) => String(i + 1)).map((n) => (
                 <option key={n}>{n}</option>
               ))}
             </select>
           </label>
-          {v.promotion && (
+          <div className="form-grid">
+            <label>
+              Your return journey cost (£)
+              <input
+                type="number"
+                min={0}
+                step={0.01}
+                inputMode="decimal"
+                value={fare}
+                onChange={(e) => {
+                  setFare(e.target.value);
+                  setOwn(null);
+                }}
+                required
+              />
+            </label>
+            <label>
+              Your journey time there and back (minutes)
+              <input
+                type="number"
+                min={0}
+                step={1}
+                inputMode="numeric"
+                value={travel}
+                onChange={(e) => {
+                  setTravel(e.target.value);
+                  setOwn(null);
+                }}
+                required
+              />
+            </label>
+          </div>
+          <small className="muted">
+            The card's figures use the operator's journey. Your claim is checked again at the units you claim with your own
+            journey and thresholds, and refused if it fails.
+          </small>
+          {v.promotion && !confirmed && (
             <div className="promotion">
               <label className="inline">
                 <input type="checkbox" checked={qualifies} onChange={(e) => setQualifies(e.target.checked)} required />
@@ -942,9 +1220,32 @@ function ClaimPanel({ bounty, memberId, onDone }: { bounty: Bounty; memberId: nu
               {v.promotion.risk && <small className="muted">{v.promotion.risk}</small>}
             </div>
           )}
-          <button type="submit">Claim</button>
+          {formError && <p role="alert">{formError}</p>}
+          {own && <OwnFiguresText check={own} />}
+          <span className="actions">
+            <button
+              type="button"
+              onClick={async () => {
+                const trip = journey();
+                if (!trip) return;
+                try {
+                  const res = await api<{ check: TripCheck }>(`bounties/${bounty.id}/claim-check`, {
+                    memberId,
+                    units: Number(units),
+                    ...trip,
+                  });
+                  setOwn(res.check);
+                } catch (err) {
+                  setFormError((err as Error).message);
+                }
+              }}
+            >
+              Check my figures
+            </button>
+            <button type="submit">Claim</button>
+          </span>
         </form>
-      ) : (
+      ) : v.canClaim ? null : (
         <ul className="checks">
           {reasons.map((r) => (
             <li key={r}>{r}</li>
@@ -1029,6 +1330,11 @@ function BountyCard({
           )}
         </div>
       </div>
+      {!bounty.sample && bounty.accessNeeds?.length ? (
+        <div className="access-line">
+          <small className="muted">Access needs:</small> <AccessList needs={bounty.accessNeeds} />
+        </div>
+      ) : null}
       <p className="terms">{bounty.sample ? bounty.terms.sample : bounty.terms.buyAndResell}</p>
       {!trip.go && !bounty.sample && trip.headline && bounty.status === "open" && (
         <p className="stop" role="status">
@@ -1038,6 +1344,7 @@ function BountyCard({
       {bounty.validation?.warning && <p className="notice prevalidation">{bounty.validation.warning}</p>}
       {bounty.display.label && <p className="notice">{bounty.display.label}</p>}
       {bounty.promotion?.note && <p className="notice">{bounty.promotion.note}</p>}
+      {!bounty.sample && <CategoryLine category={bounty.category} />}
       <dl className="facts">
         <Fact label="Retailer and locality">
           {bounty.retailer ?? "Not shown"}, {bounty.locality}
@@ -1052,6 +1359,21 @@ function BountyCard({
           {!trip.go && bounty.status === "open" && bounty.remaining > 0 ? ", none claimable while " + trip.label.toLowerCase() : ""}
         </Fact>
         <Fact label="Shelf">{shelfText(bounty)}</Fact>
+        {bounty.checked && !bounty.sample && (
+          <Fact label="Last checked">
+            {[bounty.checked.priceLabel, bounty.checked.stockLabel].filter(Boolean).join(". ")}.
+          </Fact>
+        )}
+        {bounty.mainUncertainty && <Fact label="Main uncertainty">{bounty.mainUncertainty}</Fact>}
+        {bounty.attributes?.length ? (
+          <Fact label="Exact match">
+            <ul className="match-notes">
+              {bounty.attributes.map((a) => (
+                <li key={a.key}>{a.text}</li>
+              ))}
+            </ul>
+          </Fact>
+        ) : null}
       </dl>
       {bounty.capBasis?.notes?.length ? (
         <ul className="muted cap-notes">
@@ -1109,12 +1431,14 @@ function BountyCard({
         </div>
       )}
 
+      {bounty.figures?.hidden && bounty.figures.note && <p className="notice">{bounty.figures.note}</p>}
       {e && (
         <details>
           <summary>
-            {bounty.sample ? "Illustrative figures" : "Estimate"} for {plural(e.units, "unit")} (checked{" "}
+            {bounty.sample ? "Illustrative figures" : "Figures"} for {plural(e.units, "unit")} (checked{" "}
             {when(bounty.estimate?.checkedAt)})
           </summary>
+          {bounty.figures?.label && <p className="muted figures-label">{bounty.figures.label}</p>}
           <dl className="facts">
             <Fact label="Cash required before payout">{cash(e.cashRequired)}</Fact>
             <Fact label="Purchase price per unit">
@@ -1166,8 +1490,9 @@ function BountyCard({
             <p className="ok">Every check passes now and the cap has room.</p>
           )}
           <small className="muted">
-            {plural(bounty.alert.sent, "alert")} sent. Exposure limit now: {plural(bounty.alert.exposureLimit, "alert")} in
-            total (two per unit left under the cap).
+            {plural(bounty.alert.sent, "alert")} sent
+            {bounty.alert.questions ? `, and ${plural(bounty.alert.questions, "member")} asked whether they qualify for the price` : ""}.
+            Exposure limit now: {plural(bounty.alert.exposureLimit, "alert")} in total (two per unit left under the cap).
           </small>
         </details>
       )}
@@ -1244,6 +1569,7 @@ function BountyCard({
                       <th>Member</th>
                       <th className="num">Units</th>
                       <th>Status</th>
+                      <th>Their journey</th>
                       <th>Lapses</th>
                     </tr>
                   </thead>
@@ -1256,6 +1582,11 @@ function BountyCard({
                           {c.status}
                           {c.paused ? " (paused)" : ""}
                           {c.promotionConfirmed ? ", confirmed promotion" : ""}
+                        </td>
+                        <td>
+                          {c.journeyCost === null || c.journeyCost === undefined
+                            ? "not recorded"
+                            : `${cash(c.journeyCost)}, ${plural(c.journeyMinutes ?? 0, "minute")}${c.figures ? `; ${cash(c.figures.unitProfit)} a unit` : ""}`}
                         </td>
                         <td>{c.status === "active" ? when(c.expiresAt) : ""}</td>
                       </tr>
@@ -1275,8 +1606,13 @@ function BountyCard({
                       const res = await api<Dispatch>(`bounties/${bounty.id}/alerts`, {});
                       setDispatch(res);
                       done(
-                        res.sent.length
-                          ? `Alerted ${plural(res.sent.length, "member")}.`
+                        res.sent.length || res.asked?.length
+                          ? [
+                              res.sent.length ? `Alerted ${plural(res.sent.length, "member")}.` : "",
+                              res.asked?.length ? `Asked ${plural(res.asked.length, "member")} whether they qualify for the price.` : "",
+                            ]
+                              .filter(Boolean)
+                              .join(" ")
                           : res.blockers.length
                             ? "No alerts sent."
                             : "No members due an alert right now.",
@@ -1317,6 +1653,15 @@ function BountyCard({
                   ))}
                 </ul>
               )}
+              {dispatch.asked && dispatch.asked.length > 0 && (
+                <ul className="checks">
+                  {dispatch.asked.map((q) => (
+                    <li key={q.memberId}>
+                      {q.name}: asked whether they qualify for the price, with no figures until they say they do
+                    </li>
+                  ))}
+                </ul>
+              )}
               {dispatch.notAlerted.length > 0 && (
                 <ul className="muted">
                   {dispatch.notAlerted.map((n) => (
@@ -1345,10 +1690,11 @@ function BountyCard({
   );
 }
 
-function AlertInbox({ memberId, refresh }: { memberId: number; refresh: number }) {
+function AlertInbox({ memberId, refresh, onChanged }: { memberId: number; refresh: number; onChanged: () => void }) {
   const [alerts, setAlerts] = useState<MemberAlert[] | null>(null);
   const [stops, setStops] = useState<Notice[]>([]);
   const [notice, setNotice] = useState("");
+  const [message, setMessage] = useState({ text: "", error: false });
   useEffect(() => {
     api<{ alerts: MemberAlert[]; stopNotices?: Notice[]; notice: string }>(`members/${memberId}/alerts`)
       .then((r) => {
@@ -1362,6 +1708,10 @@ function AlertInbox({ memberId, refresh }: { memberId: number; refresh: number }
   const alerted = new Set(alerts.map((a) => a.bountyId));
   // Notices for bounties the member claimed without an alert.
   const others = stops.filter((n) => !alerted.has(n.bountyId));
+  const answered = (text: string, error = false) => {
+    setMessage({ text, error });
+    onChanged();
+  };
   return (
     <div>
       <h3>Your alerts</h3>
@@ -1374,12 +1724,39 @@ function AlertInbox({ memberId, refresh }: { memberId: number; refresh: number }
               {a.locality}
               {a.sponsored && <span className="badge sponsored">Sponsored by {a.sponsor}</span>}
               <span className={"badge " + (a.trip.state === "go" ? "ok" : "warn")}>{a.trip.label}</span>
+              {a.kind === "question" && <span className="badge warn">Question about the price</span>}
               {a.trip.headline && !a.trip.go && <span className="stop">{a.trip.headline}</span>}
+              {a.kind === "question" && a.eligibility && !a.eligibility.confirmed && !a.eligibility.usedHere && a.eligibility.answer !== "not" ? (
+                <EligibilityQuestion bountyId={a.bountyId} memberId={memberId} eligibility={a.eligibility} onDone={answered} />
+              ) : null}
+              {a.questionNote && <small className="muted">{a.questionNote}</small>}
+              {a.figures?.label && (
+                <small className="muted">
+                  {a.figures.label} Profit per unit {cash(a.figures.unitProfit)}.
+                </small>
+              )}
               {a.promotion && <small className="muted">{a.promotion.note}</small>}
+              {a.category?.applied && (
+                <small className="muted">
+                  {a.category.warning
+                    ? `Category: ${a.category.applied}. ${sentence(a.category.warning)}`
+                    : `Costed under the ${a.category.applied.toLowerCase()} rules.`}
+                </small>
+              )}
+              {a.attributes?.map((n) => (
+                <small key={n.key} className="muted">
+                  {n.text}.
+                </small>
+              ))}
+              {a.accessNeeds?.length ? (
+                <span className="access-line">
+                  <small className="muted">Access needs:</small> <AccessList needs={a.accessNeeds} />
+                </span>
+              ) : null}
               {a.warning && <small className="muted">{a.warning}</small>}
               <NoticeList notices={a.notices} />
               <small className="muted">
-                Alerted {when(a.created)}, {a.label}
+                {a.kind === "question" ? "Asked" : "Alerted"} {when(a.created)}, {a.label}
                 {a.tier ? ` (${a.tier.name})` : ""}
               </small>
             </li>
@@ -1388,6 +1765,7 @@ function AlertInbox({ memberId, refresh }: { memberId: number; refresh: number }
       ) : (
         <p className="muted">No alerts yet.</p>
       )}
+      <Message text={message.text} error={message.error} />
       <small className="muted">{notice}</small>
     </div>
   );
@@ -1505,7 +1883,7 @@ export default function Bounties() {
             </details>
           </article>
           <article>
-            <AlertInbox memberId={me.id} refresh={refresh} />
+            <AlertInbox memberId={me.id} refresh={refresh} onChanged={load} />
           </article>
         </div>
       )}

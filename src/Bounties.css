@@ -242,3 +242,83 @@ label.inline {
     padding-bottom: 0;
   }
 }
+/* Round two: access needs, reopen notices, figures, eligibility. */
+.bounties .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.access-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  margin: 2px 0 6px;
+}
+.access-needs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.badge.access {
+  background: #f1e6c8;
+  color: #5b4510;
+}
+.badge.access.open {
+  background: #dcebd9;
+  color: #1d4939;
+}
+.stop-notices li.reopen {
+  border-left-color: #1d4939;
+  background: #e3f0e4;
+}
+.stop-notices li.reopen b {
+  color: #1d4939;
+}
+.category-warning {
+  border-left: 4px solid #8a6d10;
+}
+.match-notes {
+  margin: 0;
+  padding-left: 18px;
+}
+.figures-label {
+  font-size: 13px;
+  margin: 4px 0;
+}
+.eligibility {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #c7d0c4;
+  border-left: 4px solid #8a6d10;
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 8px 0;
+  max-width: 640px;
+}
+.eligibility p {
+  margin: 0;
+}
+.eligibility .actions button {
+  white-space: normal;
+  text-align: left;
+}
+.own-figures {
+  display: grid;
+  gap: 2px;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 14px;
+}
+.own-figures.ok {
+  background: #e3f0e4;
+}
+.own-figures.warn {
+  background: #fbeae6;
+}
+.alert-list li > small.muted {
+  display: block;
+}

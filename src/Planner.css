@@ -167,3 +167,12 @@ h3 .badge {
     flex-wrap: wrap;
   }
 }
+/* A field that is not used (for example the fare when travel is free). */
+.planner input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.planner input::placeholder {
+  color: inherit;
+  opacity: 0.6;
+}

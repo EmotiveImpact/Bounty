@@ -4,22 +4,23 @@ import {
   ACCESS_NEEDS,
   CAR_BOOT_KG,
   HAND_CARRY_KG,
-  QUANTITY_RULES,
   REASONS,
   defaults,
-  demandUnits,
   describeRules,
   journeyFor,
   loadLimit,
+  missingInputs,
+  offerDemand,
   offers,
   plan,
   planTrips,
+  rankTrips,
   readProfile,
   readRules,
 } from "./catalog.mjs";
 import { DEFAULT_GOALS, tripTiming } from "./goals.mjs";
 import { HttpError } from "./http.mjs";
-import { OPPORTUNITY_RULES } from "./opportunity.mjs";
+import { OPPORTUNITY_RULES, demandUnits } from "./opportunity.mjs";
 
 const NOW = "2026-10-31T12:00:00Z"; // a Saturday
 const bySku = Object.fromEntries(offers.map((o) => [o.sku, o]));
@@ -147,11 +148,14 @@ test("a first purchase is capped at the trial batch and fits only within it", ()
     }
 });
 
-test("quantity respects the sales rate and competing listings in the sell window", () => {
-  assert.equal(QUANTITY_RULES.sellWindowWeeks, 2);
-  // Jumper: 2.5 sales a week for two weeks is 5, less 3 competing listings.
-  assert.equal(demandUnits(knit), 2);
+test("quantity respects the sales rate and competing listings in the shared sell window", () => {
+  // The planner uses the same window and demand rule as every other area.
   const p = run(knit, { quantity: 10 });
+  assert.equal(p.sellWindowWeeks, OPPORTUNITY_RULES.sellWindowWeeks);
+  // Jumper: 2.5 sales a week for two weeks is 5, less 3 competing listings.
+  assert.equal(offerDemand(knit), demandUnits(knit, OPPORTUNITY_RULES.sellWindowWeeks));
+  assert.equal(offerDemand(knit), 2);
+  assert.equal(p.demandUnits, 2);
   assert.equal(p.units, 2);
   assert.equal(p.limit, "demand");
   // Competition that absorbs the demand leaves nothing to buy.
@@ -159,10 +163,40 @@ test("quantity respects the sales rate and competing listings in the sell window
   assert.equal(crowded.units, 0);
   assert.equal(crowded.limit, "demand");
   assert.equal(crowded.reason, REASONS.LIMIT);
-  // Unknown demand fails closed.
-  assert.equal(demandUnits({ ...strong, salesPerWeek: null }), 0);
-  assert.equal(demandUnits({ ...strong, competingListings: undefined }), 0);
-  assert.equal(run({ ...strong, salesPerWeek: undefined }).units, 0);
+  // Unknown demand is null, never zero or plenty, and fails closed at 0 units.
+  assert.equal(offerDemand({ ...strong, salesPerWeek: null }), null);
+  assert.equal(offerDemand({ ...strong, competingListings: undefined }), null);
+  const unknown = run({ ...strong, salesPerWeek: undefined });
+  assert.equal(unknown.units, 0);
+  assert.equal(unknown.demandUnits, null);
+});
+
+test("the alert gate gets the planned units, the demand and every blank cost or time", () => {
+  // Jacket: three units against modelled demand of five in two weeks.
+  const p = run(jacket);
+  assert.equal(check(p, "demand").ok, true);
+  assert.match(check(p, "demand").detail, /within 2 weeks/);
+  assert.equal(check(p, "inputs-entered").ok, true, "every fixture cost and time is entered");
+  // Unknown competition fails the demand check, not just the quantity.
+  const unknown = run({ ...strong, competingListings: null });
+  assert.equal(check(unknown, "demand").ok, false);
+  assert.match(check(unknown, "demand").detail, /unknown/);
+  // A blank parcel cost is never zero: it is named, the profit per unit is
+  // not checked, and the offer is not shortlisted.
+  const blank = run({ ...strong, post: undefined });
+  assert.deepEqual(missingInputs({ ...strong, post: undefined }, { ...defaults }), ["parcel cost"]);
+  assert.equal(check(blank, "inputs-entered").ok, false);
+  assert.match(check(blank, "inputs-entered").detail, /^Not entered: parcel cost/);
+  assert.equal(blank.thresholds.ok, false);
+  assert.deepEqual(blank.thresholds.failures, ["Profit per unit cannot be checked until these are entered: parcel cost"]);
+  assert.equal(blank.opportunity.tier, "Review");
+  // By public transport with no fare, the fare is a blank input too.
+  const bus = run(jacket, { transport: "Public transport", fare: null });
+  assert.equal(check(bus, "inputs-entered").ok, false);
+  assert.match(check(bus, "inputs-entered").detail, /public transport fare/);
+  assert.equal(check(run(jacket, { transport: "Public transport", fare: 0 }), "inputs-entered").ok, true);
+  // Sample offers never become an alert, whatever passes.
+  assert.equal(run(strong).alert.eligible, false);
 });
 
 test("area and the hourly target change the reason without inventing evidence", () => {
@@ -212,6 +246,14 @@ test("the public transport fare and the car cost per mile change the travel cost
   assert.equal(run(knit, { transport: "Walk", perMile: 60, extra: 200 }).journey.cost, 0);
   assert.equal(run(knit, { transport: "Bicycle", perMile: 60, extra: 200 }).journey.cost, 0);
   assert.equal(journeyFor({ ...defaults, transport: "Public transport", fare: 300, extra: 500 }, 1).cost, 300);
+});
+
+test("the profile defaults to no public transport fare entered", () => {
+  assert.equal(defaults.fare, null);
+  assert.equal(readProfile({ ...defaults }).fare, null);
+  // Walking, cycling and driving never need the fare.
+  for (const transport of ["Walk", "Bicycle", "Car", "Van"])
+    assert.equal(run(jacket, { transport, carry: 5 }).fareMissing, false, transport);
 });
 
 test("public transport with no fare entered is never called fitting", () => {
@@ -383,6 +425,15 @@ test("the whole profile is validated", () => {
     assert.throws(() => readProfile({ ...defaults, [field]: value }), HttpError, field + "=" + value);
   assert.throws(() => readProfile(null), HttpError);
   assert.throws(() => readProfile([defaults]), HttpError);
+  // Messages name the field as the Planner labels it, never a raw field name.
+  for (const [field, value] of [["budget", -1], ["fare", -5], ["feeRate", 0.9], ["perMile", 1.5], ["rules", { minReturn: -1 }]]) {
+    try {
+      readProfile({ ...defaults, [field]: value });
+      assert.fail("accepted " + field);
+    } catch (e) {
+      assert.doesNotMatch(e.message, /\b(budget|feeRate|perMile|minReturn|returnsRate|feeFixed)\b|rules\.|\(pence\b/, e.message);
+    }
+  }
 });
 
 test("load limits follow one rule for each transport", () => {
@@ -458,19 +509,44 @@ test("the comparison shows mileage, parking, total load and time saved", () => {
   assert.equal(j.current.loadKg, 1.35);
 });
 
-test("the shortlist leaves out offers that fail a hard filter", () => {
+test("the shortlist leaves out every offer failing a buying threshold", () => {
   const { trips, rejected, sample } = planTrips({ ...defaults }, { now: NOW });
   assert.equal(sample, true);
-  assert.deepEqual(trips.map((t) => t.sku).sort(), ["jacket", "knit"]);
-  assert.deepEqual(rejected.map((r) => r.sku).sort(), ["baby", "pot"]);
+  // The jumper makes £2.42 a unit, under the £5 minimum, so only the jacket
+  // is shortlisted.
+  assert.deepEqual(trips.map((t) => t.sku), ["jacket"]);
+  assert.ok(trips.every((t) => t.thresholds.ok));
+  assert.deepEqual(rejected.map((r) => r.sku).sort(), ["baby", "knit", "pot"]);
   const reasons = Object.fromEntries(rejected.map((r) => [r.sku, r.reasons]));
   assert.deepEqual(reasons.baby, ["Purchase price outside £5 to £50 per unit"]);
   assert.deepEqual(reasons.pot, ["Unit weighs 2 kg or more"]);
+  assert.deepEqual(reasons.knit, ["Profit per unit of £2.42 is below £5.00"]);
+  const knitRow = rejected.find((r) => r.sku === "knit");
+  assert.equal(knitRow.unitProfit, 242);
+  assert.equal(knitRow.units, 2);
   assert.ok(rejected.every((r) => r.sample === true && r.tier === "Reject"));
-  // A member's stricter price floor moves the jumper out of the shortlist too.
+  // Whatever the profile, nothing in the shortlist fails a threshold.
+  for (const over of [{}, { transport: "Car" }, { transport: "Public transport", fare: 450 }, { target: 0 }, { budget: 2000 }])
+    for (const t of planTrips({ ...defaults, ...over }, { now: NOW }).trips)
+      assert.equal(t.thresholds.ok, true, t.sku + " " + JSON.stringify(over));
+  // A member's stricter price floor moves the jumper out for its price too.
   const strict = planTrips({ ...defaults, rules: { minUnitPrice: 700 } }, { now: NOW });
   assert.deepEqual(strict.trips.map((t) => t.sku), ["jacket"]);
-  assert.ok(strict.rejected.some((r) => r.sku === "knit"));
+  assert.ok(strict.rejected.find((r) => r.sku === "knit").reasons.includes("Purchase price outside £7 to £50 per unit"));
+  // Stricter profit or return rules move the jacket out as well (£7.13, 71.3%).
+  const profit = planTrips({ ...defaults, rules: { minUnitProfit: 800 } }, { now: NOW });
+  assert.deepEqual(profit.trips, []);
+  assert.deepEqual(profit.rejected.find((r) => r.sku === "jacket").reasons, ["Profit per unit of £7.13 is below £8.00"]);
+  const ret = planTrips({ ...defaults, rules: { minReturn: 0.75 } }, { now: NOW });
+  assert.deepEqual(ret.trips, []);
+  assert.deepEqual(ret.rejected.find((r) => r.sku === "jacket").reasons, ["Return of 71.3% is below 75% of the purchase price"]);
+  // An offer where no unit fits cannot show its profit, so it is not shortlisted either.
+  const none = planTrips({ ...defaults, storage: 0 }, { now: NOW });
+  assert.deepEqual(none.trips, []);
+  assert.deepEqual(none.rejected.find((r) => r.sku === "jacket").reasons, [
+    "No units fit: stopped by your storage at home, so profit per unit cannot be checked",
+  ]);
+  assert.equal(none.rejected.find((r) => r.sku === "jacket").tier, "Review", "no profit was measured to reject");
 });
 
 test("the drive summary lists opportunities that only fit by car", () => {
@@ -483,10 +559,17 @@ test("the drive summary lists opportunities that only fit by car", () => {
   assert.equal(extra.reason, REASONS.FITS);
   assert.equal(extra.units, 3);
   assert.equal(r.drive.lost.length, 0);
-  // Rejected offers are never offered as extra opportunities.
-  assert.ok(r.drive.extra.every((t) => !r.rejected.some((x) => x.sku === t.sku)));
+  // Offers outside the price or weight limits are never offered as extra opportunities.
+  const hard = ["baby", "pot"];
+  assert.ok(r.drive.extra.every((t) => !hard.includes(t.sku)));
   // At the default target the jacket already fits on foot, so nothing is extra.
   assert.deepEqual(planTrips({ ...defaults }, { now: NOW }).drive.extra, []);
+  // With a 0.3 kg carry limit no jacket fits on foot, so it is not
+  // shortlisted, but by car it fits every threshold and is an extra.
+  const light = planTrips({ ...defaults, carry: 0.3 }, { now: NOW });
+  assert.ok(light.rejected.some((x) => x.sku === "jacket"));
+  assert.deepEqual(light.drive.extra.map((t) => t.sku), ["jacket"]);
+  assert.equal(light.drive.extra[0].reason, REASONS.FITS);
 });
 
 test("access needs are labelled for each offer and this member", () => {
@@ -545,10 +628,51 @@ test("payout timing comes from the saved goals and the cash date gates the fit",
   assert.ok(r.trips.every((t) => t.timing.payoutDays === 13));
 });
 
+test("several units are paid out only once the sales rate can sell them all", () => {
+  // A proven jumper selling one a week: two units take 14 days to sell, not
+  // the 7 days the Goals assume for one unit.
+  const slow = { ...strong, sku: "slow", salesPerWeek: 1, competingListings: 0 };
+  const g = goals({ cashNeededBy: "2026-11-20" });
+  const timing = (sale) => tripTiming(g, { now: NOW, items: [sale] });
+  const p = run(slow, { quantity: 10, target: 0 }, { timing });
+  assert.equal(p.units, 2);
+  assert.equal(p.limit, "demand");
+  assert.equal(p.reason, REASONS.FITS);
+  assert.equal(p.timing.daysToSell, 14);
+  assert.equal(p.timing.daysToSellOneUnit, 7);
+  // Sold Saturday 14 November, posted Monday 16, paid out Friday 20: on time.
+  assert.equal(p.timing.payout.date, "2026-11-20");
+  // One unit alone would be paid out on 13 November.
+  assert.equal(tripTiming(g, { now: NOW }).payout.date, "2026-11-13");
+  // A cash date between the two is met by one unit but not by two.
+  const tight = goals({ cashNeededBy: "2026-11-16" });
+  const late = run(slow, { quantity: 10, target: 0 }, { timing: (sale) => tripTiming(tight, { now: NOW, items: [sale] }) });
+  assert.equal(late.reason, REASONS.CASH_DATE);
+  assert.equal(check(late, "days-to-sell").ok, false);
+  assert.equal(tripTiming(tight, { now: NOW }).cash.status, "on time");
+  // An unknown sales rate for more than one unit cannot be scheduled.
+  const unknown = tripTiming(g, { now: NOW, items: [{ units: 2, salesPerWeek: null }] });
+  assert.equal(unknown.payout.date, null);
+  assert.match(unknown.payout.note, /sales rate is unknown/);
+  assert.equal(unknown.cash.status, "unknown");
+  // The comparison by car uses its own units for its payout.
+  assert.equal(p.compare.alternative.units, 2);
+  // planTrips reports the one-unit payout at the top level.
+  assert.equal(planTrips({ ...defaults }, { now: NOW, timing }).timing.payout.date, "2026-11-13");
+});
+
 test("trips rank fitting first, then by earnings per hour", () => {
-  const { trips, rules } = planTrips({ ...defaults, target: 0 }, { now: NOW });
+  const { trips: shortlisted, rules } = planTrips({ ...defaults, target: 0 }, { now: NOW });
   assert.deepEqual(rules.effective.minUnitPrice, OPPORTUNITY_RULES.minUnitPrice);
-  assert.ok(trips.length >= 2);
+  assert.equal(shortlisted[0].sku, "jacket");
+  // Only the jacket clears the thresholds among the fixtures, so rank test
+  // offers that all clear them: one that fits, a faster one that does not.
+  const trips = [
+    run({ ...strong, sku: "slow", handlingMinutes: 60 }, { target: 0 }),
+    run({ ...strong, sku: "quick" }, { target: 0 }),
+    run({ ...strong, sku: "far", miles: 9 }, { target: 3000 }),
+  ].sort(rankTrips);
+  assert.deepEqual(trips.map((t) => t.sku), ["quick", "slow", "far"]);
   for (let i = 1; i < trips.length; i++) {
     const [a, b] = [trips[i - 1], trips[i]];
     assert.ok(
@@ -556,5 +680,4 @@ test("trips rank fitting first, then by earnings per hour", () => {
         (a.fits === b.fits && (a.economics.hourly ?? -Infinity) >= (b.economics.hourly ?? -Infinity)),
     );
   }
-  assert.equal(trips[0].sku, "jacket");
 });

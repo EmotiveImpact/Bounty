@@ -471,10 +471,13 @@ function ebayShipping(options) {
  * price excludes shipping; shipping is the cheapest stated GBP option.
  * When the search was by GTIN, eBay matched the listings to that GTIN, so
  * the queried GTIN is recorded as the barcode unless the item states one.
+ * seen (Date or ISO, default now) is the time of the lookup: Browse returns
+ * only listings active then, so it is each row's observed time.
  */
-export function ebayBrowse(body, { gtin: queried = null } = {}) {
+export function ebayBrowse(body, { gtin: queried = null, seen = new Date() } = {}) {
   if (!body || (!Array.isArray(body.itemSummaries) && body.total !== 0))
     throw Error("Unexpected eBay Browse response");
+  const seenAt = isoTime(seen instanceof Date ? seen.toISOString() : seen) ?? new Date().toISOString();
   return (body.itemSummaries || [])
     .filter(
       (r) =>
@@ -491,7 +494,11 @@ export function ebayBrowse(body, { gtin: queried = null } = {}) {
         condition: attr(r.condition),
         price: pence(r.price.value),
         shipping: ebayShipping(r.shippingOptions),
-        observed: isoTime(r.itemCreationDate),
+        // observed is when the asking price was seen (this lookup), so its
+        // age says how current the competition is; listed is when the
+        // listing started.
+        observed: seenAt,
+        listed: isoTime(r.itemCreationDate),
         retailer: "eBay UK",
         location: null,
         seller: clean(r.seller?.username, 200),
@@ -716,10 +723,29 @@ function upstreamDetail(body) {
 }
 
 /**
- * Runs one credentialed lookup and returns research rows. Errors name the
- * provider, HTTP status and upstream message, and never the token.
+ * The SourceError for a request that never got a response. A source that
+ * answers with a redirect is refused (requests use redirect: "error", so a
+ * token is never sent on to another address) and is not retried.
  */
-export async function lookup(provider, query, env = process.env, request = fetch) {
+export function requestError(label, error, env = process.env) {
+  if (error?.cause?.message === "unexpected redirect" || error?.message === "unexpected redirect") {
+    const refused = new SourceError(
+      label + " answered with a redirect to another address, which is refused. Check the source address before trying again.",
+    );
+    refused.transient = false;
+    return refused;
+  }
+  return new SourceError(
+    redact(label + " request failed: " + (error?.cause?.code || error?.message || error), env),
+  );
+}
+
+/**
+ * Runs one credentialed lookup and returns research rows. Errors name the
+ * provider, HTTP status and upstream message, and never the token. clock()
+ * gives the time the rows were seen (eBay Browse records it as observed).
+ */
+export async function lookup(provider, query, env = process.env, request = fetch, { clock = () => new Date() } = {}) {
   const { url, headers, gtin: queried } = lookupRequest(provider, query, env);
   const label = sourceFor(provider).name;
   let res;
@@ -730,9 +756,7 @@ export async function lookup(provider, query, env = process.env, request = fetch
       redirect: "error",
     });
   } catch (error) {
-    throw new SourceError(
-      redact(label + " request failed: " + (error?.cause?.code || error?.message || error), env),
-    );
+    throw requestError(label, error, env);
   }
   const raw = await res.text();
   let body = null;
@@ -751,5 +775,5 @@ export async function lookup(provider, query, env = process.env, request = fetch
   if (body === null) throw new SourceError(label + " returned a response that is not JSON", res.status);
   if (provider === "hobnight") return hobnight(body);
   if (provider === "keepa") return keepa(body);
-  return ebayBrowse(body, { gtin: queried });
+  return ebayBrowse(body, { gtin: queried, seen: clock() });
 }

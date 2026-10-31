@@ -150,7 +150,7 @@ export default function Research() {
                 {r.kind === "Reported completed sale" || r.kind === "Active asking price"
                   ? "Seller " + (r.seller || "unknown")
                   : (r.retailer || "Retailer unknown") + (r.location ? " · " + r.location : "")}
-                {" · "}Source date {r.observed || "unknown"} · Imported {dateTime(r.imported)} UTC
+                {" · "}Source date {dateTime(r.observed)} · Imported {dateTime(r.imported)}
               </small>
             </span>
             <span>

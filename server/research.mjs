@@ -10,8 +10,10 @@
 // (Keepa 24 hours, Hobnight and eBay 6 hours) reuses the stored rows and
 // makes no network call, unless --refresh is passed. Tokens are read from the
 // server environment and never printed.
+import { createHash } from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { resolve, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { awin, lookup, sold, sourceFor, LOOKUP_PROVIDERS } from "./sources.mjs";
 import { cachedLookup, recordRun, storeLookup, upsertResearch, validResearchRow } from "./evidence.mjs";
@@ -23,6 +25,76 @@ const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 /** Test fixtures are examples; importing one would pass them off as live evidence. */
 export function isFixture(path) {
   return (resolve(path) + sep).startsWith(FIXTURES) || resolve(path).startsWith(FIXTURES);
+}
+
+// File text compared without a byte-order mark, line-ending style or
+// trailing spaces, so a copy saved by another editor still matches.
+const normalisedText = (text) =>
+  String(text)
+    .replace(/^\uFEFF/, "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n")
+    .trim();
+export const contentHash = (text) => createHash("sha256").update(normalisedText(text)).digest("hex");
+const rowKey = (row) => `${row.source_id ?? ""}|${String(row.title ?? "").trim().toLowerCase()}`;
+
+let fixtureIndex = null;
+/**
+ * The repository's sample files: { hashes: Map(hash -> name), rows:
+ * { awin, sales: Map(rowKey -> name) } }. A copied fixture is refused by its
+ * content, wherever it is, and so is a file holding any of its rows.
+ */
+export function sampleFixtures() {
+  if (fixtureIndex) return fixtureIndex;
+  const index = { hashes: new Map(), rows: { awin: new Map(), sales: new Map() } };
+  let names = [];
+  try {
+    names = readdirSync(FIXTURES, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => join(entry.parentPath ?? entry.path, entry.name));
+  } catch {
+    names = [];
+  }
+  for (const path of names) {
+    const name = relative(FIXTURES, path);
+    let text;
+    try {
+      text = readFileSync(path, "utf8");
+    } catch {
+      continue;
+    }
+    index.hashes.set(contentHash(text), name);
+    const parsers = { awin: () => awin(text), sales: () => sold(JSON.parse(text)) };
+    for (const [provider, parse] of Object.entries(parsers)) {
+      let rows = [];
+      try {
+        rows = parse();
+      } catch {
+        rows = [];
+      }
+      for (const row of rows) if (row?.source_id && row?.title) index.rows[provider].set(rowKey(row), name);
+    }
+  }
+  fixtureIndex = index;
+  return index;
+}
+
+// Refuses text that is, or contains rows of, one of the sample fixtures.
+function refuseSample(provider, text, rows = null) {
+  const { hashes, rows: known } = sampleFixtures();
+  const same = hashes.get(contentHash(text));
+  if (same)
+    throw Error(
+      `This file is a copy of the repository's sample file ${same}. Sample data is never imported as evidence: import a real ${provider === "awin" ? "Awin feed" : "sales file"}.`,
+    );
+  if (!rows) return;
+  const found = rows.filter((row) => known[provider]?.has(rowKey(row)));
+  if (found.length)
+    throw Error(
+      `This file holds ${found.length} row${found.length === 1 ? "" : "s"} from the repository's sample file ${known[provider].get(rowKey(found[0]))} (for example "${found[0].title}"). Sample data is never imported as evidence, so nothing was imported.`,
+    );
 }
 const USAGE =
   "Usage: npm run research -- awin FILE.csv | sales FILE.json | hobnight|keepa|ebay QUERY [--refresh]";
@@ -37,11 +109,16 @@ const USAGE =
  * A manual sales file is all or nothing: if any sale could not be stored,
  * the whole file is refused naming the record, so a sale is never dropped
  * without saying so.
+ *
+ * A file whose content is one of the repository's sample fixtures (compared
+ * by a hash of its text, wherever it was copied to), or that holds any of
+ * their rows, is refused: sample data never becomes evidence.
  */
 export function importFile(db, provider, text, { now = () => new Date(), env = process.env, name = null } = {}) {
   if (!FILE_PROVIDERS.includes(provider)) throw Error(USAGE);
   const started = now();
   try {
+    refuseSample(provider, text);
     let rows;
     if (provider === "awin") rows = awin(text);
     else {
@@ -58,6 +135,7 @@ export function importFile(db, provider, text, { now = () => new Date(), env = p
           `Invalid manual sale at index ${unsaveable}: it cannot be stored (it needs a reference, a title and a positive total in pence). Nothing was imported.`,
         );
     }
+    refuseSample(provider, text, rows);
     const saved = upsertResearch(db, provider, rows, { now: now() });
     recordRun(db, { provider, mode: "manual", query: name, started, finished: now(), ok: true, rows: saved }, { env });
     return {
@@ -99,7 +177,7 @@ export async function importLookup(
     }
   }
   try {
-    const rows = await lookup(provider, term, env, request);
+    const rows = await lookup(provider, term, env, request, { clock: now });
     const fetchedAt = now();
     const saved = upsertResearch(db, provider, rows, { now: fetchedAt });
     storeLookup(db, provider, term, rows.map((r) => r.source_id).filter(Boolean), { now: fetchedAt });
@@ -126,6 +204,20 @@ export function parseArgs(argv) {
   if (!FILE_PROVIDERS.includes(provider) && !LOOKUP_PROVIDERS.includes(provider)) throw Error(USAGE);
   if (refresh && FILE_PROVIDERS.includes(provider)) throw Error("--refresh applies to lookups only. " + USAGE);
   return { provider, input, refresh };
+}
+
+// After new evidence lands, open bounties for the same items are re-checked
+// at once, so a price rise or a removed offer stops the trip for members who
+// were alerted or hold a claim, even if none of them opens the app.
+async function recheckBounties(db) {
+  const { recheckOpenBounties } = await import("./bounties.mjs");
+  const out = recheckOpenBounties(db, { now: new Date().toISOString() });
+  if (out.stopped.length)
+    console.log(
+      `${out.stopped.length} open ${out.stopped.length === 1 ? "bounty was" : "bounties were"} stopped by the new evidence, and members were told not to make the trip.`,
+    );
+  if (out.reopened.length)
+    console.log(`${out.reopened.length} paused ${out.reopened.length === 1 ? "bounty is" : "bounties are"} open for trips again.`);
 }
 
 async function main() {
@@ -159,6 +251,7 @@ async function main() {
         console.log(
           `${withoutSeller} of ${saved} sales have no seller name (a listing id is not a seller), so they do not count as independent sales.`,
         );
+      await recheckBounties(db);
       return;
     }
     const result = await importLookup(db, provider, input, { refresh });
@@ -175,6 +268,7 @@ async function main() {
       );
     if (provider === "ebay")
       console.log("These are active asking prices. They are competition evidence, never sales.");
+    if (!result.cached) await recheckBounties(db);
   } catch (error) {
     console.error(provider + " import failed: " + error.message);
     process.exitCode = 1;

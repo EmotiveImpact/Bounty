@@ -47,6 +47,12 @@
 .result dl.figures {
   margin: 8px 0;
 }
+/* Long figures (a value with its note) wrap in their own column instead of
+   squeezing the label to a word per line. */
+.result dl.figures {
+  grid-template-columns: minmax(160px, 1fr) minmax(0, 2fr);
+  column-gap: 12px;
+}
 .offer-summary dt,
 .result dl.figures dt {
   text-transform: none;
@@ -292,4 +298,37 @@
 }
 .attributes .model-field .confirm {
   margin-top: 0;
+}
+/* Access needs, labelled as the Planner labels them. */
+.research-calculator .badge.access {
+  background: #ece4f5;
+  color: #45307a;
+  margin: 0 4px 4px 0;
+}
+.research-calculator .badge.access.open {
+  background: #e3e8de;
+  color: #29453a;
+}
+/* Text for screen readers only (the access-need detail). */
+.research-calculator .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.research-calculator .badge.access {
+  position: relative;
+}
+.research-calculator .checked-line {
+  font-size: 14px;
+  margin: 4px 0 8px;
+  overflow-wrap: anywhere;
+}
+.research-calculator .checked-line b.inline {
+  display: inline;
+}
+.research-calculator .notice.warn {
+  color: #8a2716;
 }

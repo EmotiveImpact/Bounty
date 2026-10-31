@@ -19,9 +19,13 @@ import {
   metrics,
   migrateLegacyOutcomes,
   recordProof,
+  relinkProof,
+  proofUses,
+  migrateToAutoincrement,
   pastDate,
   londonDate,
 } from "./ledger.mjs";
+import { londonDate as sharedLondonDate, transaction } from "./http.mjs";
 import { storeProof, decodeBase64, deleteProofFile, prepareProof, MAX_PROOF_BYTES } from "./proofs.mjs";
 import * as ledgerRoutes from "./routes-ledger.mjs";
 
@@ -317,8 +321,18 @@ test("verification: every payout needs its own proof, and only verified payouts 
   assert.equal(s.verifiedPayouts, 0);
   assert.equal(s.verifiedEarnings, 0);
   assert.equal(s.verifiedTrips, 0);
-  // The same file attached to both payouts counts for neither.
-  attach(p2, "b", "payout A");
+  // Attaching the same file to the second payout is refused.
+  assert.throws(
+    () => attach(p2, "b", "payout A"),
+    (e) =>
+      e.status === 409 &&
+      e.message ===
+        "This file is already the proof for this trip's payout (12 Oct 2026, £22.00): attach the document for this purchase or payout",
+  );
+  // A duplicate stored before that rule counts for neither payout.
+  db.prepare(
+    "INSERT INTO ledger_proofs (trip_id, entry_id, sha256, bytes, media_type, label, created) VALUES (?, ?, ?, 10, 'image/png', 'payout A', ?)",
+  ).run(t, p2, "b".repeat(64), NOW.toISOString());
   r = getTrip(db, t).reconciliation;
   assert.equal(r.verified, false);
   assert.ok(r.verificationMissing.includes("Attach a proof to the payout (12 Oct 2026, £22.00)."));
@@ -378,6 +392,137 @@ test("verification: records must reconcile, with a sale and no payout before the
   assert.equal(s.verifiedEarnings, 700);
   assert.equal(s.verifiedTrips, 1);
   assert.equal(s.unverifiedTrips, 2);
+});
+
+test("one file proves one receipt or payout in the whole ledger: reuse on another trip is refused (R2M2, R2B6)", () => {
+  const db = memoryDb(schema);
+  const attach = (tripId, entryId, hash, label) =>
+    recordProof(db, { tripId, entryId, label, sha256: hash.repeat(64), bytes: 10, mediaType: "image/png" }, clock);
+  // The money reviewer's case: trip B is a copy of trip A with the same two files.
+  const trips = [];
+  for (const label of ["Jumpers trip A", "Jumpers trip B"]) {
+    const t = createTrip(db, { label, source: "manual", kind: "resale" }, clock);
+    const receipt = addEntry(db, t, { type: "receipt", amount: 3000, units: 3, occurred: "2026-10-05" }, clock);
+    addEntry(db, t, { type: "sale", amount: 7800, units: 3, occurred: "2026-10-10" }, clock);
+    const payout = addEntry(db, t, { type: "payout", amount: 6600, occurred: "2026-10-12" }, clock);
+    trips.push({ t, receipt, payout });
+  }
+  const [a, b] = trips;
+  attach(a.t, a.receipt, "a", "receipt.png");
+  attach(a.t, a.payout, "b", "payout.png");
+  const refused = (fn, text) =>
+    assert.throws(fn, (e) => e.status === 409 && e.message === text, text);
+  refused(
+    () => attach(b.t, b.receipt, "a", "receipt.png"),
+    "This file is already the proof for Jumpers trip A (purchase receipt, 5 Oct 2026, £30.00): attach the document for this purchase or payout",
+  );
+  refused(
+    () => attach(b.t, b.payout, "b", "payout.png"),
+    "This file is already the proof for Jumpers trip A (payout, 12 Oct 2026, £66.00): attach the document for this purchase or payout",
+  );
+  // Nor on any other entry of that trip, such as the sale.
+  const sale = getTrip(db, b.t).entries.find((e) => e.type === "sale").id;
+  assert.throws(() => attach(b.t, sale, "a", "receipt.png"), (e) => e.status === 409);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM ledger_proofs WHERE trip_id = ?").get(b.t).n, 0);
+  // Kept as a whole-trip proof it is stored, but never counts.
+  assert.equal(attach(b.t, null, "a", "receipt.png").created, true);
+  assert.equal(getTrip(db, a.t).reconciliation.verified, true);
+  assert.equal(getTrip(db, b.t).reconciliation.verified, false);
+  let s = summary(db, "2026-10");
+  assert.equal(s.verifiedTrips, 1);
+  assert.equal(s.verifiedPayouts, 6600);
+  assert.equal(s.verifiedEarnings, 3600);
+  // B's own documents verify it.
+  attach(b.t, b.receipt, "c", "receipt B.png");
+  attach(b.t, b.payout, "d", "payout B.png");
+  s = summary(db, "2026-10");
+  assert.equal(s.verifiedTrips, 2);
+  assert.equal(s.verifiedPayouts, 13200);
+
+  // The same file again on the same entry is not a reuse: the record comes back.
+  assert.equal(attach(a.t, a.receipt, "a", "receipt.png").created, false);
+});
+
+test("duplicates stored before the rule leave every entry using the file unverified, with a reason (R2M2, R2B6)", () => {
+  const db = memoryDb(schema);
+  const sneak = (tripId, entryId, hash, label) =>
+    db
+      .prepare(
+        "INSERT INTO ledger_proofs (trip_id, entry_id, sha256, bytes, media_type, label, created) VALUES (?, ?, ?, 10, 'image/png', ?, ?)",
+      )
+      .run(tripId, entryId, hash.repeat(64), label, NOW.toISOString());
+  // The bugs reviewer's case: one till receipt on two trips, each with its own payout proof.
+  const ids = [];
+  for (const [label, payoutFile] of [["Trip 1", "p"], ["Trip 2", "q"]]) {
+    const t = createTrip(db, { label, source: "manual", kind: "resale" }, clock);
+    const receipt = addEntry(db, t, { type: "receipt", amount: 1000, units: 1, occurred: "2026-10-26" }, clock);
+    addEntry(db, t, { type: "sale", amount: 2500, units: 1, occurred: "2026-10-28" }, clock);
+    const payout = addEntry(db, t, { type: "payout", amount: 2100, units: 1, occurred: "2026-10-30" }, clock);
+    sneak(t, receipt, "r", "receipt.png");
+    sneak(t, payout, payoutFile, "payout " + label);
+    ids.push(t);
+  }
+  const [one, two] = ids.map((t) => getTrip(db, t).reconciliation);
+  for (const r of [one, two]) {
+    assert.equal(r.verified, false);
+    assert.ok(r.verificationMissing.includes("Attach a proof to the purchase receipt (26 Oct 2026, £10.00)."));
+  }
+  assert.ok(
+    one.verificationMissing.includes(
+      'The file "receipt.png" is attached to more than one receipt or payout entry, so it counts for none of them: ' +
+        'it is also on the purchase receipt (26 Oct 2026, £10.00) on "Trip 2". One document proves one purchase or ' +
+        "one payout: keep it on the entry it records and attach the right document to the other.",
+    ),
+    one.verificationMissing.join("\n"),
+  );
+  assert.ok(two.verificationMissing.some((m) => /it is also on the purchase receipt \(26 Oct 2026, £10\.00\) on "Trip 1"/.test(m)));
+  // Each payout proof is still its own: only the receipt is not counted.
+  assert.equal(one.proofedEntries.length, 1);
+  const listed = listTrips(db);
+  assert.ok(listed.every((t) => t.verified === false));
+  const s = summary(db, "2026-10");
+  assert.equal(s.verifiedTrips, 0);
+  assert.equal(s.verifiedPayouts, 0);
+  assert.equal(s.verifiedEarnings, 0);
+  for (const t of ids) closeTrip(db, t, clock);
+  const m = metrics(db);
+  assert.equal(m.verifiedTrips, 0);
+  assert.equal(m.cash.verifiedPayouts, 0);
+  // A pure call without the ledger-wide uses still sees only the trip itself.
+  const detail = getTrip(db, ids[0]);
+  assert.equal(verification(detail.trip, detail.entries, detail.proofs).verified, true);
+  assert.equal(verification(detail.trip, detail.entries, detail.proofs, proofUses(db)).verified, false);
+  // Removing the copy from trip 2 lets trip 1 count its receipt again.
+  db.prepare("DELETE FROM ledger_proofs WHERE trip_id = ? AND sha256 = ?").run(ids[1], "r".repeat(64));
+  assert.equal(getTrip(db, ids[0]).reconciliation.verified, true);
+  assert.equal(getTrip(db, ids[1]).reconciliation.verified, false);
+});
+
+test("a proof cannot be moved onto an entry while its file proves another one (R2M2)", () => {
+  const db = memoryDb(schema);
+  const a = createTrip(db, { label: "Lamps", source: "manual", kind: "resale" }, clock);
+  const b = createTrip(db, { label: "Mugs", source: "manual", kind: "resale" }, clock);
+  const ra = addEntry(db, a, { type: "receipt", amount: 1200, units: 1, occurred: "2026-10-03" }, clock);
+  const rb = addEntry(db, b, { type: "receipt", amount: 800, units: 2, occurred: "2026-10-04" }, clock);
+  const pb = addEntry(db, b, { type: "payout", amount: 900, occurred: "2026-10-09" }, clock);
+  const record = (tripId, entryId, hash) =>
+    recordProof(db, { tripId, entryId, label: hash, sha256: hash.repeat(64), bytes: 10, mediaType: "image/png" }, clock).proof;
+  record(a, ra, "e");
+  const loose = record(b, null, "e"); // whole trip: allowed
+  assert.throws(() => relinkProof(db, b, loose.id, { entryId: rb }), (e) => e.status === 409 && /already the proof for Lamps \(purchase receipt/.test(e.message));
+  assert.equal(getTrip(db, b).proofs[0].entry_id, null);
+  // Within one trip as well.
+  const own = record(b, rb, "f");
+  const copy = record(b, null, "f");
+  assert.throws(
+    () => relinkProof(db, b, copy.id, { entryId: pb }),
+    (e) => e.status === 409 && /^This file is already the proof for this trip's purchase receipt \(4 Oct 2026, £8\.00\)/.test(e.message),
+  );
+  // Moving the file's only receipt or payout use is fine, and the copy then
+  // merges with it rather than being refused.
+  assert.equal(relinkProof(db, b, own.id, { entryId: pb }).proofs.find((p) => p.id === own.id).entry_id, pb);
+  const merged = relinkProof(db, b, copy.id, { entryId: pb });
+  assert.deepEqual(merged.proofs.filter((p) => p.sha256 === "f".repeat(64)).map((p) => p.id), [own.id]);
 });
 
 test("household savings never count as earnings or proceeds", () => {
@@ -463,7 +608,11 @@ test("summary: cash basis by month and separate figures", () => {
   assert.equal(oct.realisedEarnings, 2600 + 1700 - 3000 - 1200 - 200);
   assert.equal(oct.payouts, 4300);
   assert.equal(oct.realisedMinutes, 60);
-  assert.equal(oct.realisedHourly, Math.round(((4300 - 4400) * 60) / 60));
+  // Only trip A logged work time in October: its October money (payout 26.00
+  // less the 2.00 expense) over its hour. B (-30.00) and C (+5.00) have no
+  // work time, so they are left out rather than divided by A's hour.
+  assert.equal(oct.realisedHourly, 2400);
+  assert.deepEqual(oct.hourly, { trips: 1, minutes: 60, earnings: 2400, leftOutTrips: 2, leftOutEarnings: -3000 + 500 });
   // Current position of open trips only.
   // B's unpaid sale. C's payout has no units, so it covers C's earlier sale
   // and the 3.00 gap is fees, not money still to come.
@@ -657,6 +806,180 @@ test("potential proceeds stop at the first payout and predicted units must be at
   );
 });
 
+test("month hourly divides only the money of trips with work time by that time (R2Q1)", () => {
+  const db = memoryDb(schema);
+  const trip = (label, source = "manual") => createTrip(db, { label, source, kind: "resale" }, clock);
+  // 2 h of work and +40.00 realised.
+  const worked = trip("Worked");
+  addEntry(db, worked, { type: "receipt", amount: 2000, units: 2, occurred: "2026-10-02" }, clock);
+  addEntry(db, worked, { type: "sale", amount: 7000, units: 2, occurred: "2026-10-04" }, clock);
+  addEntry(db, worked, { type: "payout", amount: 6000, occurred: "2026-10-08" }, clock);
+  addEntry(db, worked, { type: "work", minutes: 120, occurred: "2026-10-08" }, clock);
+  let s = summary(db, "2026-10");
+  assert.equal(s.realisedHourly, 2000);
+  // A manual trip at +19.00 and a research trip at -12.00, neither with work time.
+  const manual = trip("Manual");
+  addEntry(db, manual, { type: "receipt", amount: 1000, units: 1, occurred: "2026-10-10" }, clock);
+  addEntry(db, manual, { type: "sale", amount: 3500, units: 1, occurred: "2026-10-12" }, clock);
+  addEntry(db, manual, { type: "payout", amount: 2900, occurred: "2026-10-14" }, clock);
+  const research = trip("Research", "research");
+  addEntry(db, research, { type: "receipt", amount: 1200, units: 1, occurred: "2026-10-20" }, clock);
+  s = summary(db, "2026-10");
+  assert.equal(s.realisedEarnings, 4000 + 1900 - 1200);
+  assert.equal(s.realisedHourly, 2000, "never 47.00 over 2 h");
+  assert.deepEqual(s.hourly, { trips: 1, minutes: 120, earnings: 4000, leftOutTrips: 2, leftOutEarnings: 700 });
+  assert.match(s.basis, /trips without work time is left out|trips without work time are left out|money from trips without work time is left out/);
+  // The month figure agrees with the measures once the trips are closed.
+  for (const t of [worked, manual, research]) closeTrip(db, t, clock);
+  assert.equal(metrics(db).hourly.realised, 2000);
+  assert.equal(metrics(db).hourly.trips, 1);
+  // Time on a trip with no cash yet still counts as time spent this month.
+  const listing = trip("Listing only");
+  addEntry(db, listing, { type: "work", minutes: 120, occurred: "2026-10-25" }, clock);
+  s = summary(db, "2026-10");
+  assert.equal(s.realisedHourly, 1000);
+  assert.deepEqual(s.hourly, { trips: 2, minutes: 240, earnings: 4000, leftOutTrips: 2, leftOutEarnings: 700 });
+
+  // Not known when no trip with money has work time.
+  const other = memoryDb(schema);
+  const timeOnly = createTrip(other, { label: "Time only", source: "manual", kind: "resale" }, clock);
+  addEntry(other, timeOnly, { type: "work", minutes: 60, occurred: "2026-10-05" }, clock);
+  const cashOnly = createTrip(other, { label: "Cash only", source: "manual", kind: "resale" }, clock);
+  addEntry(other, cashOnly, { type: "receipt", amount: 500, units: 1, occurred: "2026-10-05" }, clock);
+  addEntry(other, cashOnly, { type: "sale", amount: 900, units: 1, occurred: "2026-10-06" }, clock);
+  addEntry(other, cashOnly, { type: "payout", amount: 800, occurred: "2026-10-07" }, clock);
+  s = summary(other, "2026-10");
+  assert.equal(s.realisedHourly, null);
+  assert.equal(s.realisedMinutes, 60);
+  assert.deepEqual(s.hourly, { trips: 1, minutes: 60, earnings: 0, leftOutTrips: 1, leftOutEarnings: 300 });
+  // A sale alone is not money yet, so a trip with only a sale and work time is not enough.
+  addEntry(other, timeOnly, { type: "receipt", amount: 100, units: 1, occurred: "2026-09-30" }, clock);
+  addEntry(other, timeOnly, { type: "sale", amount: 900, units: 1, occurred: "2026-10-06" }, clock);
+  assert.equal(summary(other, "2026-10").realisedHourly, null);
+  assert.equal(summary(memoryDb(schema), "2026-10").realisedHourly, null);
+});
+
+test("deleted entry and proof ids are never reused, so a stale delete cannot remove a replacement (R2B5)", async (t) => {
+  const { call, proofDir, db } = await api(t);
+  const trip = (await call("POST", "/api/ledger/trips", { label: "Stale tab", source: "manual", kind: "resale" })).body.id;
+  const receipt = (await call("POST", `/api/ledger/trips/${trip}/entries`, { type: "receipt", amount: 1000, units: 1, occurred: "2026-10-30" })).body.id;
+  const upload = (data, label, mediaType) =>
+    call("POST", `/api/ledger/trips/${trip}/proofs`, { label, mediaType, data, entryId: receipt });
+  const wrong = (await upload(png().toString("base64"), "wrong photo", "image/png")).body.proof;
+  // Tab A removes the wrong photo and attaches the right one.
+  assert.equal((await call("DELETE", `/api/ledger/trips/${trip}/proofs/${wrong.id}`, {})).body.removed.file, "deleted");
+  const right = (await upload(jpegWithGps().toString("base64"), "receipt", "image/jpeg")).body.proof;
+  assert.ok(right.id > wrong.id, "a new proof never takes a deleted proof's id");
+  // Tab B, opened before, removes "the wrong photo" again.
+  const stale = await call("DELETE", `/api/ledger/trips/${trip}/proofs/${wrong.id}`, {});
+  assert.equal(stale.status, 404);
+  assert.ok(existsSync(join(proofDir, right.sha256)), "the right receipt is kept");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM ledger_proofs").get().n, 1);
+  // Entries: a retried delete of a removed payout does not reach its replacement.
+  const entry = (amount) =>
+    call("POST", `/api/ledger/trips/${trip}/entries`, { type: "payout", amount, occurred: "2026-10-31" });
+  const first = (await entry(1500)).body.id;
+  assert.equal((await call("DELETE", `/api/ledger/trips/${trip}/entries/${first}`, {})).status, 200);
+  const second = (await entry(1600)).body.id;
+  assert.ok(second > first);
+  assert.equal((await call("DELETE", `/api/ledger/trips/${trip}/entries/${first}`, {})).status, 404);
+  assert.deepEqual((await call("GET", `/api/ledger/trips/${trip}`)).body.entries.map((e) => e.amount), [1000, 1600]);
+});
+
+// The ledger tables exactly as 5d508b0 created them (git show 5d508b0:server/ledger.mjs).
+const SCHEMA_5D508B0 = [
+  "CREATE TABLE IF NOT EXISTS ledger_trips (id INTEGER PRIMARY KEY, label TEXT NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL, reference TEXT, predicted TEXT, status TEXT NOT NULL DEFAULT 'open', created TEXT NOT NULL, closed_at TEXT)",
+  "CREATE TABLE IF NOT EXISTS ledger_entries (id INTEGER PRIMARY KEY, trip_id INTEGER NOT NULL REFERENCES ledger_trips(id), type TEXT NOT NULL, amount INTEGER NOT NULL CHECK (amount >= 0), units INTEGER, reference TEXT, occurred TEXT NOT NULL, minutes INTEGER, note TEXT, created TEXT NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS ledger_proofs (id INTEGER PRIMARY KEY, trip_id INTEGER NOT NULL REFERENCES ledger_trips(id), entry_id INTEGER REFERENCES ledger_entries(id), sha256 TEXT NOT NULL, bytes INTEGER NOT NULL, media_type TEXT NOT NULL, label TEXT NOT NULL, created TEXT NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS ledger_legacy_outcomes (outcome_id INTEGER PRIMARY KEY, trip_id INTEGER NOT NULL REFERENCES ledger_trips(id), migrated TEXT NOT NULL)",
+  "CREATE INDEX IF NOT EXISTS ledger_entries_trip ON ledger_entries(trip_id)",
+  "CREATE INDEX IF NOT EXISTS ledger_entries_occurred ON ledger_entries(occurred)",
+  "CREATE INDEX IF NOT EXISTS ledger_proofs_trip ON ledger_proofs(trip_id)",
+];
+
+test("migration: tables from the previous schema get AUTOINCREMENT ids and keep every row, id and link (R2B5)", () => {
+  const db = memoryDb((d) => {
+    for (const sql of SCHEMA_5D508B0) d.exec(sql);
+  });
+  // Fill it the way the previous code did.
+  const a = createTrip(db, { label: "Old A", source: "manual", kind: "resale" }, clock);
+  const b = createTrip(db, { label: "Old B", source: "manual", kind: "household" }, clock);
+  const ra = addEntry(db, a, { type: "receipt", amount: 3000, units: 3, occurred: "2026-10-05", reference: "R-1", note: "till" }, clock);
+  addEntry(db, a, { type: "sale", amount: 7800, units: 3, occurred: "2026-10-10" }, clock);
+  const pa = addEntry(db, a, { type: "payout", amount: 6600, units: 3, occurred: "2026-10-12" }, clock);
+  addEntry(db, a, { type: "work", minutes: 90, occurred: "2026-10-12" }, clock);
+  addEntry(db, b, { type: "saving", amount: 400, occurred: "2026-10-06" }, clock);
+  const doomed = addEntry(db, a, { type: "expense", amount: 64000, occurred: "2026-10-12", note: "typo" }, clock);
+  const insertProof = db.prepare(
+    "INSERT INTO ledger_proofs (trip_id, entry_id, sha256, bytes, media_type, label, created) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  );
+  insertProof.run(a, ra, "1".repeat(64), 100, "image/jpeg", "Till receipt", NOW.toISOString());
+  insertProof.run(a, pa, "2".repeat(64), 200, "application/pdf", "Statement", NOW.toISOString());
+  insertProof.run(a, null, "3".repeat(64), 300, "image/png", "Whole trip", NOW.toISOString());
+  const doomedProof = Number(insertProof.run(b, null, "4".repeat(64), 1, "image/png", "Gone", NOW.toISOString()).lastInsertRowid);
+  // The newest rows are deleted, so the old tables would hand their ids out again.
+  db.prepare("DELETE FROM ledger_entries WHERE id = ?").run(doomed);
+  db.prepare("DELETE FROM ledger_proofs WHERE id = ?").run(doomedProof);
+  const before = {
+    trips: db.prepare("SELECT * FROM ledger_trips ORDER BY id").all(),
+    entries: db.prepare("SELECT * FROM ledger_entries ORDER BY id").all(),
+    proofs: db.prepare("SELECT * FROM ledger_proofs ORDER BY id").all(),
+    detail: getTrip(db, a),
+  };
+  assert.equal(before.detail.reconciliation.verified, true);
+
+  // As openDb runs it: inside the schema transaction, foreign keys on.
+  transaction(db, () => schema(db));
+  const sql = (name) => db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(name).sql;
+  assert.match(sql("ledger_entries"), /AUTOINCREMENT/);
+  assert.match(sql("ledger_proofs"), /AUTOINCREMENT/);
+  assert.match(sql("ledger_proofs"), /REFERENCES "?ledger_entries"?\(id\)/);
+  assert.ok(!/rebuild/.test(sql("ledger_proofs")));
+  assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE name LIKE '%rebuild%'").all(), []);
+  assert.deepEqual(db.prepare("SELECT * FROM ledger_trips ORDER BY id").all(), before.trips);
+  assert.deepEqual(db.prepare("SELECT * FROM ledger_entries ORDER BY id").all(), before.entries);
+  assert.deepEqual(db.prepare("SELECT * FROM ledger_proofs ORDER BY id").all(), before.proofs);
+  assert.deepEqual(getTrip(db, a), before.detail);
+  assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+  const fks = db.prepare("PRAGMA foreign_key_list(ledger_proofs)").all().map((f) => [f.from, f.table]).sort();
+  assert.deepEqual(fks, [["entry_id", "ledger_entries"], ["trip_id", "ledger_trips"]]);
+  const indexes = db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'ledger_%'").all().map((i) => i.name).sort();
+  for (const name of ["ledger_entries_occurred", "ledger_entries_trip", "ledger_proofs_sha256", "ledger_proofs_trip"])
+    assert.ok(indexes.includes(name), name);
+  // Foreign keys still hold: a proof cannot point at a missing entry.
+  assert.throws(() => insertProof.run(a, 99999, "5".repeat(64), 1, "image/png", "x", NOW.toISOString()), /FOREIGN KEY/);
+  assert.throws(() => db.prepare("DELETE FROM ledger_entries WHERE id = ?").run(ra), /FOREIGN KEY/);
+  // New rows continue after the highest id kept; deleted ones are never handed out again.
+  const next = addEntry(db, a, { type: "expense", amount: 300, occurred: "2026-10-13" }, clock);
+  assert.ok(next > Math.max(...before.entries.map((e) => e.id)));
+  db.prepare("DELETE FROM ledger_entries WHERE id = ?").run(next);
+  assert.ok(addEntry(db, a, { type: "expense", amount: 300, occurred: "2026-10-13" }, clock) > next);
+  const p1 = recordProof(db, { tripId: b, entryId: null, label: "new", sha256: "6".repeat(64), bytes: 1, mediaType: "image/png" }, clock).proof.id;
+  db.prepare("DELETE FROM ledger_proofs WHERE id = ?").run(p1);
+  const p2 = recordProof(db, { tripId: b, entryId: null, label: "newer", sha256: "7".repeat(64), bytes: 1, mediaType: "image/png" }, clock).proof.id;
+  assert.ok(p2 > p1);
+  // Running it again changes nothing.
+  assert.equal(migrateToAutoincrement(db), false);
+  const count = db.prepare("SELECT COUNT(*) AS n FROM ledger_entries").get().n;
+  schema(db);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM ledger_entries").get().n, count);
+});
+
+test("migration: only the proof table is rebuilt when entries already use AUTOINCREMENT", () => {
+  const db = memoryDb((d) => {
+    d.exec(SCHEMA_5D508B0[0]);
+    d.exec(SCHEMA_5D508B0[1].replace("id INTEGER PRIMARY KEY,", "id INTEGER PRIMARY KEY AUTOINCREMENT,"));
+    d.exec(SCHEMA_5D508B0[2]);
+  });
+  const a = createTrip(db, { label: "Half", source: "manual", kind: "resale" }, clock);
+  const r = addEntry(db, a, { type: "receipt", amount: 100, units: 1, occurred: "2026-10-05" }, clock);
+  db.prepare("INSERT INTO ledger_proofs (trip_id, entry_id, sha256, bytes, media_type, label, created) VALUES (?, ?, ?, 1, 'image/png', 'r', ?)").run(a, r, "8".repeat(64), NOW.toISOString());
+  schema(db);
+  assert.match(db.prepare("SELECT sql FROM sqlite_master WHERE name = 'ledger_proofs'").get().sql, /AUTOINCREMENT/);
+  assert.equal(getTrip(db, a).proofs[0].entry_id, r);
+  assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
 test("household savings in the summary are net of the trip's own costs (M14)", () => {
   const db = memoryDb(schema);
   const t = createTrip(db, { label: "Big shop", source: "manual", kind: "household" }, clock);
@@ -718,14 +1041,24 @@ test("legacy outcomes migrate idempotently and keep the old table", () => {
       "2026-10-20 14:30:00",
     );
     d.prepare("INSERT INTO outcomes(sku, received, costs, minutes) VALUES (?, ?, ?, ?)").run("leeds-lamp", 0, 800, 30);
+    // 23:30 UTC on 1 July is 2 July in the UK (British Summer Time).
+    d.prepare("INSERT INTO outcomes(sku, received, costs, minutes, created) VALUES (?, ?, ?, ?, ?)").run(
+      "leeds-late",
+      700,
+      200,
+      15,
+      "2026-07-01 23:30:00",
+    );
   }, schema);
   schema(db); // second run must not duplicate
   migrateLegacyOutcomes(db);
   const trips = listTrips(db);
-  assert.equal(trips.length, 2);
+  assert.equal(trips.length, 3);
   assert.ok(trips.every((t) => t.source === "legacy" && t.legacy && t.status === "closed"));
-  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM outcomes").get().n, 2);
-  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM ledger_legacy_outcomes").get().n, 2);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM outcomes").get().n, 3);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM ledger_legacy_outcomes").get().n, 3);
+  const late = getTrip(db, trips.find((t) => t.reference === "leeds-late").id);
+  assert.ok(late.entries.every((e) => e.occurred === "2026-07-02"));
 
   const kettle = trips.find((t) => t.reference === "leeds-kettle");
   const detail = getTrip(db, kettle.id);
@@ -749,14 +1082,14 @@ test("legacy outcomes migrate idempotently and keep the old table", () => {
   // Legacy totals are read-only and excluded from forecast metrics.
   assert.throws(() => addEntry(db, kettle.id, { type: "receipt", amount: 100, units: 1, occurred: "2026-10-20" }, clock), (e) => e.status === 409);
   const m = metrics(db);
-  assert.equal(m.legacyTrips, 2);
+  assert.equal(m.legacyTrips, 3);
   assert.equal(m.closedTrips, 0);
   // A later outcome row is picked up on the next run, and only that one.
   db.prepare("INSERT INTO outcomes(sku, received, costs, minutes) VALUES (?, ?, ?, ?)").run("leeds-mug", 1200, 500, 20);
   schema(db);
-  assert.equal(listTrips(db).length, 3);
+  assert.equal(listTrips(db).length, 4);
   schema(db);
-  assert.equal(listTrips(db).length, 3);
+  assert.equal(listTrips(db).length, 4);
 });
 
 test("schema works without a legacy table and is idempotent", () => {
@@ -784,7 +1117,9 @@ test("entry validation", () => {
   bad({ type: "bonus", amount: 100, occurred: "2026-10-01" }, /type/);
   bad({ type: "payout", amount: 100, occurred: "2026-10-01", note: "x".repeat(501) }, /note/);
   // Dates are checked against today in the UK, not UTC: 00:30 BST on 2 July
-  // is still 1 July in UTC.
+  // is still 1 July in UTC. The ledger counts from the same today as every
+  // other module (http.mjs).
+  assert.equal(londonDate, sharedLondonDate);
   const lateEvening = new Date("2026-07-01T23:30:00.000Z");
   assert.equal(londonDate(lateEvening), "2026-07-02");
   assert.equal(pastDate("2026-07-02", "occurred", lateEvening), "2026-07-02");
@@ -1078,9 +1413,22 @@ test("routes: a stored proof can be re-linked to an entry or removed (qa:Q12)", 
   assert.equal(merged.body.proofs.filter((p) => p.sha256 === till.sha256).length, 1);
   assert.equal(merged.body.reconciliation.verified, true);
 
-  // The same statement is also attached on the other trip.
-  const shared = (await upload(other, { label: "Statement copy", mediaType: "application/pdf", data: statement, entryId: elsewhere })).body.proof;
+  // The same statement cannot prove a receipt on the other trip as well.
+  const reused = await upload(other, { label: "Statement copy", mediaType: "application/pdf", data: statement, entryId: elsewhere });
+  assert.equal(reused.status, 409);
+  assert.equal(
+    reused.body.error,
+    "This file is already the proof for Relink (payout, 25 Oct 2026, £17.50): attach the document for this purchase or payout",
+  );
+  assert.equal((await call("GET", `/api/ledger/trips/${other}`)).body.proofs.length, 0);
+  // Kept with the other trip as a whole-trip proof it is stored, and never counts.
+  const shared = (await upload(other, { label: "Statement copy", mediaType: "application/pdf", data: statement })).body.proof;
   assert.equal(shared.sha256, paid.sha256);
+  assert.equal(shared.entry_id, null);
+  // Moving that copy onto the other trip's receipt is refused the same way.
+  const moveCopy = await relink(shared.id, { entryId: elsewhere }, other);
+  assert.equal(moveCopy.status, 409);
+  assert.match(moveCopy.body.error, /^This file is already the proof for Relink \(payout/);
   const remove = (trip, proofId) => call("DELETE", `/api/ledger/trips/${trip}/proofs/${proofId}`, {});
   assert.equal((await remove(other, paid.id)).status, 404); // not on that trip
   const first = await remove(id, paid.id);
@@ -1147,6 +1495,13 @@ test("routes: summary and metrics", async (t) => {
   assert.equal(month.body.verifiedPayouts, 0);
   // Without a month, the current UK month.
   assert.equal((await call("GET", "/api/ledger/summary")).body.month, "2026-10");
+  // 23:30 UTC on 30 September is already 1 October in the UK.
+  const late = memoryDb(schema);
+  const lateServer = await serve(late, [
+    { routes: (d) => ledgerRoutes.routes(d, { proofDir: join(scratch, "late"), now: () => new Date("2026-09-30T23:30:00Z") }) },
+  ]);
+  t.after(() => lateServer.close());
+  assert.equal((await lateServer.call("GET", "/api/ledger/summary")).body.month, "2026-10");
   assert.equal((await call("GET", "/api/ledger/summary?month=2026-13")).status, 400);
   assert.equal((await call("GET", "/api/ledger/summary?month=October")).status, 400);
   await call("POST", `/api/ledger/trips/${id}/close`, {});

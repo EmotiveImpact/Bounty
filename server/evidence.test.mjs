@@ -17,7 +17,7 @@ import {
   cachedLookup,
 } from "./evidence.mjs";
 import { openPrices } from "./sources.mjs";
-import { importLookup, importFile, isFixture } from "./research.mjs";
+import { contentHash, importLookup, importFile, isFixture, sampleFixtures } from "./research.mjs";
 import { importOpenPrices, fetchJson, parseArgs } from "./worker.mjs";
 import * as evidenceRoutes from "./routes-evidence.mjs";
 
@@ -423,6 +423,63 @@ test("a sale with a total of 0 rejects the whole sales file instead of being ski
     { now },
   );
   assert.deepEqual(result, { saved: 3, parsed: 3, skipped: 0, withoutSeller: 2 });
+});
+
+test("a copy of a sample fixture is refused by its content, wherever it is", () => {
+  const db = memoryDb(schema);
+  const now = at(T0);
+  const sample = fixture("awin-sample.csv");
+  const count = () => db.prepare("SELECT COUNT(*) AS n FROM research").get().n;
+  // The same file copied anywhere, or saved with Windows line endings, a
+  // byte-order mark or trailing spaces, is still the sample.
+  for (const copy of [sample, sample.replace(/\n/g, "\r\n"), "\uFEFF" + sample + "\n\n", sample.replace(/\n/g, "  \n")])
+    assert.throws(
+      () => importFile(db, "awin", copy, { now, name: "/tmp/copied/feed.csv" }),
+      /copy of the repository's sample file sources\/awin-sample\.csv\. Sample data is never imported as evidence/,
+    );
+  // A file that keeps any of its rows is refused too, and nothing is saved.
+  const [header, jumper] = sample.split("\n");
+  const real = "9001,Real kettle,GBP,20.00,4006381333931,,Real Shop,,,2026-10-30,new,1,4,0,,,,,";
+  assert.throws(
+    () => importFile(db, "awin", [header, real, jumper].join("\n"), { now }),
+    /holds 1 row from the repository's sample file sources\/awin-sample\.csv \(for example "Cotton crew-neck jumper, navy"\)/,
+  );
+  assert.equal(count(), 0, "nothing is imported");
+  const [run] = recentRuns(db);
+  assert.equal(run.ok, false, "the refused attempt is recorded");
+  assert.match(run.error, /sample file/);
+  // The rest of a real feed imports as before.
+  assert.equal(importFile(db, "awin", [header, real].join("\n"), { now }).saved, 1);
+  // Every fixture file is known by its hash, and the other sources' samples
+  // are refused as files too.
+  const { hashes } = sampleFixtures();
+  assert.ok([...hashes.values()].includes("sources/awin-sample.csv"));
+  assert.equal(hashes.get(contentHash(fixture("ebay-browse.json"))), "sources/ebay-browse.json");
+  assert.throws(() => importFile(db, "sales", fixture("hobnight-products.json"), { now }), /copy of the repository's sample file/);
+});
+
+test("evidence and observation lists never return more than 500 rows", () => {
+  const db = memoryDb(schema);
+  upsertResearch(
+    db,
+    "sales",
+    Array.from({ length: 501 }, (_, i) => ({ source_id: "s" + i, kind: KIND.SOLD, title: "Honey", barcode: "12345670", price: 1000 })),
+    { now: T0 },
+  );
+  const research = listEvidence(db, { limit: 501 });
+  assert.equal(research.total, 501);
+  assert.equal(research.rows.length, 500, "501 rows are cut to 500");
+  assert.equal(listEvidence(db, { limit: 1000000 }).rows.length, 500);
+  assert.equal(listEvidence(db, {}).rows.length, 100, "the default page is 100");
+  const items = Array.from({ length: 501 }, (_, i) => ({
+    id: i + 1, title: "Milk", store: "Shop", place: null, city: null, osm_id: null, price: 100,
+    regular_price: null, discounted: 0, discount_type: null, day: "2026-10-30", unit: null,
+    quantity: null, barcode: "12345670", proof_id: null, licence: LICENCE.ODBL,
+  }));
+  upsertObservations(db, items, { now: T0 });
+  const observations = listObservations(db, { limit: 501 });
+  assert.equal(observations.total, 501);
+  assert.equal(observations.rows.length, 500);
 });
 
 test("an Awin import reports the rows it skipped", () => {

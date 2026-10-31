@@ -7,13 +7,16 @@ import { KIND, LICENCE } from "./contract.mjs";
 import { schema as evidenceSchema, setPermission, upsertResearch } from "./evidence.mjs";
 import {
   AUDIT_FAILURES,
+  AUDIT_TARGET,
   auditOutcome,
+  isEvidenced,
   latestCheck,
   listItems,
   progress,
   recordCheck,
   recordItem,
   schema,
+  signOff,
   stockStatus,
 } from "./audit.mjs";
 import * as researchRoutes from "./routes-research.mjs";
@@ -85,7 +88,10 @@ const saleRow = (id, extra = {}) => ({
   ...extra,
 });
 const SALES = ["s1", "s2", "s3"].map((sourceId) => ({ provider: "sales", sourceId }));
-const TRIP = { costs: { journeyCost: 200, journeyMinutes: 40, handlingMinutes: 10 } };
+// Every required cost and time entered, as in Research (a blank is never
+// zero): packaging, the return journey and handling. The parcel cost comes
+// from the item's shipping field.
+const TRIP = { costs: { packaging: 50, journeyCost: 200, journeyMinutes: 40, handlingMinutes: 10 } };
 
 function evidenceDb({ sales = [saleRow("s1"), saleRow("s2"), saleRow("s3")], permit = true, offer = {} } = {}) {
   const db = memoryDb(evidenceSchema, schema);
@@ -433,6 +439,18 @@ test("stored estimate inputs set the audited tier", () => {
   const noTrip = item(db, { availabilityCheckId: c.id, estimateInputs: null });
   assert.equal(noTrip.evidence.tier, "Review");
   assert.ok(noTrip.outcome.reasons.includes(AUDIT_FAILURES.tier));
+  assert.deepEqual(noTrip.evidence.missingInputs, ["packaging cost", "return journey cost", "journey time", "handling time"]);
+  // A required cost left blank in Research is never zero: the item cannot pass.
+  const { packaging: _packaging, ...noPackaging } = TRIP.costs;
+  const blank = item(db, { availabilityCheckId: c.id, estimateInputs: { costs: noPackaging } });
+  assert.equal(blank.evidence.tier, "Review");
+  assert.deepEqual(blank.evidence.missingInputs, ["packaging cost"]);
+  assert.equal(blank.outcome.passed, false);
+  // An unknown parcel cost is not sent as 0 either.
+  const noParcel = item(db, { availabilityCheckId: c.id, shipping: null });
+  assert.deepEqual(noParcel.evidence.missingInputs, ["parcel cost"]);
+  assert.ok(noParcel.outcome.reasons.includes(AUDIT_FAILURES.shipping));
+  assert.equal(item(db, { availabilityCheckId: c.id }).evidence.missingInputs.length, 0);
   // The audit sets the offer, sales, locality and parcel cost itself.
   const kept = item(db, { availabilityCheckId: c.id, estimateInputs: { ...TRIP, offer: { provider: "x", sourceId: "y" }, locality: "Leeds", units: 1 } });
   assert.deepEqual(kept.estimate_inputs, { ...TRIP, units: 1 });
@@ -507,16 +525,164 @@ test("progress counts audited, passed and failed items per locality", () => {
   const p = progress(db, "camden");
   assert.equal(p.target, 30);
   assert.equal(p.audited, 3);
+  assert.equal(p.evidenced, 1, "items with no recorded offer are audited but not evidenced");
+  assert.equal(p.withoutEvidence, 2);
   assert.equal(p.passed, 1);
   assert.equal(p.failed, 2);
-  assert.equal(p.remaining, 27);
+  assert.equal(p.remaining, 29, "29 more items with stored evidence are needed");
   assert.equal(p.complete, false);
+  assert.equal(p.signedOff, null);
+  assert.equal(p.signOffLapsed, null);
   assert.equal(p.failures[AUDIT_FAILURES.noCheck], 2);
   assert.equal(p.failures[AUDIT_FAILURES.noEvidence], 2, "counted once per item");
   assert.equal(p.failures[AUDIT_FAILURES.shipping], 1);
   assert.equal(Object.getPrototypeOf(p.failures), Object.prototype);
   assert.equal(progress(db, "Hackney").audited, 1);
   assert.equal(progress(db, "Bristol").remaining, 30);
+});
+
+// A valid GTIN-13 for item n of a 30-item audit.
+function gtin13(n) {
+  const data = "50123456" + String(n).padStart(4, "0");
+  let sum = 0;
+  const padded = data.padStart(13, "0");
+  for (let i = 0; i < 13; i++) sum += Number(padded[i]) * (i % 2 === 0 ? 3 : 1);
+  return data + ((10 - (sum % 10)) % 10);
+}
+
+// count items in Camden, each with its own recorded Awin offer and no
+// confirmed sales: the evidence reads without an error, and every item fails.
+function auditedOffers(db, count, { from = 1, now = NOW } = {}) {
+  const offers = Array.from({ length: count }, (_, i) => ({ ...OFFER, source_id: "o" + (from + i), barcode: gtin13(from + i) }));
+  upsertResearch(db, "awin", offers, { now: NOW });
+  return offers.map((o) =>
+    recordItem(
+      db,
+      {
+        locality: LOCALITY,
+        barcode: o.barcode,
+        title: o.title,
+        retailer: "Argos",
+        offerProvider: "awin",
+        offerSourceId: o.source_id,
+        sales: [],
+        weightKg: 0.9,
+        promotionEligible: true,
+        shipping: 300,
+        estimateInputs: TRIP,
+      },
+      { now },
+    ),
+  );
+}
+
+test("thirty rows with no stored evidence never complete the audit", () => {
+  const db = evidenceDb();
+  // The review scenario: 30 rows holding only a barcode, title and retailer.
+  for (let n = 1; n <= AUDIT_TARGET; n++)
+    item(db, { barcode: gtin13(n), offerProvider: null, offerSourceId: null, sales: [] });
+  const p = progress(db, LOCALITY);
+  assert.deepEqual(
+    [p.audited, p.evidenced, p.passed, p.remaining, p.complete, p.signedOff],
+    [30, 0, 0, 30, false, null],
+  );
+  assert.equal(status(() => signOff(db, { locality: LOCALITY }, { now: NOW })), 409);
+  assert.throws(() => signOff(db, { locality: LOCALITY }, { now: NOW }), /not complete: 0 of 30 items have been checked against stored evidence/);
+  // Sample offers and evidence that could not be read do not count either.
+  assert.equal(isEvidenced({ offer_provider: "awin", offer_source_id: "x", evidence: { offer: {}, error: null, live: false } }), false);
+  assert.equal(isEvidenced({ offer_provider: "awin", offer_source_id: "x", evidence: { offer: null, error: "units must be a whole number", live: null } }), false);
+  assert.equal(isEvidenced({ offer_provider: null, offer_source_id: null, evidence: { offer: {}, error: null, live: true } }), false);
+  assert.equal(isEvidenced({ offer_provider: "awin", offer_source_id: "x", evidence: { offer: {}, error: null, live: true } }), true);
+  const sample = evidenceDb({ offer: { source_id: "sample-1" } });
+  item(sample, { offerSourceId: "sample-1" });
+  assert.equal(progress(sample, LOCALITY).evidenced, 0, "sample data never counts towards the audit");
+});
+
+test("a complete audit that mostly failed stays unvalidated until the operator signs it off", () => {
+  const db = evidenceDb();
+  auditedOffers(db, AUDIT_TARGET - 1);
+  assert.equal(progress(db, LOCALITY).complete, false);
+  assert.equal(status(() => signOff(db, { locality: LOCALITY }, { now: NOW })), 409);
+  // The thirtieth evidenced item completes the audit, though none passed.
+  auditedOffers(db, 1, { from: AUDIT_TARGET });
+  const p = progress(db, LOCALITY);
+  assert.deepEqual([p.audited, p.evidenced, p.passed, p.failed, p.complete, p.signedOff], [30, 30, 0, 30, true, null]);
+  // Counts the operator did not see are refused.
+  assert.equal(status(() => signOff(db, { locality: LOCALITY, passed: 5, evidenced: 30 }, { now: NOW })), 409);
+  assert.throws(() => signOff(db, { locality: LOCALITY, passed: 5 }, { now: NOW }), /changed since you looked: 0 of 30 items now pass/);
+  assert.equal(status(() => signOff(db, { locality: "" }, { now: NOW })), 400);
+  assert.equal(status(() => signOff(db, { locality: LOCALITY, passed: "0" }, { now: NOW })), 400);
+  assert.equal(status(() => signOff(db, null, { now: NOW })), 400);
+  const signed = signOff(db, { locality: "camden", passed: 0, evidenced: 30, note: "Accepted for the pilot" }, { now: NOW });
+  assert.equal(signed.created, true);
+  assert.deepEqual(
+    { ...signed.signedOff, id: undefined },
+    { id: undefined, locality: "camden", at: NOW, target: 30, audited: 30, evidenced: 30, passed: 0, note: "Accepted for the pilot" },
+  );
+  assert.deepEqual(progress(db, LOCALITY).signedOff, signed.signedOff);
+  assert.equal(signOff(db, { locality: LOCALITY }, { now: NOW }).created, false, "a standing sign-off is not recorded twice");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM audit_signoffs").get().n, 1);
+  assert.equal(progress(db, "Hackney").signedOff, null, "a sign-off covers its own locality only");
+
+  // Changing an item after the sign-off lapses it.
+  const later = new Date(Date.parse(NOW) + 3600000).toISOString();
+  auditedOffers(db, 1, { from: 1, now: later });
+  const changed = progress(db, LOCALITY);
+  assert.equal(changed.signedOff, null);
+  assert.deepEqual(changed.signOffLapsed, { at: NOW, passed: 0, evidenced: 30, reason: "1 item was changed after the sign-off" });
+  const again = signOff(db, { locality: LOCALITY }, { now: later });
+  assert.equal(again.created, true);
+  assert.equal(progress(db, LOCALITY).signOffLapsed, null);
+  // Evidence that can no longer be read takes the audit below 30, and the
+  // sign-off lapses with it.
+  db.prepare("DELETE FROM research WHERE provider = 'awin' AND source_id = 'o2'").run();
+  const removed = progress(db, LOCALITY);
+  assert.deepEqual([removed.evidenced, removed.complete, removed.signedOff], [29, false, null]);
+  assert.equal(removed.signOffLapsed.reason, "Only 29 of 30 items now have stored evidence");
+});
+
+test("an offer or a stock check for another item never passes", () => {
+  const db = evidenceDb();
+  const c = check(db);
+  const saved = item(db, { availabilityCheckId: c.id });
+  assert.equal(saved.outcome.passed, true, reasonsOf(saved));
+  // A check for another barcode at the same shop and place is refused.
+  const other = check(db, { barcode: "4006381333931" });
+  assert.throws(() => item(db, { availabilityCheckId: other.id }), /That availability check is for a different barcode/);
+  assert.equal(status(() => item(db, { availabilityCheckId: other.id })), 400);
+  const wrong = auditOutcome({ ...saved, check: { ...c, barcode: "04006381333931" } });
+  assert.ok(wrong.reasons.includes(AUDIT_FAILURES.checkMismatch));
+  // The feed now names another retailer for the recorded offer: the offer
+  // check fails, not only the stock check.
+  upsertResearch(db, "awin", [{ ...OFFER, retailer: "Tesco" }], { now: NOW });
+  const [moved] = listItems(db, LOCALITY);
+  const offerCheck = moved.outcome.checks.find((x) => x.id === "offer");
+  assert.equal(offerCheck.ok, false);
+  assert.equal(offerCheck.detail, AUDIT_FAILURES.offerMismatch);
+  assert.equal(moved.outcome.passed, false);
+  // An offer with no retailer, or one for another barcode, fails the same way.
+  for (const offer of [{ ...saved.evidence.offer, retailer: null }, { ...saved.evidence.offer, retailer: "Tesco" }, { ...saved.evidence.offer, barcode: "04006381333931" }]) {
+    const outcome = auditOutcome({ ...saved, evidence: { ...saved.evidence, offer } });
+    assert.equal(outcome.checks.find((x) => x.id === "offer").detail, AUDIT_FAILURES.offerMismatch, JSON.stringify(offer));
+    assert.equal(outcome.passed, false);
+  }
+});
+
+test("deeply nested or oversized estimate inputs are refused with 400", () => {
+  const db = evidenceDb();
+  let deep = 1;
+  for (let i = 0; i < 5000; i++) deep = [deep];
+  const hostile = [
+    { units: deep },
+    { costs: { ...TRIP.costs, extra: deep } },
+    { notes: "x".repeat(5000) },
+    { list: Array.from({ length: 3000 }, () => 1) },
+    { costs: { a: { b: { c: { d: { e: { f: 1 } } } } } } },
+    { costs: { ...TRIP.costs, at: () => 1 } },
+  ];
+  hostile.forEach((estimateInputs, i) => assert.equal(status(() => item(db, { estimateInputs })), 400, "case " + i));
+  assert.throws(() => item(db, { estimateInputs: { units: deep } }), /nested too deeply/);
+  assert.throws(() => item(db, { estimateInputs: { notes: "x".repeat(5000) } }), /too large \(up to 4000 characters\)/);
 });
 
 test("audit and check routes validate input and report progress", async () => {
@@ -585,8 +751,25 @@ test("audit and check routes validate input and report progress", async () => {
     const p = await api.call("GET", "/api/audit/progress?locality=" + LOCALITY);
     assert.equal(p.status, 200);
     assert.equal(p.body.passed, 1);
+    assert.equal(p.body.evidenced, 1);
     assert.equal(p.body.remaining, 29);
+    assert.equal(p.body.signedOff, null);
     assert.equal((await api.call("GET", "/api/audit/progress")).status, 400);
+
+    // Sign-off: operator only, and only once the audit is complete.
+    const early = await api.call("POST", "/api/audit/signoff", { locality: LOCALITY });
+    assert.equal(early.status, 409);
+    assert.match(early.body.error, /1 of 30 items have been checked against stored evidence/);
+    assert.equal((await api.call("POST", "/api/audit/signoff", { locality: LOCALITY, memberId: 1 })).status, 403);
+    assert.equal((await api.call("POST", "/api/audit/signoff?viewer=3", { locality: LOCALITY })).status, 403);
+    assert.equal((await api.call("POST", "/api/audit/signoff", {})).status, 400);
+    // A body with estimateInputs.units nested 5000 lists deep, sent as text
+    // (JSON.stringify itself cannot write it).
+    const deep = "[".repeat(5000) + "1" + "]".repeat(5000);
+    const raw = JSON.stringify({ ...body, estimateInputs: { ...TRIP, units: 1 } }).replace('"units":1', '"units":' + deep);
+    const nested = await fetch(api.base + "/api/audit", { method: "POST", headers: { "Content-Type": "application/json" }, body: raw });
+    assert.equal(nested.status, 400);
+    assert.match((await nested.json()).error, /nested too deeply/);
   } finally {
     await api.close();
   }

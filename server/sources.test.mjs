@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import {
   awin,
   claimedPence,
@@ -21,6 +22,7 @@ import {
   structuredPack,
 } from "./sources.mjs";
 import { KIND, LICENCE } from "./contract.mjs";
+import { fetchJson } from "./worker.mjs";
 
 const fixture = (name) => new URL("./fixtures/sources/" + name, import.meta.url);
 
@@ -241,10 +243,16 @@ test("Browse requests GB and retains asking price classification", async () => {
 test("eBay GTIN search uses gtin without q, a GB location filter and 200 results", async () => {
   const body = JSON.parse(readFileSync(fixture("ebay-browse.json"), "utf8"));
   let seen;
-  const rows = await lookup("ebay", "5000112637922", { EBAY_ACCESS_TOKEN: "ebay-token-xyz" }, async (url, options) => {
-    seen = { url, options };
-    return Response.json(body);
-  });
+  const rows = await lookup(
+    "ebay",
+    "5000112637922",
+    { EBAY_ACCESS_TOKEN: "ebay-token-xyz" },
+    async (url, options) => {
+      seen = { url, options };
+      return Response.json(body);
+    },
+    { clock: () => new Date("2026-10-31T09:00:00Z") },
+  );
   assert.equal(seen.url.origin + seen.url.pathname, "https://api.ebay.com/buy/browse/v1/item_summary/search");
   assert.equal(seen.url.searchParams.get("gtin"), "5000112637922");
   assert.equal(seen.url.searchParams.get("q"), null, "eBay forbids combining gtin and q");
@@ -255,13 +263,58 @@ test("eBay GTIN search uses gtin without q, a GB location filter and 200 results
   assert.equal(rows.length, 3, "the auction-only and USD listings are dropped");
   const [cheapPost, noPost, calculated] = rows;
   assert.deepEqual(
-    [cheapPost.source_id, cheapPost.kind, cheapPost.condition, cheapPost.seller, cheapPost.shipping, cheapPost.price, cheapPost.observed, cheapPost.url, cheapPost.barcode, cheapPost.licence, cheapPost.location],
-    ["v1|111|0", KIND.ASKING, "new", "jumper_seller", 155, 1299, "2026-10-20T09:15:00.000Z", "https://www.ebay.co.uk/itm/111", "5000112637922", LICENCE.PROVIDER, null],
+    [cheapPost.source_id, cheapPost.kind, cheapPost.condition, cheapPost.seller, cheapPost.shipping, cheapPost.price, cheapPost.url, cheapPost.barcode, cheapPost.licence, cheapPost.location],
+    ["v1|111|0", KIND.ASKING, "new", "jumper_seller", 155, 1299, "https://www.ebay.co.uk/itm/111", "5000112637922", LICENCE.PROVIDER, null],
   );
+  // observed is when the asking price was seen (the lookup), so its age says
+  // how current the competition is; listed is when the listing started.
+  assert.deepEqual([cheapPost.observed, cheapPost.listed], ["2026-10-31T09:00:00.000Z", "2026-10-20T09:15:00.000Z"]);
+  assert.ok(rows.every((r) => r.observed === "2026-10-31T09:00:00.000Z"));
   assert.equal(noPost.shipping, null, "no stated shipping cost is unknown, not free");
   assert.equal(noPost.condition, "used");
   assert.equal(calculated.shipping, 0);
   for (const row of rows) assert.notEqual(row.kind, KIND.SOLD, "asking prices are never sales");
+});
+
+test("a source that answers with a redirect is refused, not followed", async () => {
+  // A real server that redirects the lookup elsewhere. Following it would
+  // send the token on to another address and import whatever is there.
+  let followed = 0;
+  const server = createServer((req, res) => {
+    if (req.url.startsWith("/start")) {
+      res.writeHead(302, { Location: "/elsewhere" });
+      res.end();
+      return;
+    }
+    followed++;
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ itemSummaries: [{ itemId: "x", title: "Shirt", price: { currency: "GBP", value: "9.99" } }] }));
+  });
+  await new Promise((done) => server.listen(0, "127.0.0.1", done));
+  const local = `http://127.0.0.1:${server.address().port}/start`;
+  try {
+    await assert.rejects(
+      lookup("ebay", "shirt", { EBAY_ACCESS_TOKEN: "redirect-token-123" }, (url, options) => fetch(local, options)),
+      (error) =>
+        error instanceof SourceError &&
+        /answered with a redirect to another address, which is refused/.test(error.message) &&
+        error.transient === false &&
+        !error.message.includes("redirect-token-123"),
+    );
+    // The Open Prices worker refuses a redirect the same way, without retrying.
+    let calls = 0;
+    await assert.rejects(
+      fetchJson(new URL("https://example.test"), {
+        request: (url, options) => (calls++, fetch(local, options)),
+        sleep: async () => {},
+      }),
+      (error) => error instanceof SourceError && /Open Prices answered with a redirect/.test(error.message),
+    );
+    assert.equal(calls, 1, "a redirect is not retried");
+    assert.equal(followed, 0, "the redirect target is never requested");
+  } finally {
+    server.close();
+  }
 });
 
 test("eBay invalid token error is reported with its message", async () => {

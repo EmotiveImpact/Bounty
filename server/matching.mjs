@@ -8,6 +8,8 @@ import { KIND } from "./contract.mjs";
 import { ALERT_RULES, ageDays } from "./alerts.mjs";
 import { lowerMedian } from "./trip.mjs";
 
+const DAY = 86400000;
+
 // Lower case, Unicode-normalised, dashes unified, spaces collapsed. Null for
 // empty values so that "not stated" is never confused with a real value, and
 // null for anything other than text or a finite number (an object, array or
@@ -488,10 +490,37 @@ export function exclusionReason(offer, row, { now, maxSaleAgeDays = ALERT_RULES.
   return null;
 }
 
+// Asking prices change and listings end, so a listing counts as current
+// competition only for this many days after it was seen. It matches the
+// shelf-price window (ALERT_RULES.maxOfferAgeDays).
+export const ASKING_MAX_AGE_DAYS = ALERT_RULES.maxOfferAgeDays;
+
+const londonDay = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/London",
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+});
+const timeOf = (value) =>
+  value instanceof Date ? value.getTime() : typeof value === "string" ? Date.parse(value) : NaN;
+
 /**
  * Resale competition for an offer: Active asking price rows with the same
- * valid barcode as the offer (exact matches included). Never touches the
- * sold sample.
+ * valid barcode as the offer (exact matches included) that were seen within
+ * maxAgeDays of now (observed is when the asking price was seen). Never
+ * touches the sold sample.
+ *
+ * options: { now (Date or ISO, default the current time), maxAgeDays
+ * (default ASKING_MAX_AGE_DAYS), lookup ({ fetched } of the latest
+ * asking-price lookup for the barcode, or null) }.
+ *
+ * activeListings is the count of current listings. It is null, with a note,
+ * when no listing was seen inside the window and the newest listing or lookup
+ * is older than that: the old figure could be far below today's competition,
+ * so competition is unknown. With no listings and no lookup on record it is 0
+ * (callers treat that as unknown unless a lookup ran). olderListings counts
+ * the listings left out for their age (or a missing date); checkedAt is the
+ * newest time a listing or lookup was seen (ISO) or null.
  *
  * sellers counts distinct stated sellers plus one for every listing without a
  * seller id: for competition the cautious assumption is that an unknown
@@ -499,17 +528,50 @@ export function exclusionReason(offer, row, { now, maxSaleAgeDays = ALERT_RULES.
  * buyer shipping where shipping is known; lowestAskingIncludesShipping is
  * false when the lowest figure excludes unknown shipping.
  */
-export function competition(offer, rows) {
+export function competition(offer, rows, { now = new Date(), maxAgeDays = ASKING_MAX_AGE_DAYS, lookup = null } = {}) {
   const gtin = normaliseBarcode(offer?.barcode);
-  const listings = gtin
+  const at = timeOf(now);
+  const windowDays = Number.isFinite(maxAgeDays) && maxAgeDays >= 0 ? maxAgeDays : ASKING_MAX_AGE_DAYS;
+  const all = gtin
     ? (rows ?? []).filter(
         (r) =>
-          r.kind === KIND.ASKING &&
+          r?.kind === KIND.ASKING &&
           normaliseBarcode(r.barcode) === gtin &&
           Number.isSafeInteger(r.price) &&
           r.price > 0,
       )
     : [];
+  // Whole days since a time, as offerFreshness counts them; null when either
+  // time is unusable. A time in the future is never current.
+  const age = (t) => (Number.isFinite(t) && Number.isFinite(at) ? Math.floor((at - t) / DAY) : null);
+  const current = (t) => {
+    const days = age(t);
+    return days !== null && days >= 0 && days <= windowDays;
+  };
+  const listings = all.filter((r) => current(timeOf(r.observed)));
+  const lookupAt = timeOf(lookup?.fetched ?? lookup);
+  const seen = [...all.map((r) => timeOf(r.observed)), lookupAt].filter(
+    (t) => Number.isFinite(t) && (!Number.isFinite(at) || t <= at + DAY),
+  );
+  const newest = seen.length ? Math.max(...seen) : null;
+  const known = listings.length > 0 || current(lookupAt) || (all.length === 0 && !Number.isFinite(lookupAt));
+  const base = {
+    olderListings: all.length - listings.length,
+    checkedAt: newest === null ? null : new Date(newest).toISOString(),
+    maxAgeDays: windowDays,
+  };
+  if (!known)
+    return {
+      activeListings: null,
+      sellers: null,
+      lowestAsking: null,
+      lowestAskingIncludesShipping: null,
+      ...base,
+      note:
+        newest === null
+          ? "Competing listings have no date they were seen: run an asking-price lookup before sharing"
+          : `Competing listings last checked ${londonDay.format(new Date(newest))}: run an asking-price lookup before sharing`,
+    };
   const named = new Set();
   let unnamed = 0;
   let lowest = null;
@@ -531,6 +593,10 @@ export function competition(offer, rows) {
     sellers: named.size + unnamed,
     lowestAsking: lowest ? lowest.total : null,
     lowestAskingIncludesShipping: lowest ? lowest.shippingKnown : null,
+    ...base,
+    note: base.olderListings
+      ? `${base.olderListings} older listing${base.olderListings === 1 ? "" : "s"} seen more than ${windowDays} days ago not counted`
+      : null,
   };
 }
 

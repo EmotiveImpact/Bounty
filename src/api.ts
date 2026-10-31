@@ -44,8 +44,34 @@ export const hours = (minutes: number) =>
   (minutes / 60).toLocaleString("en-GB", { maximumFractionDigits: 2 }) + " h";
 export const percent = (share: number) =>
   (share * 100).toLocaleString("en-GB", { maximumFractionDigits: 1 }) + "%";
-export const dateTime = (value: string | null | undefined) =>
-  value ? value.replace("T", " ").replace(/\.\d+Z$|Z$/, "") : "unknown";
+// Dates and times for people, in UK time: "31 Oct 2026, 14:05", or
+// "30 Oct 2026" for a date with no time. Never a raw ISO string.
+const ukDateTimeFormat = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/London",
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+const ukDateFormat = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "UTC",
+  day: "numeric",
+  month: "short",
+  year: "numeric",
+});
+export const dateTime = (value: string | null | undefined) => {
+  if (!value) return "unknown";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const ms = Date.parse(value + "T12:00:00Z");
+    return Number.isFinite(ms) ? ukDateFormat.format(new Date(ms)) : value;
+  }
+  // SQLite's "YYYY-MM-DD HH:MM:SS" is UTC without a zone marker.
+  const iso = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(value) ? value.replace(" ", "T") + "Z" : value;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ukDateTimeFormat.format(new Date(ms)) : value;
+};
 
 // Per-viewer profile shared by the planner, goals and research views.
 export type Profile = {
@@ -55,14 +81,16 @@ export type Profile = {
   transport: string;
   carry: number; // kg
   quantity: number;
-  fare: number; // pounds, return public transport fare
+  // Pounds, return public transport fare; null when not entered. A blank is
+  // never a free journey: £0 counts only when fareFree is ticked.
+  fare: number | null;
   perMile: number; // pence per mile for car or van
   extra: number; // pounds, parking or tolls
   storage: number; // units of storage at home
   feeRate: number; // share, e.g. 0.13
   feeFixed: number; // pence per item
   returnsRate: number; // share
-  fareFree?: boolean; // true when a public transport fare of £0 is real, not blank
+  fareFree?: boolean; // true when public transport is free for this member (a bus pass)
 };
 export const initialProfile: Profile = {
   area: "Leeds",
@@ -71,22 +99,38 @@ export const initialProfile: Profile = {
   transport: "Walk",
   carry: 5,
   quantity: 4,
-  fare: 0,
+  fare: null,
   perMile: 45,
   extra: 0,
   storage: 10,
   feeRate: 0.13,
   feeFixed: 40,
   returnsRate: 0.05,
+  fareFree: false,
 };
+
+/**
+ * A saved fare as the profile keeps it. Anything that is not a number (an
+ * empty field saved as "" or null, or nothing saved) is not entered. A saved
+ * 0 was the old starting value of the field, so it counts as a free fare
+ * only when "My public transport is free" is ticked.
+ */
+function savedFare(value: unknown, fareFree: boolean): number | null {
+  const n =
+    typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
+  if (!Number.isFinite(n)) return null;
+  if (n === 0 && !fareFree) return null;
+  return n;
+}
+
 export function loadProfile(): Profile {
   try {
-    return {
-      ...initialProfile,
-      ...JSON.parse(localStorage.getItem("bounty-profile") || "{}"),
-    };
+    const raw = JSON.parse(localStorage.getItem("bounty-profile") || "{}");
+    const saved = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    const fareFree = saved.fareFree === true;
+    return { ...initialProfile, ...saved, fareFree, fare: savedFare(saved.fare, fareFree) };
   } catch {
-    return initialProfile;
+    return { ...initialProfile };
   }
 }
 export function saveProfile(profile: Profile) {

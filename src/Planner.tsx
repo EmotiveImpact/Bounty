@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import {
   api,
+  dateTime,
   hours,
   loadMemberRules,
   loadProfile,
@@ -74,7 +75,9 @@ export type Payout = {
 export type CashTiming = { status: "on time" | "late" | "unknown"; daysLate: number | null; note: string };
 type TripTiming = {
   start: string;
-  daysToSell: number;
+  daysToSell: number | null; // until the last unit sells; null when the sales rate is unknown
+  daysToSellOneUnit: number; // the Goals assumption for one unit
+  units: number;
   payout: Payout;
   payoutDays: number | null;
   cashNeededBy: string | null;
@@ -130,6 +133,7 @@ type Trip = {
   trialUnits: number;
   afterTrial: number;
   sellWindowWeeks: number;
+  demandUnits: number | null;
   weightKg: number;
   journey: { mode: string; miles: number; cost: number; minutes: number };
   fareMissing: boolean;
@@ -163,6 +167,9 @@ type Rejected = {
   miles: number;
   buy: number;
   weight: number;
+  units: number;
+  unitProfit: number | null;
+  returnOnCost: number | null;
   reasons: string[];
   tier: string;
   accessNeeds: AccessNeed[];
@@ -216,13 +223,36 @@ const perHourShort = (pence: number | null) => (pence === null ? "no trip" : mon
 const minutesText = (m: number) => m + " min";
 export const plural = (n: number, one: string, many = one + "s") => n + " " + (n === 1 ? one : many);
 
-/** "13 days (payout expected 2026-11-13)", or why it is not known. */
+/** "13 days (payout expected 13 Nov 2026)", or why it is not known. */
 export function paymentText(payoutDays: number | null | undefined, date: string | null | undefined) {
   if (payoutDays === null || payoutDays === undefined || !date) return "not known: no payout date can be scheduled";
-  return `${plural(payoutDays, "day")} (payout expected ${date})`;
+  return `${plural(payoutDays, "day")} (payout expected ${dateTime(date)})`;
 }
 /** When a price or stock check was made, or "never". */
-export const checkedText = (date: string | null) => (date ? date.slice(0, 10) : "never");
+export const checkedText = (date: string | null) => (date ? dateTime(date) : "never");
+
+/** The payout schedule in words, with dates as people write them. */
+export function payoutSentence(p: Payout) {
+  if (!p.date) return p.note; // why it cannot be scheduled; carries no dates
+  return `Assumes a sale by ${dateTime(p.sold)}, posting on ${dateTime(p.dispatch)}, delivery by ${dateTime(p.delivered)} and payout on ${dateTime(p.date)}.`;
+}
+
+/** The payout against the date the cash is needed, in words. */
+export function cashSentence(cash: CashTiming, cashNeededBy: string | null, payoutDate: string | null) {
+  if (!cashNeededBy) return "No date is set for when you need the cash back.";
+  if (!payoutDate) return `The payout date is unknown, so it cannot be checked against ${dateTime(cashNeededBy)}.`;
+  if (cash.status === "late")
+    return `Payout expected ${dateTime(payoutDate)}, ${plural(cash.daysLate ?? 0, "day")} after you need the cash (${dateTime(cashNeededBy)}).`;
+  return `Payout expected ${dateTime(payoutDate)}, on or before ${dateTime(cashNeededBy)}.`;
+}
+
+/** How long selling takes: the Goals figure for one unit, or longer for several. */
+export function sellingSentence(t: { daysToSell: number | null; daysToSellOneUnit: number; units: number }) {
+  if (t.daysToSell === null) return "";
+  if (t.daysToSell > t.daysToSellOneUnit)
+    return `At the item's sales rate the last of ${plural(t.units, "unit")} is expected to sell after ${plural(t.daysToSell, "day")}, longer than the ${plural(t.daysToSellOneUnit, "day")} your Goals assume for one unit.`;
+  return `It uses your Goals assumption of ${plural(t.daysToSellOneUnit, "day")} to sell, your dispatch days, delivery and payout delay, not sold evidence for this item.`;
+}
 
 // The member's stricter thresholds are shared with Research through api.ts
 // (one store for every tab). The server applies them only where they are
@@ -261,18 +291,29 @@ const toDraft = (rules: Rules) =>
     }),
   ) as Record<RuleKey, string>;
 
-// The profile as saved in this browser. fareFree records that a fare of £0
-// was meant (a bus pass, for example), as opposed to a fare not entered.
-export type PlannerProfile = Profile & { fareFree?: boolean };
+// The profile as saved in this browser. fare is null when the field is
+// empty (not entered); fareFree records that public transport is free for
+// this member (a bus pass, for example), which is the only way £0 counts.
+export type PlannerProfile = Profile;
+
+const FARE_MAX = 1000; // pounds
+/** True when the fare field holds a number, valid or not. */
+const fareFilled = (p: Profile) => typeof p.fare === "number" && Number.isFinite(p.fare);
+/** True when the fare is a usable entry: more than 0p and at most £1,000. */
+const fareEntered = (p: Profile) =>
+  fareFilled(p) && toPence(p.fare as number) > 0 && (p.fare as number) <= FARE_MAX;
+/** True when the fare is used: by public transport, unless travel is free. */
+const fareUsed = (p: Profile) => p.transport === "Public transport" && p.fareFree !== true;
 
 /** True when travelling by public transport with no fare entered. */
-export const fareNotEntered = (p: PlannerProfile) =>
-  p.transport === "Public transport" && !(p.fare > 0) && p.fareFree !== true;
+export const fareNotEntered = (p: PlannerProfile) => fareUsed(p) && !fareEntered(p);
 
 /**
  * The profile as the API expects it: money in whole pence, rates as shares,
- * and the member's stricter thresholds. A fare of £0 is sent as null (not
- * entered) unless the member said their travel is free.
+ * and the member's stricter thresholds. The fare is 0 when the member ticked
+ * that their travel is free, the fare in pence when one is entered, and null
+ * (not entered) otherwise: an empty field, £0 without the tick, or a value
+ * that is ignored because it is not used (walking, cycling or driving).
  */
 export function planProfile(p: PlannerProfile, rules: Rules) {
   return {
@@ -282,7 +323,7 @@ export function planProfile(p: PlannerProfile, rules: Rules) {
     transport: p.transport,
     carry: p.carry,
     quantity: p.quantity,
-    fare: p.fare > 0 || p.fareFree === true ? toPence(p.fare) : null,
+    fare: p.fareFree === true ? 0 : fareEntered(p) ? toPence(p.fare as number) : null,
     perMile: Math.round(p.perMile),
     extra: toPence(p.extra),
     storage: p.storage,
@@ -306,7 +347,13 @@ export function profileProblem(p: Profile): string | null {
     [between(p.carry, 0, 1000), "Carry limit must be between 0 and 1,000 kg."],
     [whole(p.quantity, 1, 1000), "Maximum units must be a whole number from 1 to 1,000."],
     [whole(p.storage, 0, 100000), "Storage at home must be a whole number of units."],
-    [between(p.fare, 0, 1000), "Public transport fare must be between £0 and £1,000."],
+    // The fare is checked only when it is filled in and used; an empty field
+    // is "not entered", and it is ignored when walking, cycling, driving or
+    // when public transport is free.
+    [
+      !fareUsed(p) || !fareFilled(p) || between(p.fare, 0, FARE_MAX),
+      "Public transport fare must be between £0 and £1,000, or leave it empty if you do not know it.",
+    ],
     [between(p.perMile, 0, 1000), "Cost per mile must be between 0p and 1,000p."],
     [between(p.extra, 0, 1000), "Parking or tolls must be between £0 and £1,000."],
     [between(p.feeRate, 0, 0.5), "Marketplace fee must be between 0% and 50%."],
@@ -410,6 +457,40 @@ function NumberField({
   );
 }
 
+/** A number field that may be left empty: empty is null, never zero. */
+function OptionalNumberField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  disabled = false,
+  note,
+}: {
+  label: string;
+  value: number | null;
+  onChange: (v: number | null) => void;
+  placeholder: string;
+  disabled?: boolean;
+  note?: React.ReactNode;
+}) {
+  return (
+    <label>
+      {label}
+      <input
+        type="number"
+        inputMode="decimal"
+        min={0}
+        step="any"
+        placeholder={placeholder}
+        disabled={disabled}
+        value={typeof value === "number" && Number.isFinite(value) ? value : ""}
+        onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))}
+      />
+      {note && <span className="muted">{note}</span>}
+    </label>
+  );
+}
+
 // Rates are stored as shares and edited as percentages.
 const asPercent = (share: number) => (Number.isFinite(share) ? Math.round(share * 10000) / 100 : NaN);
 
@@ -501,11 +582,17 @@ export default function Planner() {
           />
           <fieldset>
             <legend>Travel costs</legend>
-            <NumberField
+            <OptionalNumberField
               label="Public transport return fare (£)"
               value={profile.fare}
+              placeholder="Not entered"
+              disabled={profile.fareFree === true}
               onChange={(fare) => set({ fare })}
-              note="Used when you travel by public transport."
+              note={
+                profile.fareFree === true
+                  ? "Not used: you ticked that your public transport is free."
+                  : "Used when you travel by public transport, and for the public transport comparison when you drive. Leave it empty if you do not know it yet."
+              }
             />
             <label className="planner-check">
               <input
@@ -517,8 +604,10 @@ export default function Planner() {
             </label>
             {noFare && (
               <p className="notice warn" role="status">
-                Enter your return fare, or tick the box if your travel is free. Until then the
-                journey is costed as free and no trip is called a fit.
+                {profile.fare === 0
+                  ? "A fare of £0 counts only when you tick that your travel is free. "
+                  : "Enter your return fare, or tick the box if your travel is free. "}
+                Until then the journey is costed as free and no trip is called a fit.
               </p>
             )}
             <NumberField
@@ -585,7 +674,10 @@ export default function Planner() {
           </p>
           {error && <p role="alert">{error}</p>}
           {result && !all.length && (
-            <p className="warn">No offer passes the price and weight limits for the shortlist.</p>
+            <p className="warn">
+              No offer is inside your buying thresholds, so nothing is shortlisted. The list of
+              offers not shortlisted says why.
+            </p>
           )}
           {trips.map((t) => (
             <button
@@ -630,7 +722,9 @@ export default function Planner() {
               in the profile to show {hiddenTrips.length === 1 ? "it" : "them"}.
             </p>
           )}
-          {result && result.rejected.length > 0 && <RejectedList rejected={result.rejected} />}
+          {result && result.rejected.length > 0 && (
+            <RejectedList rejected={result.rejected} rules={result.rules.effective} />
+          )}
           {trip && <TripView key={trip.sku} trip={trip} profile={profile} />}
           {result && <DriveSummary drive={result.drive} />}
           <BasketsLink />
@@ -648,10 +742,19 @@ export default function Planner() {
   );
 }
 
-function RejectedList({ rejected }: { rejected: Rejected[] }) {
+/** The buying thresholds that apply to this member, in one sentence. */
+export function thresholdsSentence(rules: Record<RuleKey, number>) {
+  return `${money(rules.minUnitPrice)} to ${money(rules.maxUnitPrice)} per unit, under ${rules.maxWeightKg} kg, at least ${money(rules.minUnitProfit)} profit per unit after every cost including its share of travel, and at least ${percent(rules.minReturn)} return on the purchase price`;
+}
+
+function RejectedList({ rejected, rules }: { rejected: Rejected[]; rules: Record<RuleKey, number> }) {
   return (
     <details className="planner-rejected">
-      <summary>Not shortlisted: {plural(rejected.length, "offer")} outside the price or weight limits</summary>
+      <summary>Not shortlisted: {plural(rejected.length, "offer")} outside your buying thresholds</summary>
+      <p className="muted">
+        An offer is shortlisted only when it is inside every buying threshold that applies to you:{" "}
+        {thresholdsSentence(rules)}.
+      </p>
       <ul>
         {rejected.map((r) => (
           <li key={r.sku}>
@@ -799,9 +902,11 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile })
       <p className="muted">
         Active hours are your working time. Time until payment is when the cash comes back:{" "}
         {t.timing
-          ? `${t.timing.payout.note} It uses your Goals assumptions (${plural(t.timing.daysToSell, "day")} to sell, your dispatch days, delivery and payout delay), not sold evidence for this item.`
+          ? `${payoutSentence(t.timing.payout)} ${sellingSentence(t.timing)}`
           : "set your selling rhythm in Goals to see it."}
-        {t.timing?.cashNeededBy ? " " + t.timing.cash.note : ""}
+        {t.timing?.cashNeededBy
+          ? " " + cashSentence(t.timing.cash, t.timing.cashNeededBy, t.timing.payout.date)
+          : ""}
       </p>
 
       <h3>Buying thresholds</h3>
@@ -817,6 +922,12 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile })
           t.thresholds.failures.map((f) => <li key={f}>{f}</li>)
         )}
       </ul>
+      {t.fareMissing && (
+        <p className="muted">
+          Checked with the journey costed as free, because no public transport fare is entered. With
+          your fare the profit per unit will be lower.
+        </p>
+      )}
 
       <h3>
         Opportunity tier: <TierBadge tier={t.opportunity.tier} />
@@ -986,8 +1097,8 @@ function DriveSummary({ drive }: { drive: Drive }) {
         </>
       ) : (
         <p>
-          No further shortlisted trip fits your profile by {drive.alternative.toLowerCase()}. The trip
-          calculation above shows the figures for each trip both ways.
+          No other offer fits your profile by {drive.alternative.toLowerCase()}. The trip calculation
+          above shows the figures for each trip both ways.
         </p>
       )}
       {drive.lost.length > 0 && (

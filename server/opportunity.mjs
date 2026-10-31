@@ -11,6 +11,10 @@ export const OPPORTUNITY_RULES = Object.freeze({
   minUnitProfit: 500, // £5 estimated profit per unit after variable costs
   minReturn: 0.35, // profit per unit divided by purchase price per unit
   trialUnits: 3, // a first purchase of an item is a small trial batch
+  // Units are rationed by demand: no more than the sales rate supports in
+  // this many weeks once competing listings are served (an assumption still
+  // to be confirmed by Edem).
+  sellWindowWeeks: 2,
   // Priority 1 needs strong sold evidence, easy fulfilment and low pressure.
   strongIndependentSales: 6,
   maxDaysToSellPriority1: 14,
@@ -53,6 +57,7 @@ export const TIERS = Object.freeze([
 const EVIDENCE_CHECKS = new Set([
   "live-evidence",
   "journey",
+  "inputs-entered",
   "exact-match",
   "offer-fresh",
   "independent-sales",
@@ -88,6 +93,30 @@ export function meetsReturn(unitProfit, unitCost, minReturn = OPPORTUNITY_RULES.
   if (!Number.isFinite(unitProfit) || !Number.isFinite(unitCost) || unitCost <= 0) return false;
   // Basis points keep the comparison in integers for thresholds such as 0.35.
   return unitProfit * 10000 >= Math.round(minReturn * 10000) * unitCost;
+}
+
+/**
+ * Units the evidence supports selling within the sell window once competing
+ * listings are served: floor(salesPerWeek × weeks) − competingListings, at
+ * least 0. Null when the sales rate or competition is unknown, which the
+ * buy-alert gate treats as a failure.
+ */
+export function demandUnits({ salesPerWeek, competingListings }, weeks = OPPORTUNITY_RULES.sellWindowWeeks) {
+  if (!(typeof salesPerWeek === "number" && Number.isFinite(salesPerWeek) && salesPerWeek >= 0)) return null;
+  if (!(Number.isSafeInteger(competingListings) && competingListings >= 0)) return null;
+  return Math.max(0, Math.floor(salesPerWeek * weeks + 1e-9) - competingListings);
+}
+
+/**
+ * Days until the last of `units` is expected to sell: the median days to
+ * sell for one unit, or longer when the sales rate cannot absorb them all
+ * sooner. Null when either figure is unknown.
+ */
+export function daysToSellAll({ units, daysToSell, salesPerWeek }) {
+  if (!Number.isFinite(daysToSell) || daysToSell < 0) return null;
+  if (!Number.isInteger(units) || units <= 1) return Math.ceil(daysToSell);
+  if (!(Number.isFinite(salesPerWeek) && salesPerWeek > 0)) return null;
+  return Math.max(Math.ceil(daysToSell), Math.ceil((units * 7) / salesPerWeek));
 }
 
 // Category rules apply on top of the buying thresholds (PRD "Opportunity

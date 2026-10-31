@@ -68,6 +68,8 @@ type Evidence = {
   permission: { permitted: boolean; basis: string } | null;
   tier: string | null;
   tierReasons: string[];
+  // Required costs and times the Research estimate left blank.
+  missingInputs?: string[] | null;
 };
 type AuditItem = {
   id: number;
@@ -93,16 +95,47 @@ type AuditItem = {
   evidence?: Evidence;
   outcome: { passed: boolean; reasons: string[]; checks: AuditCheck[]; contradictions?: Contradiction[] };
 };
+type SignOff = {
+  id: number;
+  locality: string;
+  at: string;
+  target: number;
+  audited: number;
+  evidenced: number;
+  passed: number;
+  note: string | null;
+};
 type Progress = {
   locality: string;
   target: number;
   audited: number;
+  // Items with a recorded offer whose stored evidence could be read (not
+  // sample data). Only these count towards the 30.
+  evidenced: number;
+  withoutEvidence: number;
   passed: number;
   failed: number;
   remaining: number;
   complete: boolean;
+  signedOff: SignOff | null;
+  signOffLapsed: { at: string; passed: number; evidenced: number; reason: string } | null;
   failures: Record<string, number>;
 };
+
+// Required costs and times the estimate needs (a blank is never zero). The
+// parcel cost is the form's own field.
+const REQUIRED_TRIP_INPUTS: [string, string][] = [
+  ["packaging", "packaging cost"],
+  ["journeyCost", "return journey cost"],
+  ["journeyMinutes", "journey time"],
+  ["handlingMinutes", "handling time"],
+];
+function blankTripInputs(inputs: Record<string, unknown> | null): string[] {
+  const costs = inputs && typeof inputs.costs === "object" && inputs.costs ? (inputs.costs as Record<string, unknown>) : {};
+  return REQUIRED_TRIP_INPUTS.filter(([key]) => typeof costs[key] !== "number" || !Number.isFinite(costs[key])).map(
+    ([, label]) => label,
+  );
+}
 
 // The pilot locality is a setting kept in this browser. It never defaults to
 // the planner's sample area.
@@ -191,6 +224,8 @@ function fromDraft(d: AuditHandover): Form {
 const whole = (v: string) => (v.trim() === "" ? null : Math.round(Number(v)));
 const choice = (v: "" | "yes" | "no") => (v === "" ? null : v === "yes");
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const listed = (labels: string[]) =>
+  labels.length < 2 ? labels.join("") : labels.slice(0, -1).join(", ") + " and " + labels[labels.length - 1];
 const shown = (value: unknown) =>
   value === null || value === undefined
     ? "not known"
@@ -213,7 +248,7 @@ function EvidenceSummary({ item }: { item: AuditItem }) {
   return (
     <div className="muted">
       <p>
-        Stored evidence at {dateTime(ev.evaluatedAt)} UTC: {ev.offer.source} offer at{" "}
+        Stored evidence at {dateTime(ev.evaluatedAt)}: {ev.offer.source} offer at{" "}
         {money(ev.offer.unitCost)}
         {ev.offer.sample ? " (sample data)" : ""}.{" "}
         {s
@@ -223,6 +258,13 @@ function EvidenceSummary({ item }: { item: AuditItem }) {
         {s ? ` · days to sell ${shown(s.daysToSell)}` : ""} · match {shown(ev.match)} · display{" "}
         {ev.permission?.permitted ? "permitted" : "not permitted"} · estimate {ev.tier ?? "not run"}.
       </p>
+      {ev.missingInputs && ev.missingInputs.length > 0 && (
+        <p className="warn">
+          Not entered in Research: {listed(ev.missingInputs)}. A blank is never counted as zero, so
+          the estimate stays at Review and the item cannot pass. Enter them in Research and fill this
+          form from the estimate again.
+        </p>
+      )}
       {s && s.notUsed.length > 0 && (
         <ul className="reasons">
           {s.notUsed.map((n) => (
@@ -249,6 +291,9 @@ export default function Audit({ draft }: { draft?: AuditHandover | null }) {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [version, setVersion] = useState(0);
+  const [accept, setAccept] = useState(false);
+  const [signNote, setSignNote] = useState("");
+  const [signMessage, setSignMessage] = useState("");
 
   useEffect(() => {
     if (!draft) return;
@@ -292,6 +337,36 @@ export default function Audit({ draft }: { draft?: AuditHandover | null }) {
 
   const set = (field: keyof Form, value: string) =>
     setForm((current) => ({ ...current, [field]: value }));
+
+  // A changed audit needs a fresh look before it is accepted.
+  useEffect(() => {
+    setAccept(false);
+  }, [progress?.locality, progress?.passed, progress?.evidenced, progress?.signedOff?.id]);
+
+  async function signOff(ev: FormEvent) {
+    ev.preventDefault();
+    if (!progress) return;
+    setBusy(true);
+    setSignMessage("");
+    try {
+      const result = await api<{ signedOff: SignOff; created: boolean }>("audit/signoff", {
+        locality: progress.locality,
+        // The counts on screen: the server refuses if the audit has changed.
+        passed: progress.passed,
+        evidenced: progress.evidenced,
+        note: signNote.trim() || null,
+      });
+      // The notice above shows the sign-off once the audit reloads.
+      setSignMessage(result.created ? "" : "This audit was already signed off.");
+      setSignNote("");
+      setVersion((n) => n + 1);
+    } catch (err) {
+      setSignMessage((err as Error).message);
+      setVersion((n) => n + 1);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function save(ev: FormEvent) {
     ev.preventDefault();
@@ -367,29 +442,83 @@ export default function Audit({ draft }: { draft?: AuditHandover | null }) {
       {sampleArea && (
         <p className="notice" role="status">
           {initialProfile.area} is the planner's sample area, not the pilot
-          locality. Items audited here do not count toward the London pilot.
+          locality. Items audited here do not count towards the London pilot.
         </p>
       )}
       {error && <p role="alert">{error}</p>}
       {progress && (
         <div className="audit-progress">
-          <progress max={progress.target} value={Math.min(progress.audited, progress.target)} />
+          <progress max={progress.target} value={Math.min(progress.evidenced, progress.target)} />
           <p>
             <b>
-              {progress.audited} of {progress.target} items audited in {progress.locality}
+              {progress.evidenced} of {progress.target} items checked against stored evidence in{" "}
+              {progress.locality}
             </b>
+          </p>
+          <p>
             <span className="ok">{progress.passed} passed</span>
             {" · "}
             <span className="warn">{progress.failed} failed</span>
             {" · "}
-            {progress.remaining} still to audit
+            {progress.remaining === 0
+              ? "no more items needed"
+              : `${plural(progress.remaining, "more item")} with stored evidence needed`}
           </p>
-          {progress.complete && (
-            <p className="notice">
-              {progress.target} items audited. Review the failures before relying
-              on buy alerts in this locality.
+          {progress.withoutEvidence > 0 && (
+            <p className="muted">
+              {plural(progress.withoutEvidence, "recorded item")} {progress.withoutEvidence === 1 ? "has" : "have"} no
+              stored evidence (no retailer offer from the database, an offer that can no longer be read, or
+              sample data), so {progress.withoutEvidence === 1 ? "it does" : "they do"} not count towards the{" "}
+              {progress.target}.
             </p>
           )}
+          {progress.signedOff ? (
+            <p className="notice" role="status">
+              Signed off on {dateTime(progress.signedOff.at)}: {progress.signedOff.passed} of{" "}
+              {progress.signedOff.evidenced} items passed. Bounties in {progress.locality} no longer
+              show the pilot warning.
+              {progress.signedOff.note ? ` Your note: ${progress.signedOff.note}` : ""}
+            </p>
+          ) : progress.complete ? (
+            <div className="notice">
+              <p>
+                <b>
+                  Audit complete, not yet signed off: {progress.passed} of {progress.evidenced} items
+                  passed.
+                </b>{" "}
+                Until you sign it off, bounties in {progress.locality} tell members to treat their
+                figures with care. Review the failures below before you accept it.
+              </p>
+              {progress.signOffLapsed && (
+                <p className="warn">
+                  Your sign-off on {dateTime(progress.signOffLapsed.at)} no longer stands:{" "}
+                  {progress.signOffLapsed.reason}.
+                </p>
+              )}
+              <form onSubmit={signOff}>
+                <label className="inline">
+                  <input type="checkbox" checked={accept} onChange={(e) => setAccept(e.target.checked)} />
+                  I have reviewed this audit and accept it: {progress.passed} of {progress.evidenced} items
+                  passed
+                </label>
+                <label>
+                  Note (optional)
+                  <input value={signNote} onChange={(e) => setSignNote(e.target.value)} maxLength={500} />
+                </label>
+                <button disabled={busy || !accept}>Sign off the audit</button>
+              </form>
+            </div>
+          ) : (
+            <p className="notice">
+              Not validated yet: {progress.evidenced} of {progress.target} items checked against stored
+              evidence. Bounties in {progress.locality} say so until {progress.target} items have stored
+              evidence and you sign the audit off.
+              {progress.signOffLapsed
+                ? ` Your sign-off on ${dateTime(progress.signOffLapsed.at)} no longer stands: ${progress.signOffLapsed.reason}.`
+                : ""}
+            </p>
+          )}
+          {signMessage && <p role="status">{signMessage}</p>}
           {failures.length > 0 && (
             <div className="scroll">
               <table>
@@ -473,6 +602,13 @@ export default function Audit({ draft }: { draft?: AuditHandover | null }) {
               : "No confirmed sales came with this form."}
             {handover.estimateInputs ? " The trip inputs from the Research estimate are kept with the item." : ""}
           </p>
+          {form.offerProvider.trim() && blankTripInputs(handover.estimateInputs).length > 0 && (
+            <p className="warn">
+              Not entered in Research: {listed(blankTripInputs(handover.estimateInputs))}. A blank is
+              never counted as zero, so this item will stay at Review and fail. Enter them in Research
+              and fill this form from the estimate again.
+            </p>
+          )}
           <fieldset>
             <legend>Your own reading (optional)</legend>
             <p className="muted">
@@ -531,7 +667,7 @@ export default function Audit({ draft }: { draft?: AuditHandover | null }) {
                   <small>
                     {item.barcode} · {item.retailer} · parcel{" "}
                     {item.shipping === null ? "unknown" : money(item.shipping)} · updated{" "}
-                    {dateTime(item.updated)} UTC
+                    {dateTime(item.updated)}
                   </small>
                   <EvidenceSummary item={item} />
                   {contradictions.length > 0 && (

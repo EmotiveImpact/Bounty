@@ -5,6 +5,7 @@ import {
   attributes,
   compare,
   competition,
+  ASKING_MAX_AGE_DAYS,
   isStoreBarcode,
   normaliseBarcode,
   normaliseCondition,
@@ -281,21 +282,25 @@ test("days to sell is the cautious median over sales with both dates", () => {
 });
 
 test("competition counts same-barcode asking prices and never touches the sample", () => {
+  const ask = (id, extra) => ({ ...sale(id), kind: KIND.ASKING, observed: "2026-10-29", ...extra });
   const rows = [
     sale("sold1"),
-    { ...sale("ask1"), kind: KIND.ASKING, price: 1800, shipping: 300, seller: "a" },
-    { ...sale("ask2"), kind: KIND.ASKING, price: 1950, shipping: null, seller: "b" },
-    { ...sale("ask3"), kind: KIND.ASKING, price: 2500, shipping: 0, seller: "a" },
-    { ...sale("ask4"), kind: KIND.ASKING, price: 2200, seller: null },
-    { ...sale("ask5"), kind: KIND.ASKING, price: 900, barcode: "4006381333931" },
+    ask("ask1", { price: 1800, shipping: 300, seller: "a" }),
+    ask("ask2", { price: 1950, shipping: null, seller: "b" }),
+    ask("ask3", { price: 2500, shipping: 0, seller: "a" }),
+    ask("ask4", { price: 2200, seller: null }),
+    ask("ask5", { price: 900, barcode: "4006381333931" }),
   ];
-  const c = competition(offer, rows);
+  const c = competition(offer, rows, { now });
   assert.equal(c.activeListings, 4);
   // a, b and one listing with no seller id, counted as another seller.
   assert.equal(c.sellers, 3);
   // 1950 (shipping unknown) is below 1800 + 300.
   assert.equal(c.lowestAsking, 1950);
   assert.equal(c.lowestAskingIncludesShipping, false);
+  assert.equal(c.olderListings, 0);
+  assert.equal(c.note, null);
+  assert.equal(c.maxAgeDays, ASKING_MAX_AGE_DAYS);
 
   const confirmed = rows.map((r) => "manual|" + r.source_id);
   const withListings = soldSample(offer, rows, { now, confirmed });
@@ -303,12 +308,61 @@ test("competition counts same-barcode asking prices and never touches the sample
   assert.equal(withListings.lowerMedian, withoutListings.lowerMedian);
   assert.equal(withListings.count, 1);
 
-  assert.deepEqual(competition({ ...offer, barcode: null }, rows), {
+  assert.deepEqual(competition({ ...offer, barcode: null }, rows, { now }), {
     activeListings: 0,
     sellers: 0,
     lowestAsking: null,
     lowestAskingIncludesShipping: null,
+    olderListings: 0,
+    checkedAt: null,
+    maxAgeDays: ASKING_MAX_AGE_DAYS,
+    note: null,
   });
+});
+
+test("only listings seen within the window count; older ones make competition unknown", () => {
+  assert.equal(ASKING_MAX_AGE_DAYS, 7);
+  const ask = (id, observed, extra = {}) => ({ ...sale(id), kind: KIND.ASKING, price: 2500, seller: id, observed, ...extra });
+  // The review scenario: one listing seen 180 days ago and no lookup since.
+  const stale = competition(offer, [ask("old", "2026-05-04")], { now });
+  assert.equal(stale.activeListings, null, "an old count is not today's competition");
+  assert.equal(stale.sellers, null);
+  assert.equal(stale.lowestAsking, null);
+  assert.equal(stale.olderListings, 1);
+  assert.equal(stale.checkedAt, "2026-05-04T00:00:00.000Z");
+  assert.equal(stale.note, "Competing listings last checked 4 May 2026: run an asking-price lookup before sharing");
+  // Seven whole days is still current; eight is not.
+  assert.equal(competition(offer, [ask("d7", "2026-10-24")], { now }).activeListings, 1);
+  assert.equal(competition(offer, [ask("d8", "2026-10-23")], { now }).activeListings, null);
+  // A listing dated after now, or with no date, is never current.
+  assert.equal(competition(offer, [ask("future", "2026-11-03")], { now }).activeListings, null);
+  const undated = competition(offer, [ask("undated", null)], { now });
+  assert.equal(undated.activeListings, null);
+  assert.match(undated.note, /no date they were seen/);
+  // A mix counts the current ones and says how many older ones were left out.
+  const mixed = competition(offer, [ask("new1", "2026-10-30"), ask("old1", "2026-09-01"), ask("old2", "2026-08-01")], { now });
+  assert.equal(mixed.activeListings, 1);
+  assert.equal(mixed.olderListings, 2);
+  assert.equal(mixed.checkedAt, "2026-10-30T00:00:00.000Z");
+  assert.equal(mixed.note, "2 older listings seen more than 7 days ago not counted");
+  // A recent lookup that found nothing current makes the count 0; an old
+  // lookup with no listings is unknown and dated by the lookup.
+  const looked = competition(offer, [ask("old", "2026-05-04")], { now, lookup: { provider: "ebay", fetched: "2026-10-31T09:00:00Z" } });
+  assert.equal(looked.activeListings, 0);
+  assert.equal(looked.checkedAt, "2026-10-31T09:00:00.000Z");
+  const oldLookup = competition(offer, [], { now, lookup: { fetched: "2026-10-01T09:00:00Z" } });
+  assert.equal(oldLookup.activeListings, null);
+  assert.equal(oldLookup.note, "Competing listings last checked 1 Oct 2026: run an asking-price lookup before sharing");
+  // No listings and no lookup stays 0: callers treat it as unknown until a
+  // lookup is on record.
+  assert.equal(competition(offer, [], { now }).activeListings, 0);
+  // The window can be set, and now can be a Date.
+  assert.equal(competition(offer, [ask("d3", "2026-10-28")], { now: new Date(now), maxAgeDays: 2 }).activeListings, null);
+  assert.equal(competition(offer, [ask("d3", "2026-10-28")], { now: new Date(now), maxAgeDays: 3 }).activeListings, 1);
+  // Two arguments still work and judge age against the current time.
+  const recent = new Date(Date.now() - 3600000).toISOString();
+  assert.equal(competition(offer, [ask("r", recent)]).activeListings, 1);
+  assert.equal(competition(offer, [ask("o", "2020-01-01")]).activeListings, null);
 });
 
 test("offer freshness follows the seven-day rule and fails closed", () => {
@@ -354,12 +408,12 @@ test("independent sellers are distinct named sellers, never listing ids", () => 
 
 test("competition treats a listing id as an unnamed seller", () => {
   const rows = [
-    { ...sale("a1"), kind: KIND.ASKING, price: 1800, seller: "listing:1" },
-    { ...sale("a2"), kind: KIND.ASKING, price: 1900, seller: "listing:1" },
-    { ...sale("a3"), kind: KIND.ASKING, price: 2000, seller: "named" },
+    { ...sale("a1"), kind: KIND.ASKING, price: 1800, seller: "listing:1", observed: "2026-10-30" },
+    { ...sale("a2"), kind: KIND.ASKING, price: 1900, seller: "listing:1", observed: "2026-10-30" },
+    { ...sale("a3"), kind: KIND.ASKING, price: 2000, seller: "named", observed: "2026-10-30" },
   ];
   // Unknown sellers are assumed different for competition: the cautious side.
-  assert.equal(competition(offer, rows).sellers, 3);
+  assert.equal(competition(offer, rows, { now }).sellers, 3);
 });
 
 test("non-text input never throws and is never a value", () => {

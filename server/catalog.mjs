@@ -19,6 +19,7 @@ import {
   categoryChecks,
   categoryReturnsRate,
   classifyOpportunity,
+  demandUnits,
   effectiveRules,
   hardFilters,
   meetsReturn,
@@ -148,7 +149,7 @@ export const defaults = Object.freeze({
   transport: "Walk",
   carry: 5,
   quantity: 4,
-  fare: 0,
+  fare: null, // not entered, as the Planner starts
   perMile: 45,
   extra: 0,
   storage: 10,
@@ -177,11 +178,10 @@ export const REASONS = Object.freeze({
 export const CAR_BOOT_KG = 25;
 export const HAND_CARRY_KG = 10;
 
-// Quantity assumptions. A first purchase is capped at the trial batch
+// Quantity: a first purchase is capped at the trial batch
 // (OPPORTUNITY_RULES.trialUnits) and at the units the sales rate supports in
-// the sell window after competing listings, as bounties.distributionCap
-// works it out. The sell window is an assumption still to be confirmed.
-export const QUANTITY_RULES = Object.freeze({ sellWindowWeeks: 2 });
+// the sell window (OPPORTUNITY_RULES.sellWindowWeeks) after competing
+// listings, worked out by opportunity.demandUnits like every other area.
 
 // Access needs (PRD journey 3). The labels are the PRD's; the thresholds are
 // assumptions and an open decision, so they are data here.
@@ -245,17 +245,52 @@ export function journeyFor(profile, miles) {
 }
 
 /**
- * Units the sales rate supports in the sell window once competing listings
- * are served: floor(salesPerWeek × weeks) − competingListings, at least 0.
- * Unknown sales or competition fails closed at 0 units.
+ * Units the offer's sales rate supports in the sell window once competing
+ * listings are served (opportunity.demandUnits over
+ * OPPORTUNITY_RULES.sellWindowWeeks). Null when the sales rate or the
+ * competition is unknown; the quantity caps then fail closed at 0 units.
  */
-export function demandUnits(offer, weeks = QUANTITY_RULES.sellWindowWeeks) {
-  const rate = offer.salesPerWeek;
-  const competing = offer.competingListings;
-  if (!(typeof rate === "number" && Number.isFinite(rate) && rate >= 0)) return 0;
-  if (!(Number.isSafeInteger(competing) && competing >= 0)) return 0;
-  return Math.max(0, Math.floor(rate * weeks + 1e-9) - competing);
+export const offerDemand = (offer) =>
+  demandUnits(
+    { salesPerWeek: offer.salesPerWeek, competingListings: offer.competingListings },
+    OPPORTUNITY_RULES.sellWindowWeeks,
+  );
+
+// Costs and times every offer must carry. A blank is never counted as zero:
+// it is listed by blankInputs() and the profit per unit is not checked.
+const REQUIRED_INPUTS = Object.freeze([
+  ["buy", "purchase price"],
+  ["post", "parcel cost"],
+  ["pack", "packaging cost"],
+  ["handlingMinutes", "handling time"],
+]);
+const entered = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+
+/** Plain labels of the offer's required costs and times that are blank. */
+export function blankInputs(offer) {
+  return REQUIRED_INPUTS.filter(([key]) => !entered(offer[key])).map(([, label]) => label);
 }
+
+/**
+ * Required costs and times left blank for this offer and profile: the
+ * offer's own blanks and, by public transport, a fare that was not entered.
+ * This is the evaluateAlert missingInputs list; [] when everything is in.
+ */
+export const missingInputs = (offer, profile) => [
+  ...blankInputs(offer),
+  ...(fareMissing(profile) ? ["public transport fare"] : []),
+];
+
+// What stopped any unit fitting, in plain words.
+const LIMIT_TEXT = Object.freeze({
+  trial: "the trial batch for a first purchase",
+  quantity: "your maximum units",
+  demand: "expected demand after competing listings",
+  stock: "the stock on the shelf",
+  carry: "your load limit",
+  storage: "your storage at home",
+  cash: "your available cash",
+});
 
 /**
  * The returns allowance an offer is costed with and its category checks:
@@ -323,28 +358,41 @@ export function checkedAndUncertainty(offer) {
 }
 
 /**
+ * The profit and return thresholds for one unit: profit per unit (pence,
+ * after every variable cost and the unit's share of travel) against the
+ * minimum, and the return on the purchase price, compared in whole pence by
+ * meetsReturn so 34.95% fails 35%. Returns the failures in plain words;
+ * atMost words them as a best case ("of at most £4.10").
+ */
+export function unitThresholdFailures(unitProfit, unitCost, rules = OPPORTUNITY_RULES, { atMost = false } = {}) {
+  const failures = [];
+  const of = atMost ? "of at most " : "of ";
+  if (unitProfit < rules.minUnitProfit)
+    failures.push(`Profit per unit ${of}${gbp(unitProfit)} is below ${gbp(rules.minUnitProfit)}`);
+  if (!(unitCost > 0)) failures.push("Return on the purchase price unknown");
+  else if (!meetsReturn(unitProfit, unitCost, rules.minReturn)) {
+    const share = Math.floor((unitProfit / unitCost) * 1000 + 1e-9) / 1000;
+    failures.push(`Return ${of}${pct(share)} is below ${pct(rules.minReturn)} of the purchase price`);
+  }
+  return failures;
+}
+
+/**
  * Checks the agreed buying thresholds (or the member's stricter ones) that a
  * planner can measure: the price band and weight limit, profit per unit
  * after every variable cost and the unit's share of travel, and the return on
- * the purchase price (compared in whole pence by meetsReturn, so 34.95%
- * fails 35%). Evidence checks are left to the alert gate.
+ * the purchase price. A required cost or time left blank is never counted as
+ * zero, so the profit is then not checked and the offer fails. Evidence
+ * checks are left to the alert gate.
  */
 export function buyingThresholds(offer, economics, rules = OPPORTUNITY_RULES) {
   const failures = hardFilters({ unitPrice: offer.buy, weightKg: offer.weight }, rules);
   const { unitProfit, returnOnCost } = unitReturns(economics);
-  if (unitProfit === null) {
-    failures.push("Profit per unit unknown until at least one unit fits");
-  } else {
-    if (unitProfit < rules.minUnitProfit)
-      failures.push(
-        `Profit per unit of ${gbp(unitProfit)} is below ${gbp(rules.minUnitProfit)}`,
-      );
-    if (returnOnCost === null) failures.push("Return on the purchase price unknown");
-    else if (!meetsReturn(unitProfit, economics.unitCost, rules.minReturn))
-      failures.push(
-        `Return of ${pct(returnOnCost)} is below ${pct(rules.minReturn)} of the purchase price`,
-      );
-  }
+  const blank = blankInputs(offer);
+  if (blank.length)
+    failures.push(`Profit per unit cannot be checked until these are entered: ${blank.join(", ")}`);
+  else if (unitProfit === null) failures.push("Profit per unit unknown until at least one unit fits");
+  else failures.push(...unitThresholdFailures(unitProfit, economics.unitCost, rules));
   return { unitProfit, returnOnCost, ok: failures.length === 0, failures };
 }
 
@@ -382,6 +430,9 @@ export function assessSample({ offer, economics, hourlyFloor, rules, now, timing
     contribution: economics.contribution,
     hourly: economics.hourly,
     hourlyFloor,
+    // Required costs and times left blank; the journey is unknown only when
+    // a public transport fare was not entered.
+    missingInputs: [...blankInputs(offer), ...(journeyKnown ? [] : ["public transport fare"])],
     // The journey is worked out from the profile; it is unknown only when a
     // public transport fare was not entered.
     journeyKnown,
@@ -400,6 +451,10 @@ export function assessSample({ offer, economics, hourlyFloor, rules, now, timing
     units: economics.units,
     trialUnits: rules.trialUnits,
     provenItem: offer.provenItem === true, // never true for a fixture
+    // Modelled demand in the sell window (null when the rate or competition
+    // is unknown, which fails the demand check).
+    demandUnits: offerDemand(offer),
+    sellWindowWeeks: OPPORTUNITY_RULES.sellWindowWeeks,
   };
   const opportunity = classifyOpportunity(
     {
@@ -435,7 +490,7 @@ function unitLimits(offer, profile, load, rules, route, economicsFor) {
   const caps = {
     trial: offer.provenItem === true ? Number.MAX_SAFE_INTEGER : rules.trialUnits,
     quantity: profile.quantity,
-    demand: demandUnits(offer),
+    demand: offerDemand(offer) ?? 0, // unknown demand fails closed at 0 units
     stock: offer.stock,
     carry: offer.weight > 0 ? Math.floor(load / offer.weight + 1e-9) : 0,
     storage: profile.storage,
@@ -476,11 +531,16 @@ function unitLimits(offer, profile, load, rules, route, economicsFor) {
  * payout after the cash date (when one is set); public transport fare not
  * entered; otherwise it fits. A trip that loses money never reads as
  * fitting, and units never exceed the trial batch for an unproven item.
+ *
+ * timing is null, a goals.tripTiming() result, or a function
+ * ({ units, salesPerWeek }) => tripTiming result, so the payout date can
+ * allow for the time the sales rate needs to sell every unit planned
+ * (opportunity.daysToSellAll). The route passes the function.
  */
 export function plan(
   offer,
   profile,
-  { now = new Date().toISOString(), compare = true, timing = null } = {},
+  { now = new Date().toISOString(), compare = true, timing: timingOption = null } = {},
 ) {
   const rules = effectiveRules(profile.rules || {});
   const load = loadLimit(profile.transport, profile.carry);
@@ -507,6 +567,10 @@ export function plan(
   const { units, limit, caps, afterTrial } = unitLimits(offer, profile, load, rules, route, economicsFor);
   const economics = economicsFor(units);
   const halfSold = economicsFor(units, 0.5);
+  const timing =
+    typeof timingOption === "function"
+      ? timingOption({ units, salesPerWeek: offer.salesPerWeek ?? null })
+      : timingOption;
   const { alert, opportunity, thresholds } = assessSample({
     offer,
     economics,
@@ -564,7 +628,8 @@ export function plan(
     caps,
     trialUnits: rules.trialUnits,
     afterTrial,
-    sellWindowWeeks: QUANTITY_RULES.sellWindowWeeks,
+    sellWindowWeeks: OPPORTUNITY_RULES.sellWindowWeeks,
+    demandUnits: offerDemand(offer),
     weightKg: kg(units * offer.weight),
     journey: route,
     fareMissing: noFare,
@@ -584,7 +649,7 @@ export function plan(
     alert,
     opportunity,
   };
-  if (compare) result.compare = compareModes(offer, profile, result, { now, timing });
+  if (compare) result.compare = compareModes(offer, profile, result, { now, timing: timingOption });
   return result;
 }
 
@@ -684,7 +749,8 @@ export function compareModes(offer, profile, current, { now, timing = null } = {
   };
 }
 
-const rankTrips = (a, b) =>
+/** Shortlist order: fitting trips first, then earnings per hour, then contribution. */
+export const rankTrips = (a, b) =>
   Number(b.fits) - Number(a.fits) ||
   (b.economics.hourly ?? -Infinity) - (a.economics.hourly ?? -Infinity) ||
   b.economics.contribution - a.economics.contribution;
@@ -702,19 +768,48 @@ const brief = (t) => ({
 });
 
 /**
- * Every fixture planned. Offers that fail a hard filter (price band or
- * weight) never reach the shortlist: they are listed under `rejected` with
- * the reasons. The shortlist (`trips`) ranks fitting trips first, then by
- * earnings per hour. `drive` lists the shortlisted trips that only fit by
- * the alternative transport (`extra`) and those that fit now but not by it
- * (`lost`).
+ * Why a planned trip is not shortlisted, in plain words: the price or
+ * weight limits, no units fitting (so profit per unit cannot be checked),
+ * or the profit and return thresholds at the units planned.
+ */
+function notShortlisted(t) {
+  if (t.hardFilters.length) return t.hardFilters;
+  if (!t.units && !blankInputs(t).length) {
+    const unknownDemand = t.limit === "demand" && t.demandUnits === null;
+    return [
+      `No units fit: stopped by ${unknownDemand ? "an unknown sales rate or competition" : LIMIT_TEXT[t.limit]}, so profit per unit cannot be checked`,
+    ];
+  }
+  return t.thresholds.failures;
+}
+
+/**
+ * Every fixture planned. An offer failing any buying threshold (price band,
+ * weight, profit per unit or return, with the member's stricter values)
+ * never reaches the shortlist, and neither does one where no unit fits, so
+ * its profit per unit cannot be checked: they are listed under `rejected`
+ * with the reasons (tier Reject when a threshold fails). The shortlist
+ * (`trips`) ranks fitting trips first, then by earnings per hour. `drive`
+ * lists the offers that fail now but fit by the alternative transport
+ * (`extra`; never one outside the price or weight limits) and the
+ * shortlisted trips that fit now but not by it (`lost`).
  */
 export function planTrips(profile, { now = new Date().toISOString(), timing = null } = {}) {
   const planned = offers.map((o) => plan(o, profile, { now, timing }));
-  const trips = planned.filter((t) => !t.hardFilters.length).sort(rankTrips);
+  const trips = planned.filter((t) => t.thresholds.ok).sort(rankTrips);
   const rejected = planned
-    .filter((t) => t.hardFilters.length)
-    .map((t) => ({ ...brief(t), reasons: t.hardFilters, tier: t.opportunity.tier, accessNeeds: t.accessNeeds }));
+    .filter((t) => !t.thresholds.ok)
+    .map((t) => ({
+      ...brief(t),
+      units: t.units,
+      unitProfit: t.thresholds.unitProfit,
+      returnOnCost: t.thresholds.returnOnCost,
+      reasons: notShortlisted(t),
+      // Reject when a threshold is measured and fails; a blank input or no
+      // units fitting keeps the evidence tier (Review for sample data).
+      tier: t.hardFilters.length ? "Reject" : blankInputs(t).length || !t.units ? t.opportunity.tier : "Reject",
+      accessNeeds: t.accessNeeds,
+    }));
   const side = (t) => ({
     ...brief(t),
     units: t.compare.alternative.units,
@@ -732,10 +827,13 @@ export function planTrips(profile, { now = new Date().toISOString(), timing = nu
       heading: "What changes if I drive?",
       current: profile.transport,
       alternative,
-      extra: trips.filter((t) => !t.fits && t.compare.alternative.fits).map(side),
+      extra: planned
+        .filter((t) => !t.hardFilters.length && !t.fits && t.compare.alternative.fits)
+        .map(side),
       lost: trips.filter((t) => t.fits && !t.compare.alternative.fits).map(side),
     },
-    timing,
+    // The payout for one unit; each trip carries its own for its units.
+    timing: typeof timing === "function" ? timing({ units: 1, salesPerWeek: null }) : timing,
     accessNeeds: ACCESS_NEEDS,
     rules: describeRules(profile.rules),
   };
@@ -748,32 +846,32 @@ export const RULE_FIELDS = Object.freeze({
   minUnitPrice: {
     label: "Minimum purchase price per unit",
     stricter: "higher",
-    read: (v, n) => int(v, n + " (pence)", 0, 1_000_000),
+    read: (v, n) => int(v, n + " (in pence)", 0, 1_000_000),
   },
   maxUnitPrice: {
     label: "Maximum purchase price per unit",
     stricter: "lower",
-    read: (v, n) => int(v, n + " (pence)", 0, 1_000_000),
+    read: (v, n) => int(v, n + " (in pence)", 0, 1_000_000),
   },
   maxWeightKg: {
     label: "Maximum weight per unit",
     stricter: "lower",
-    read: (v, n) => num(v, n + " (kg)", 0, 1000),
+    read: (v, n) => num(v, n + " (in kg)", 0, 1000),
   },
   minUnitProfit: {
     label: "Minimum profit per unit",
     stricter: "higher",
-    read: (v, n) => int(v, n + " (pence)", 0, 1_000_000),
+    read: (v, n) => int(v, n + " (in pence)", 0, 1_000_000),
   },
   minReturn: {
     label: "Minimum return on the purchase price",
     stricter: "higher",
-    read: (v, n) => num(v, n + " (share, 0.35 is 35%)", 0, 100),
+    read: (v, n) => num(v, n + " (as a share, 0.35 is 35%)", 0, 100),
   },
   trialUnits: {
     label: "Trial batch for a first purchase",
     stricter: "lower",
-    read: (v, n) => int(v, n + " (units)", 1, 1000),
+    read: (v, n) => int(v, n + " (in units)", 1, 1000),
   },
 });
 
@@ -786,15 +884,15 @@ export const RULE_FIELDS = Object.freeze({
  */
 export function readRules(value) {
   if (value === undefined || value === null) return {};
-  if (!isObject(value)) fail("rules must be an object of stricter thresholds");
+  if (!isObject(value)) fail("Send your stricter thresholds as an object");
   const out = {};
   for (const [key, v] of Object.entries(value)) {
     if (!Object.hasOwn(RULE_FIELDS, key))
       fail(
-        `rules.${key} is not a threshold you can set (allowed: ${Object.keys(RULE_FIELDS).join(", ")})`,
+        `"${key}" is not a threshold you can set. You can set: ${Object.values(RULE_FIELDS).map((f) => f.label.toLowerCase()).join(", ")}`,
       );
     if (v === null) continue;
-    out[key] = RULE_FIELDS[key].read(v, "rules." + key);
+    out[key] = RULE_FIELDS[key].read(v, RULE_FIELDS[key].label);
   }
   return out;
 }
@@ -826,23 +924,27 @@ export function describeRules(overrides = {}) {
  * copy. Every field is required; transport must be one of MODES. fare may
  * be null, meaning not entered: public transport is then costed as free and
  * the trip is never called fitting until a fare (0 for free travel) is sent.
+ * Error messages name each field as the Planner labels it.
  */
 export function readProfile(input) {
   if (!isObject(input)) fail("Send the profile as a JSON object");
   return {
-    area: text(input.area, "area", 100),
-    budget: int(input.budget, "budget (pence)", 0, 10_000_000),
-    target: int(input.target, "target (pence per hour)", 0, 1_000_000),
-    transport: oneOf(input.transport, "transport", MODES),
-    carry: num(input.carry, "carry (kg)", 0, 1000),
-    quantity: int(input.quantity, "quantity", 1, 1000),
-    fare: input.fare === null ? null : int(input.fare, "fare (pence, or null if not entered)", 0, 100_000),
-    perMile: int(input.perMile, "perMile (pence per mile)", 0, 1000),
-    extra: int(input.extra, "extra (pence)", 0, 100_000),
-    storage: int(input.storage, "storage (units)", 0, 100_000),
-    feeRate: num(input.feeRate, "feeRate", 0, 0.5),
-    feeFixed: int(input.feeFixed, "feeFixed (pence)", 0, 10_000),
-    returnsRate: num(input.returnsRate, "returnsRate", 0, 0.5),
+    area: text(input.area, "Local area", 100),
+    budget: int(input.budget, "Available cash (in pence)", 0, 10_000_000),
+    target: int(input.target, "Hourly target (in pence an hour)", 0, 1_000_000),
+    transport: oneOf(input.transport, "Transport", MODES),
+    carry: num(input.carry, "Carry limit (in kg)", 0, 1000),
+    quantity: int(input.quantity, "Maximum units per trip", 1, 1000),
+    fare:
+      input.fare === null
+        ? null
+        : int(input.fare, "Public transport fare (in pence, or empty if not entered)", 0, 100_000),
+    perMile: int(input.perMile, "Car or van cost per mile (in pence)", 0, 1000),
+    extra: int(input.extra, "Parking or tolls (in pence)", 0, 100_000),
+    storage: int(input.storage, "Storage at home (in units)", 0, 100_000),
+    feeRate: num(input.feeRate, "Marketplace fee (as a share, 0.13 is 13%)", 0, 0.5),
+    feeFixed: int(input.feeFixed, "Fixed fee per item sold (in pence)", 0, 10_000),
+    returnsRate: num(input.returnsRate, "Returns allowance (as a share, 0.05 is 5%)", 0, 0.5),
     rules: readRules(input.rules),
   };
 }

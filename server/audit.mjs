@@ -17,6 +17,10 @@
 // evidence, and one that disagrees with it fails the item. Anything unknown
 // fails closed.
 //
+// audit_signoffs records the operator's acceptance of a complete audit in a
+// locality: when, and the passed and evidenced counts they accepted. Until a
+// sign-off stands, bounties in that locality say the pilot is not validated.
+//
 // estimate.mjs imports this module too (stockStatus, CHECK_VALID_DAYS,
 // tableExists). The cycle is safe because neither module uses the other's
 // exports at the top level, only inside functions.
@@ -90,6 +94,19 @@ const ITEM_COLUMNS = [
   "display_permitted", "match_decision", "notes", "sales", "weight_kg",
   "estimate_inputs", "created", "updated",
 ];
+const SIGNOFFS_TABLE = `CREATE TABLE IF NOT EXISTS audit_signoffs (
+ id INTEGER PRIMARY KEY,
+ locality TEXT NOT NULL COLLATE NOCASE,
+ signed_at TEXT NOT NULL,
+ target INTEGER NOT NULL,
+ audited INTEGER NOT NULL,
+ evidenced INTEGER NOT NULL,
+ passed INTEGER NOT NULL,
+ note TEXT
+)`;
+const SIGNOFF_COLUMNS = ["id", "locality", "signed_at", "target", "audited", "evidenced", "passed", "note"];
+const SIGNOFF_TYPES = { target: "INTEGER", audited: "INTEGER", evidenced: "INTEGER", passed: "INTEGER" };
+
 const ITEM_TYPES = {
   availability_check_id: "INTEGER",
   promotion_eligible: "INTEGER",
@@ -108,9 +125,12 @@ export function schema(db) {
   addMissingColumns(db, "availability_checks", CHECK_COLUMNS, CHECK_TYPES);
   db.exec(ITEMS_TABLE);
   addMissingColumns(db, "validation_items", ITEM_COLUMNS, ITEM_TYPES);
+  db.exec(SIGNOFFS_TABLE);
+  addMissingColumns(db, "audit_signoffs", SIGNOFF_COLUMNS, SIGNOFF_TYPES);
   db.exec(`CREATE INDEX IF NOT EXISTS availability_checks_lookup
  ON availability_checks(barcode, retailer, checked_at);
 CREATE INDEX IF NOT EXISTS validation_items_locality ON validation_items(locality);
+CREATE INDEX IF NOT EXISTS audit_signoffs_locality ON audit_signoffs(locality, signed_at);
 UPDATE validation_items SET created = COALESCE(created, CURRENT_TIMESTAMP) WHERE created IS NULL;
 UPDATE validation_items SET updated = COALESCE(updated, created) WHERE updated IS NULL;`);
 }
@@ -289,11 +309,47 @@ function saleKeys(value) {
 // Estimate request fields the audit sets itself from the item.
 const AUDIT_SETS = new Set(["offer", "sales", "locality", "now", "promotionEligible", "weightKg", "localStockConfirmed"]);
 
+const MAX_INPUT_DEPTH = 5;
+const MAX_INPUT_CHARS = 4000;
+const tooLarge = () => fail(`estimateInputs is too large (up to ${MAX_INPUT_CHARS} characters)`);
+
+// The JSON length of an estimateInputs value, refusing (400) anything nested
+// deeper than MAX_INPUT_DEPTH, longer than MAX_INPUT_CHARS or holding
+// something other than text, numbers, true or false, lists and objects. It
+// stops as soon as a limit is passed, so a hostile value never reaches
+// JSON.stringify (which would overflow the stack on deep nesting).
+function inputLength(value, depth = 0) {
+  if (depth > MAX_INPUT_DEPTH)
+    fail(`estimateInputs is nested too deeply (up to ${MAX_INPUT_DEPTH} levels of lists and objects)`);
+  if (value === null) return 4;
+  if (typeof value === "string") return value.length + 2;
+  if (typeof value === "number") return Number.isFinite(value) ? String(value).length : 4;
+  if (typeof value === "boolean") return 5;
+  if (typeof value !== "object")
+    fail("estimateInputs must hold only text, numbers, true or false, lists and objects");
+  let length = 2;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      length += 1 + (value[i] === undefined ? 4 : inputLength(value[i], depth + 1));
+      if (length > MAX_INPUT_CHARS) tooLarge();
+    }
+    return length;
+  }
+  for (const key in value) {
+    if (!Object.hasOwn(value, key) || value[key] === undefined) continue;
+    length += key.length + 4 + inputLength(value[key], depth + 1);
+    if (length > MAX_INPUT_CHARS) tooLarge();
+  }
+  return length;
+}
+
 // Further estimate inputs as stored JSON, or null. Only plain own fields are
-// kept; the estimate validates them when the item is saved.
+// kept; the estimate validates them when the item is saved. Size and depth
+// are checked field by field first, so nothing hostile is stringified.
 function estimateInputsOf(value) {
   if (value === undefined || value === null) return null;
   if (!isObject(value)) fail("estimateInputs must be an object of estimate request fields");
+  inputLength(value);
   const kept = Object.fromEntries(Object.entries(value).filter(([key]) => !AUDIT_SETS.has(key)));
   // The parcel cost has one source: the item's shipping field.
   if (isObject(kept.costs)) {
@@ -302,7 +358,7 @@ function estimateInputsOf(value) {
   }
   if (!Object.keys(kept).length) return null;
   const json = JSON.stringify(kept);
-  if (json.length > 4000) fail("estimateInputs is too large (up to 4000 characters)");
+  if (json.length > MAX_INPUT_CHARS) tooLarge();
   return json;
 }
 
@@ -320,8 +376,9 @@ const storedSales = (item) => {
 };
 
 // The estimate request for an audit item: the stored offer and confirmed
-// sales, one unit, the item's weight and parcel cost, the audit locality and
-// the shopper's promotion eligibility, plus any stored estimate inputs.
+// sales, one unit, the item's weight and parcel cost (left out when unknown),
+// the audit locality and the shopper's promotion eligibility, plus any stored
+// estimate inputs.
 function estimateRequest(item) {
   const extra = isObject(item.estimate_inputs)
     ? item.estimate_inputs
@@ -334,7 +391,9 @@ function estimateRequest(item) {
     sales: storedSales(item),
     units: inputs.units ?? 1,
     weightKg: typeof item.weight_kg === "number" && Number.isFinite(item.weight_kg) ? item.weight_kg : null,
-    costs: { ...costs, postage: Number.isSafeInteger(item.shipping) ? item.shipping : 0 },
+    // An unknown parcel cost is left blank, never 0, so the estimate lists
+    // it as not entered.
+    costs: Number.isSafeInteger(item.shipping) ? { ...costs, postage: item.shipping } : costs,
     locality: item.locality,
     promotionEligible: item.promotion_eligible === 1,
   };
@@ -465,7 +524,9 @@ const checkOk = (estimate, id) => estimate.alert?.checks?.find((c) => c.id === i
  * The stored evidence for an audit item, read from the database as it stood
  * at the audit time:
  * { evaluatedAt, stock, error, offer, sales, match, permission, tier,
- *   tierReasons, live, offerFresh, alert, warnings }.
+ *   tierReasons, live, offerFresh, alert, missingInputs, warnings }.
+ * missingInputs lists the required costs and times the stored estimate
+ * inputs left blank (estimate.mjs), which keep the tier at Review.
  * stock is stockStatus for the item's barcode, retailer and locality. The
  * rest comes from estimateFromEvidence for the recorded offer and confirmed
  * sales; without a recorded offer they are null. error is set (and the
@@ -495,6 +556,7 @@ export function auditEvidence(db, item) {
     live: null,
     offerFresh: null,
     alert: null,
+    missingInputs: null,
     warnings: [],
   };
   if (!item.offer_provider || !item.offer_source_id) return base;
@@ -560,6 +622,7 @@ export function auditEvidence(db, item) {
       eligible: e.alert.eligible,
       failing: e.alert.checks.filter((c) => !c.ok).map((c) => c.id),
     },
+    missingInputs: Array.isArray(e.missingInputs) ? e.missingInputs : null,
     warnings: e.warnings,
   };
 }
@@ -583,7 +646,7 @@ export const AUDIT_FAILURES = Object.freeze({
   estimateFailed: "The estimate could not be run on the stored evidence",
   offerMismatch: "Recorded offer is for a different barcode or retailer, or its retailer is unknown",
   noEvidence: "No stored evidence to check: record a retailer offer from the database",
-  sample: "Sample or fixture data never counts toward the audit",
+  sample: "Sample or fixture data never counts towards the audit",
   offerStale: `Offer price not observed within ${ALERT_RULES.maxOfferAgeDays} days of the audit`,
   noCheck: "No branch availability check linked",
   checkMismatch: "Availability check is for a different item, retailer or locality",
@@ -771,28 +834,136 @@ export function listItems(db, locality) {
     .map((row) => withOutcome(db, plain(row)));
 }
 
+// Whether an item counts towards the audit: a recorded offer whose stored
+// evidence was read without an error and is not sample data. An item with no
+// offer, or whose offer or estimate could not be read, is audited but not
+// evidenced, so rows holding only a barcode and a title never complete it.
+export function isEvidenced(item) {
+  const ev = item?.evidence;
+  return Boolean(
+    item?.offer_provider && item?.offer_source_id && isObject(ev) && ev.offer && !ev.error && ev.live === true,
+  );
+}
+
+const signOffShape = (row) =>
+  row
+    ? {
+        id: row.id,
+        locality: row.locality,
+        at: row.signed_at,
+        target: row.target,
+        audited: row.audited,
+        evidenced: row.evidenced,
+        passed: row.passed,
+        note: row.note ?? null,
+      }
+    : null;
+
+function latestSignOff(db, place) {
+  if (!tableExists(db, "audit_signoffs")) return null;
+  return plain(
+    db.prepare("SELECT * FROM audit_signoffs WHERE locality = ? ORDER BY signed_at DESC, id DESC LIMIT 1").get(place),
+  );
+}
+
+// Why the latest sign-off no longer stands, or null while it does. It lapses
+// when the audit is no longer complete, when the passed or evidenced count
+// differs from what was accepted, or when an item changed after it.
+function lapseReason(signed, counts, items) {
+  if (!counts.complete)
+    return `Only ${counts.evidenced} of ${counts.target} items now have stored evidence`;
+  if (counts.passed !== signed.passed || counts.evidenced !== signed.evidenced)
+    return `The result changed after the sign-off: ${signed.passed} of ${signed.evidenced} items passed then, ${counts.passed} of ${counts.evidenced} now`;
+  const at = Date.parse(signed.signed_at);
+  const changed = items.filter((item) => Date.parse(auditTime(item) ?? "") > at).length;
+  if (changed) return `${changed} item${changed === 1 ? " was" : "s were"} changed after the sign-off`;
+  return null;
+}
+
 /**
- * Progress toward the gate in one locality:
- * { locality, target, audited, passed, failed, remaining, complete,
- *   failures: { reason: count } }. remaining is items still to audit.
+ * Progress towards the gate in one locality:
+ * { locality, target, audited, evidenced, passed, failed, withoutEvidence,
+ *   remaining, complete, signedOff, signOffLapsed, failures: { reason: count } }.
+ *
+ * audited counts every recorded item; evidenced only those with a recorded
+ * offer whose evidence was read without an error and is not sample data
+ * (isEvidenced). complete is evidenced >= target, and remaining the evidenced
+ * items still needed. passed counts items that pass every check, failed the
+ * rest. signedOff is the operator's sign-off ({ id, locality, at, target,
+ * audited, evidenced, passed, note }) while it still stands, else null;
+ * signOffLapsed is { at, passed, evidenced, reason } when the latest sign-off
+ * no longer stands, else null.
  */
 export function progress(db, locality) {
-  const items = listItems(db, locality);
+  const place = text(locality, "locality", 120);
+  const items = listItems(db, place);
   const failures = {};
   let passed = 0;
+  let evidenced = 0;
   for (const item of items) {
     if (item.outcome.passed) passed++;
+    if (isEvidenced(item)) evidenced++;
     for (const reason of item.outcome.reasons)
       failures[reason] = (Object.hasOwn(failures, reason) ? failures[reason] : 0) + 1;
   }
-  return {
-    locality: text(locality, "locality", 120),
+  const counts = {
+    locality: place,
     target: AUDIT_TARGET,
     audited: items.length,
+    evidenced,
     passed,
     failed: items.length - passed,
-    remaining: Math.max(0, AUDIT_TARGET - items.length),
-    complete: items.length >= AUDIT_TARGET,
+    withoutEvidence: items.length - evidenced,
+    remaining: Math.max(0, AUDIT_TARGET - evidenced),
+    complete: evidenced >= AUDIT_TARGET,
+  };
+  const signed = latestSignOff(db, place);
+  const lapsed = signed ? lapseReason(signed, counts, items) : null;
+  return {
+    ...counts,
+    signedOff: signed && !lapsed ? signOffShape(signed) : null,
+    signOffLapsed: signed && lapsed ? { at: signed.signed_at, passed: signed.passed, evidenced: signed.evidenced, reason: lapsed } : null,
     failures,
   };
+}
+
+/**
+ * Records the operator's sign-off of a complete audit in a locality and
+ * returns { signedOff, progress, created }.
+ *
+ * input: { locality, passed?, evidenced?, note? }. passed and evidenced, when
+ * given, are the counts the operator saw: if the audit has changed since,
+ * the sign-off is refused (409) so they never accept figures they did not
+ * see. Refused with 409 unless the audit is complete. A sign-off that still
+ * stands is returned as it is (created false) rather than recorded twice.
+ * Each sign-off is stored with its time and the passed, evidenced and
+ * audited counts.
+ */
+export function signOff(db, input = {}, { now = new Date().toISOString() } = {}) {
+  if (!isObject(input)) fail("Send the locality to sign off");
+  const place = text(input.locality, "locality", 120);
+  const seenPassed = optionalInt(input.passed, "passed", 0, 100000);
+  const seenEvidenced = optionalInt(input.evidenced, "evidenced", 0, 100000);
+  const note = text(input.note, "note", 500, { optional: true });
+  const stamp = timestamp(undefined, "signedAt", now);
+  return transaction(db, () => {
+    const current = progress(db, place);
+    if (!current.complete)
+      fail(
+        `The audit in ${place} is not complete: ${current.evidenced} of ${current.target} items have been checked against stored evidence, so it cannot be signed off yet`,
+        409,
+      );
+    if ((seenPassed !== null && seenPassed !== current.passed) || (seenEvidenced !== null && seenEvidenced !== current.evidenced))
+      fail(
+        `The audit in ${place} changed since you looked: ${current.passed} of ${current.evidenced} items now pass. Check it again before signing off`,
+        409,
+      );
+    if (current.signedOff) return { signedOff: current.signedOff, progress: current, created: false };
+    db.prepare(
+      `INSERT INTO audit_signoffs(locality, signed_at, target, audited, evidenced, passed, note)
+ VALUES(?, ?, ?, ?, ?, ?, ?)`,
+    ).run(place, stamp, current.target, current.audited, current.evidenced, current.passed, note);
+    const after = progress(db, place);
+    return { signedOff: after.signedOff, progress: after, created: true };
+  });
 }

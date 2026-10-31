@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { api, hours, loadMemberRules, loadProfile, money, percent, toPence } from "./api";
+import { api, dateTime, hours, loadMemberRules, loadProfile, money, percent, toPence } from "./api";
 import {
   AccessBadges,
   AccessNeed,
@@ -10,8 +10,10 @@ import {
   Payout,
   Thresholds,
   TierBadge,
+  cashSentence,
   checkedText,
   paymentText,
+  payoutSentence,
   planProfile,
   plural,
   pounds,
@@ -41,6 +43,16 @@ type Draft = {
   payoutDelayDays: string;
 };
 type Timing = CashTiming;
+// Payout timing for a basket: the cash is back once the last unit sells.
+type BasketTiming = {
+  payout: Payout;
+  cash: Timing;
+  payoutDays: number | null;
+  daysToSell: number | null;
+  daysToSellOneUnit: number;
+  units: number;
+  cashNeededBy: string | null;
+};
 type BasketItem = {
   sku: string;
   name: string;
@@ -81,7 +93,7 @@ type Basket = {
     unsoldLoss: number;
   };
   downside: { nothingSells: number; halfSells: number };
-  timing: { payout: Payout; cash: Timing; payoutDays: number | null };
+  timing: BasketTiming;
   reasons: string[];
   recommended: boolean;
 };
@@ -110,7 +122,7 @@ type BasketResponse = {
   excluded: { sku: string; name: string; shop: string; reason: string; rejected?: boolean }[];
   searched: number;
   truncated: boolean;
-  timing: { payout: Payout; cash: Timing; payoutDays: number | null };
+  timing: BasketTiming; // for one unit; each basket carries its own
   rules: { ignored: { key: string; label: string }[] };
 };
 // The ledger summary (server/ledger.mjs summary). Potential proceeds count
@@ -170,6 +182,16 @@ const toDraft = (g: Goals): Draft => ({
   payoutDelayDays: String(g.payoutDelayDays),
 });
 
+// Today's date in London (YYYY-MM-DD), the same "today" the server checks
+// dates against.
+const londonToday = () =>
+  new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+
 function thisMonth() {
   const d = new Date();
   return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
@@ -194,6 +216,8 @@ function goalsBody(d: Draft): { body?: Omit<Goals, "updated">; problem?: string 
   };
   const problem = Object.values(fields).find((v) => typeof v === "string");
   if (problem) return { problem: problem as string };
+  if (d.cashNeededBy && d.cashNeededBy < londonToday())
+    return { problem: "The date you need the cash back must be today or later." };
   return {
     body: {
       targetType: d.targetType,
@@ -285,7 +309,7 @@ export default function Goals() {
       setGoalsNotice("Goals saved. The baskets below now use them.");
       setVersion((v) => v + 1);
     } catch (e) {
-      setGoalsNotice("Could not save your goals: " + (e as Error).message);
+      setGoalsNotice("Could not save your goals. " + (e as Error).message);
     } finally {
       setSaving(false);
     }
@@ -299,7 +323,7 @@ export default function Goals() {
         {!draft ? (
           <p>{goalsNotice || "Loading your goals."}</p>
         ) : (
-          <form onSubmit={save}>
+          <form onSubmit={save} noValidate>
             <div className="grid2">
               <label>
                 Goal type
@@ -337,6 +361,7 @@ export default function Goals() {
                 Date you need the cash back
                 <input
                   type="date"
+                  min={londonToday()}
                   value={draft.cashNeededBy}
                   onChange={(e) => setDraft({ ...draft, cashNeededBy: e.target.value })}
                 />
@@ -408,7 +433,7 @@ export default function Goals() {
               </p>
             </fieldset>
             <button disabled={saving}>Save goals</button>
-            {goals?.updated && <span className="muted"> Last saved {goals.updated.slice(0, 10)}.</span>}
+            {goals?.updated && <span className="muted"> Last saved {dateTime(goals.updated)}.</span>}
             {goalsNotice && <p role="status">{goalsNotice}</p>}
           </form>
         )}
@@ -498,9 +523,12 @@ function BasketPlan({ plan }: { plan: BasketResponse }) {
         </p>
       )}
       <p>
-        <strong>Cash back:</strong> {plan.timing.payout.note}{" "}
-        <span className={plan.timing.cash.status === "late" ? "warn" : ""}>{plan.timing.cash.note}</span>{" "}
-        Time until payment: {paymentText(plan.timing.payoutDays, plan.timing.payout.date)}.
+        <strong>Cash back for one unit:</strong> {payoutSentence(plan.timing.payout)}{" "}
+        <span className={plan.timing.cash.status === "late" ? "warn" : ""}>
+          {cashSentence(plan.timing.cash, plan.timing.cashNeededBy, plan.timing.payout.date)}
+        </span>{" "}
+        Time until payment: {paymentText(plan.timing.payoutDays, plan.timing.payout.date)}. Several
+        units can take longer to sell, so each basket shows its own payout.
       </p>
       {c.fareMissing && (
         <p className="notice warn">
@@ -526,7 +554,10 @@ function BasketPlan({ plan }: { plan: BasketResponse }) {
           date), so none is recommended. The closest options are shown with the reasons.
         </p>
       ) : (
-        <p className="warn">No basket fits your cash, carrying, storage and unit limits.</p>
+        <p className="warn">
+          No basket fits your cash, carrying, storage and unit limits with every item inside your
+          buying thresholds. The lists below say why each offer is left out.
+        </p>
       )}
       {plan.truncated && (
         <p className="notice">
@@ -553,7 +584,12 @@ function BasketPlan({ plan }: { plan: BasketResponse }) {
       )}
       {plan.excluded.some((e) => e.rejected) && (
         <>
-          <h3>Rejected: outside the price or weight limits</h3>
+          <h3>Rejected: outside your buying thresholds</h3>
+          <p className="muted">
+            These never enter a basket: each item must be inside every buying threshold that
+            applies to you, including at least the minimum profit per unit after its share of the
+            journey.
+          </p>
           <ul>
             {plan.excluded
               .filter((e) => e.rejected)
@@ -695,11 +731,20 @@ function BasketCard({ basket: b, rank }: { basket: Basket; rank?: number }) {
           <dd>{money(b.downside.nothingSells)}</dd>
           <dt>If only half sell</dt>
           <dd>{money(b.downside.halfSells)}</dd>
+          <dt>Days until the last unit sells</dt>
+          <dd>
+            {b.timing.daysToSell === null
+              ? "not known: the sales rate is unknown"
+              : plural(b.timing.daysToSell, "day") +
+                (b.timing.daysToSell > b.timing.daysToSellOneUnit
+                  ? ` (your Goals assume ${plural(b.timing.daysToSellOneUnit, "day")} for one unit)`
+                  : "")}
+          </dd>
           <dt>Time until payment</dt>
           <dd>{paymentText(b.timing.payoutDays, b.timing.payout.date)}</dd>
           <dt>Cash back</dt>
           <dd className={late ? "warn" : ""}>
-            {b.timing.payout.date ?? "cannot be scheduled"}
+            {b.timing.payout.date ? dateTime(b.timing.payout.date) : "cannot be scheduled"}
             {late
               ? `, ${plural(b.timing.cash.daysLate ?? 0, "day")} late`
               : b.timing.cash.status === "on time"
@@ -821,6 +866,10 @@ function NamedGoals({ version }: { version: number }) {
     if (!draft.name.trim()) return setNotice("Say what the money is for.");
     if (draft.amount.trim() === "" || !Number.isFinite(amount) || amount <= 0 || amount > 100000)
       return setNotice("Amount must be between £0.01 and £100,000.");
+    const today = londonToday();
+    if (draft.deadline && draft.deadline < today) return setNotice("The deadline must be today or later.");
+    if (draft.start && draft.start > today)
+      return setNotice("The date to count cash from cannot be in the future.");
     setBusy(true);
     try {
       const r = await api<Targets & { id: number }>("goals/targets", {
@@ -833,7 +882,7 @@ function NamedGoals({ version }: { version: number }) {
       setDraft({ name: "", amount: "", deadline: "", start: "" });
       setNotice("Goal added.");
     } catch (e) {
-      setNotice("Could not add the goal: " + (e as Error).message);
+      setNotice("Could not add the goal. " + (e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -845,7 +894,7 @@ function NamedGoals({ version }: { version: number }) {
       setData(await api<Targets>("goals/targets/" + t.id, {}, "DELETE"));
       setNotice(`Removed "${t.name}".`);
     } catch (e) {
-      setNotice("Could not remove the goal: " + (e as Error).message);
+      setNotice("Could not remove the goal. " + (e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -876,13 +925,13 @@ function NamedGoals({ version }: { version: number }) {
             {money(t.counted)} of {money(t.amount)} received
             {t.deadline
               ? t.daysLeft !== null && t.daysLeft >= 0
-                ? ` by ${t.deadline} (${plural(t.daysLeft, "day")} left)`
-                : ` by ${t.deadline}`
+                ? ` by ${dateTime(t.deadline)} (${plural(t.daysLeft, "day")} left)`
+                : ` by ${dateTime(t.deadline)}`
               : " so far (no deadline)"}
             . Still needed: {money(t.remaining)}.
           </p>
           <p className="muted">
-            Counting from {t.start}: payouts {money(t.payouts)}, less costs {money(t.costs)}.
+            Counting from {dateTime(t.start)}: payouts {money(t.payouts)}, less costs {money(t.costs)}.
             {t.shared > 0 ? ` ${money(t.shared)} of that already counts towards an earlier goal.` : ""}
           </p>
           <button type="button" onClick={() => remove(t)} disabled={busy}>
@@ -890,7 +939,7 @@ function NamedGoals({ version }: { version: number }) {
           </button>
         </article>
       ))}
-      <form onSubmit={add} className="planner-target-form">
+      <form onSubmit={add} className="planner-target-form" noValidate>
         <div className="grid2">
           <label>
             What the money is for
@@ -916,6 +965,7 @@ function NamedGoals({ version }: { version: number }) {
             Deadline
             <input
               type="date"
+              min={londonToday()}
               value={draft.deadline}
               onChange={(e) => setDraft({ ...draft, deadline: e.target.value })}
             />
@@ -923,7 +973,12 @@ function NamedGoals({ version }: { version: number }) {
           </label>
           <label>
             Count cash received from
-            <input type="date" value={draft.start} onChange={(e) => setDraft({ ...draft, start: e.target.value })} />
+            <input
+              type="date"
+              max={londonToday()}
+              value={draft.start}
+              onChange={(e) => setDraft({ ...draft, start: e.target.value })}
+            />
             <span className="muted">Leave empty to count from today.</span>
           </label>
         </div>

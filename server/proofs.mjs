@@ -93,18 +93,32 @@ export function prepareProof(buffer, mediaType) {
  * Returns { sha256, bytes, metadataRemoved }.
  */
 export function storeProof(dir, buffer, mediaType) {
-  const { content, sha256, bytes, metadataRemoved } = prepareProof(buffer, mediaType);
+  return writeProof(dir, prepareProof(buffer, mediaType));
+}
+
+/**
+ * Writes content that prepareProof() returned, so a caller can check the
+ * fingerprint (for example, that the file is not already another entry's
+ * proof) before anything reaches the disk. Returns { sha256, bytes,
+ * metadataRemoved, existed } where existed is true when a file with that
+ * fingerprint was already stored.
+ */
+export function writeProof(dir, { content, sha256, bytes, metadataRemoved }) {
+  if (typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256))
+    throw new ProofError("Not a proof fingerprint");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700); // also tightens a directory that already existed
   const file = join(dir, sha256);
+  let existed = false;
   try {
     writeFileSync(file, content, { mode: 0o600, flag: "wx" });
   } catch (error) {
     // Same hash means same content: the existing file already holds it.
     if (error.code !== "EEXIST") throw error;
+    existed = true;
   }
   chmodSync(file, 0o600);
-  return { sha256, bytes, metadataRemoved };
+  return { sha256, bytes, metadataRemoved, existed };
 }
 
 /**

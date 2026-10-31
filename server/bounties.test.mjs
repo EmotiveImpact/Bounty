@@ -1,4 +1,4 @@
-import { after, test } from "node:test";
+import { after, mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
@@ -10,7 +10,7 @@ import {
   REPUTATION_RULES,
   addReport,
   bountyView,
-  claim,
+  claim as rawClaim,
   completeClaim,
   createBounty,
   createMember,
@@ -27,13 +27,23 @@ import {
   resolveViewer,
   schema,
   shelfStatus,
+  answerPromotion,
+  validationFrom,
+  attributeNotes,
+  blockerList,
+  journeyInput,
+  memberRuleFailures,
+  memberTripCheck,
+  recheckOpenBounties,
+  stockLapse,
+  tripState,
   updateMember,
   verifyReport,
   withdrawBounty,
 } from "./bounties.mjs";
 import { routes } from "./routes-bounties.mjs";
-import { schema as auditSchema } from "./audit.mjs";
-import { PERMISSIONS_TABLE } from "./contract.mjs";
+import { CHECK_VALID_DAYS, recordCheck, schema as auditSchema } from "./audit.mjs";
+import { PERMISSIONS_TABLE, RESEARCH_TABLE } from "./contract.mjs";
 
 const T0 = "2026-11-02T09:00:00.000Z";
 const at = (minutes) => new Date(Date.parse(T0) + minutes * 60000).toISOString();
@@ -41,8 +51,17 @@ const GTIN = "05012345678900";
 
 // A stand-in for an estimateFromEvidence result, so these tests never depend
 // on the estimate module. 26 confirmed sales in 90 days is about 2.02 a week.
+// The economics follow the units and the journey: £10 contribution a unit
+// before a £5 journey by default, so 2 units give £15 (£7.50 a unit) and 1
+// unit gives £5.
 function fakeEstimate(over = {}) {
-  return {
+  const units = over.units ?? 2;
+  const travel = over.journeyCost ?? 500;
+  const minutes = over.journeyMinutes ?? 30;
+  const contribution = units * 1000 - travel;
+  const activeMinutes = minutes + 10 + units * 10;
+  const unitProfit = Math.floor(contribution / units);
+  const result = {
     offer: {
       provider: "awin",
       sourceId: "A1",
@@ -59,22 +78,25 @@ function fakeEstimate(over = {}) {
     match: "exact",
     unitCost: 1500,
     economics: {
-      units: 2,
+      units,
       unitCost: 1500,
       salePrice: 3200,
-      contribution: 1500,
-      unitContribution: 750,
-      cashRequired: 3700,
-      hourly: 1500,
-      activeMinutes: 60,
+      costs: { travel },
+      contribution,
+      unitContribution: unitProfit,
+      cashRequired: units * 1600 + travel,
+      hourly: Math.round((contribution * 60) / activeMinutes),
+      activeMinutes,
       unsoldLoss: -3200,
       breakEvenSale: 2400,
+      ...over.economics,
     },
+    inputs: { units },
     opportunity: {
       tier: "Priority 2",
       reasons: ["Sourcing pressure high or unknown"],
-      unitProfit: 750,
-      returnOnCost: 0.5,
+      unitProfit,
+      returnOnCost: Math.round((unitProfit / 1500) * 1000) / 1000,
       targetPrice: null,
       meetsThresholds: true,
       trialUnits: 3,
@@ -96,7 +118,27 @@ function fakeEstimate(over = {}) {
     warnings: [],
     ...over.extra,
   };
+  // Lets the fake route estimate re-run these figures at other units.
+  Object.defineProperty(result, "remake", {
+    value: (request) =>
+      fakeEstimate({
+        ...over,
+        units: Number.isSafeInteger(request?.units) ? request.units : units,
+        journeyCost: Number.isSafeInteger(request?.costs?.journeyCost) ? request.costs.journeyCost : travel,
+        journeyMinutes: Number.isSafeInteger(request?.costs?.journeyMinutes) ? request.costs.journeyMinutes : minutes,
+      }),
+  });
+  return result;
 }
+
+// A member's own journey for claims, and claim() with a passing check of
+// their own figures at the units they claim (the route re-runs the
+// estimate; these unit tests pass the result in).
+const JOURNEY = { cost: 300, minutes: 30 };
+const TRIP = { journeyCost: JOURNEY.cost, journeyMinutes: JOURNEY.minutes };
+const ownCheck = (units, journey = JOURNEY) =>
+  fakeEstimate({ units, journeyCost: journey.cost, journeyMinutes: journey.minutes });
+const claim = (db, args) => rawClaim(db, { journey: JOURNEY, check: ownCheck(args.units), ...args });
 const ineligible = (reason = "Branch stock not confirmed") =>
   fakeEstimate({ alert: { eligible: false, reasons: [reason], checks: [] } });
 
@@ -320,7 +362,11 @@ test("expired, withdrawn, ineligible, stale or paused bounties cannot be claimed
 
 test("a tightened trial batch in the estimate limits claim size", () => {
   const db = memoryDb(schema);
-  const b = liveBounty(db, {}, fakeEstimate({ opportunity: { trialUnits: 1 } }));
+  // Figures for 2 units when one member can claim 1 must be worked out again.
+  const two = liveBounty(memoryDb(schema), {}, fakeEstimate({ opportunity: { trialUnits: 1 } }));
+  assert.equal(two.alert_eligible, 0);
+  assert.match(two.alert_reasons, /The figures are for 2 units, but one member can claim at most 1 unit/);
+  const b = liveBounty(db, {}, fakeEstimate({ units: 1, opportunity: { trialUnits: 1 } }));
   const a = diamond(db, "Ada");
   assert.match(status(() => claim(db, { bountyId: b.id, memberId: a.id, units: 2, now: T0 })).message, /from 1 to 1/);
   assert.equal(claim(db, { bountyId: b.id, memberId: a.id, units: 1, now: T0 }).units, 1);
@@ -524,7 +570,7 @@ test("release windows: tiers are alerted from bounty.created plus their offset, 
 test("exposure limit: with little stock the later tiers receive nothing", () => {
   const db = memoryDb(schema);
   // floor(2.02 * 2) = 4 sales less 3 listings leaves a cap of 1: at most 2 alerts.
-  const b = liveBounty(db, {}, fakeEstimate({ competition: { activeListings: 3 } }));
+  const b = liveBounty(db, {}, fakeEstimate({ units: 1, competition: { activeListings: 3 } }));
   assert.equal(b.cap, 1);
   member(db, "PaidDiamond", { paidTier: "diamond", paidUntil: "2026-12-31" });
   const high = member(db, "RubyHigh", { paidTier: "ruby", paidUntil: "2026-12-31" });
@@ -549,7 +595,7 @@ test("a failed or weaker re-check makes a bounty ineligible", () => {
   const blocked = dispatchAlerts(db, b.id, at(5));
   assert.equal(blocked.sent.length, 0);
   assert.match(blocked.blockers.join(" "), /Evidence could not be re-checked: Offer not found/);
-  const back = refreshBounty(db, b.id, fakeEstimate({ competition: { activeListings: 3 } }), at(6));
+  const back = refreshBounty(db, b.id, fakeEstimate({ units: 1, competition: { activeListings: 3 } }), at(6));
   assert.equal(back.alert_eligible, 1);
   assert.equal(back.cap, 1);
   assert.equal(dispatchAlerts(db, b.id, at(6)).sent.length, 1);
@@ -728,11 +774,19 @@ test("an empty-shelf report tells everyone alerted or holding a claim not to mak
   // The operator confirming it reaches anyone not told yet, never twice.
   verifyReport(db, empty.id, true, { now: at(30) });
   assert.equal(memberNotices(db, ann.id).length, 1);
-  // An older empty report behind a newer sighting stops nobody.
+  // A newer sighting reopens the trip: the next read tells Ann, and the
+  // stop notice is marked as replaced.
   addReport(db, { bountyId: b.id, memberId: zed.id, unitsSeen: 2 }, { now: at(40) });
   assert.equal(viewAs(db, b, ann, at(41)).trip.go, true);
+  const reopened = memberNotices(db, ann.id);
+  assert.deepEqual(reopened.map((n) => [n.kind, n.superseded]), [["reopen", false], ["stop", true]]);
+  assert.match(reopened[0].message, /^Open for trips again at 2 Nov 2026, 09:41: every check passes now.*saw 2 units at 2 Nov 2026, 09:40/);
+  // An older empty report behind the newer sighting stops nobody (BN2).
   addReport(db, { bountyId: b.id, memberId: zed.id, unitsSeen: 0, observedAt: at(35) }, { now: at(42) });
-  assert.equal(memberNotices(db, ann.id).length, 1);
+  assert.equal(viewAs(db, b, ann, at(43)).trip.go, true);
+  memberAlerts(db, ann.id, { now: at(43) });
+  assert.equal(memberNotices(db, ann.id).length, 2);
+  assert.equal(memberNotices(db, bo.id).length, 2);
   // Withdrawing tells them too.
   withdrawBounty(db, b.id, { now: at(50) });
   const last = memberNotices(db, bo.id)[0];
@@ -844,10 +898,22 @@ test("a promotion price needs each member's own confirmation; alerts say the con
   const sam = diamond(db, "Sam");
   const sent = dispatchAlerts(db, b.id, T0);
   assert.equal(sent.promotion.condition, "Clubcard price: members only");
+  // Nobody said they qualify yet: each gets a question, no alert with figures (P2).
+  assert.deepEqual(sent.sent, []);
+  assert.deepEqual(sent.asked.map((x) => x.name).sort(), ["Pat", "Sam"]);
   assert.equal(db.prepare("SELECT promotion FROM alerts WHERE member_id = ?").get(pat.id).promotion, "Clubcard price: members only");
   const inbox = memberAlerts(db, pat.id, { now: T0 })[0];
+  assert.equal(inbox.kind, "question");
+  assert.equal(inbox.figures, null);
+  assert.match(inbox.eligibility.question, /Do you qualify for it yourself/);
   assert.match(inbox.promotion.note, /Promotion price: Clubcard price: members only\. Confirm that you qualify/);
   assert.match(inbox.promotion.note, /regular price is not known/);
+  assert.equal(viewAs(db, b, pat).estimate.economics, null);
+  assert.match(viewAs(db, b, pat).figures.note, /shown once you say you qualify/);
+  assert.equal(bountyView(db, b, { now: T0 }).estimate.economics, null);
+  assert.ok(bountyView(db, b, { viewer: { kind: "operator" }, now: T0 }).estimate.economics);
+  // Asking again does not repeat the question or send an alert.
+  assert.match(dispatchAlerts(db, b.id, at(1)).notAlerted.find((x) => x.name === "Pat").reason, /waiting for their answer/);
   const before = viewAs(db, b, pat);
   assert.equal(before.viewer.promotion.confirmed, false);
   assert.match(before.viewer.promotion.risk, /you pay more/);
@@ -866,6 +932,12 @@ test("a promotion price needs each member's own confirmation; alerts say the con
   const known = fakeEstimate({ offer: { promotion: "New customers only", price: 1500, regularPrice: 1750 } });
   const b2 = createBounty(db2, bountyInput(), { estimate: known, request: { promotionEligible: true }, now: T0 });
   const ada = diamond(db2, "Ada");
+  // No figures until she says she qualifies (P2).
+  assert.equal(
+    viewAs(db2, b2, ada).viewer.promotion.risk,
+    "If you do not qualify you pay the regular price of £17.50, £2.50 more per unit.",
+  );
+  answerPromotion(db2, { bountyId: b2.id, memberId: ada.id, answer: "qualifies", now: T0 });
   assert.equal(
     viewAs(db2, b2, ada).viewer.promotion.risk,
     "If you do not qualify you pay the regular price of £17.50, £2.50 more per unit, which leaves about £5.00 profit per unit.",
@@ -950,15 +1022,33 @@ test("before the locality's 30-item validation is complete, cards and alerts say
   const ann = diamond(db, "Ann");
   const view = bountyView(db, b, { now: T0 });
   assert.equal(view.validation.complete, false);
-  assert.match(view.validation.warning, /^Pilot not validated in Camden: the 30-item check .* \(0 of 30 audited\)/);
+  assert.equal(view.validation.warning, "Pilot not validated in Camden: 0 of 30 items checked against stored evidence");
   const sent = dispatchAlerts(db, b.id, T0);
   assert.match(sent.warning, /Pilot not validated in Camden/);
   assert.match(memberAlerts(db, ann.id, { now: T0 })[0].warning, /Pilot not validated in Camden/);
+  // Items without a recorded offer and evidence do not count (R2B2).
   const insert = db.prepare("INSERT INTO validation_items(locality, barcode, title, retailer) VALUES('Camden', ?, 'Item', 'Argos')");
   for (let i = 0; i < 30; i++) insert.run(String(10000000 + i));
-  const done = bountyView(db, b, { now: T0 });
-  assert.equal(done.validation.complete, true);
-  assert.equal(done.validation.warning, null);
+  const undone = bountyView(db, b, { now: T0 });
+  assert.equal(undone.validation.complete, false);
+  assert.match(undone.validation.warning, /0 of 30 items checked against stored evidence/);
+  // The warning follows the audit contract: complete but not signed off
+  // still warns; only a sign-off clears it; anything missing is not signed off.
+  const progress = { target: 30, audited: 30, evidenced: 30, passed: 27, complete: true, signedOff: null };
+  assert.equal(
+    validationFrom("Camden", progress).warning,
+    "Pilot audit in Camden: 27 of 30 items passed, not yet signed off. Treat these figures with care.",
+  );
+  const signed = validationFrom("Camden", { ...progress, signedOff: { at: at(-60), passed: 27, evidenced: 30 } });
+  assert.equal(signed.warning, null);
+  assert.equal(signed.signedOffAt, at(-60));
+  assert.match(validationFrom("Camden", { ...progress, signedOff: undefined }).warning, /not yet signed off/);
+  assert.match(validationFrom("Camden", { audited: 30, passed: 30, complete: true, signedOff: { at: T0 } }).warning, /^Pilot not validated in Camden: 0 of 30/);
+  assert.match(validationFrom("Camden", null).warning, /^Pilot not validated in Camden: 0 of 30/);
+  assert.match(
+    validationFrom("Camden", { ...progress, evidenced: 12, complete: false, signedOff: { at: T0 } }).warning,
+    /^Pilot not validated in Camden: 12 of 30/,
+  );
   // Without the audit tables nothing is validated.
   const bare = memoryDb(schema);
   assert.equal(bountyView(bare, liveBounty(bare), { now: T0 }).validation.complete, false);
@@ -1034,8 +1124,8 @@ test("guards: completing more than claimed, another barcode on refresh, claimed 
 const tempDirs = [];
 after(() => tempDirs.forEach((dir) => rmSync(dir, { recursive: true, force: true })));
 
-async function setup(over = {}) {
-  const db = memoryDb(schema);
+async function setup({ db: given = null, ...over } = {}) {
+  const db = given ?? memoryDb(schema);
   const root = mkdtempSync(join(tmpdir(), "bounty-photos-"));
   tempDirs.push(root);
   const photoDir = join(root, "report-photos");
@@ -1048,7 +1138,7 @@ async function setup(over = {}) {
     estimate: (_db, request, opts) => {
       calls.push({ request, opts });
       if (state.estimate instanceof Error) throw state.estimate;
-      return state.estimate;
+      return typeof state.estimate?.remake === "function" ? state.estimate.remake(request) : state.estimate;
     },
     recordCheck: (_db, check) => {
       checks.push(check);
@@ -1145,7 +1235,7 @@ test("routes: claims re-check the evidence and race for the last unit", async ()
     const ids = [];
     for (const name of ["Ada", "Cy"])
       ids.push((await api.call("POST", "/api/members", { name, paidTier: "diamond", paidUntil: "2026-12-31" })).body.member.id);
-    const results = await Promise.all(ids.map((memberId) => api.call("POST", `/api/bounties/${b.id}/claims`, { memberId, units: 1 })));
+    const results = await Promise.all(ids.map((memberId) => api.call("POST", `/api/bounties/${b.id}/claims`, { memberId, units: 1, ...TRIP })));
     assert.deepEqual(results.map((r) => r.status).sort(), [201, 409]);
     const won = results.find((r) => r.status === 201);
     assert.match(won.body.message, /reserves your attention on this bounty, not stock at the retailer/);
@@ -1155,16 +1245,16 @@ test("routes: claims re-check the evidence and race for the last unit", async ()
     assert.equal(release.status, 200);
     // The re-check now fails: claims stop.
     state.estimate = ineligible("Offer observation has expired (8 days old)");
-    const blocked = await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: ids[0], units: 1 });
+    const blocked = await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: ids[0], units: 1, ...TRIP });
     assert.equal(blocked.status, 409);
     assert.match(blocked.body.error, /Offer observation has expired/);
     state.estimate = fakeEstimate({ stock: { check: { in_stock: 1, units_seen: 1 } } });
-    const made = await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: ids[0], units: 1 });
+    const made = await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: ids[0], units: 1, ...TRIP });
     assert.equal(made.status, 201);
     const done = await api.call("POST", `/api/claims/${made.body.claim.id}/complete`, { memberId: ids[0] });
     assert.equal(done.status, 200);
     assert.match(done.body.message, /purchase receipt and the payout record/);
-    assert.equal((await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: 999, units: 1 })).status, 404);
+    assert.equal((await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: 999, units: 1, ...TRIP })).status, 404);
   } finally {
     await api.close();
   }
@@ -1306,7 +1396,7 @@ test("routes: honest creation messages, asking-price lookups, re-checks and memb
       name: "Hi", paidTier: "diamond", paidUntil: "2026-12-31", rules: { minUnitProfit: 800 },
     });
     assert.deepEqual(strict.body.member.rules, { minUnitProfit: 800 });
-    const refused = await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: strict.body.member.id, units: 1 });
+    const refused = await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: strict.body.member.id, units: 1, ...TRIP });
     assert.equal(refused.status, 409);
     assert.match(refused.body.error, /below your £8.00/);
     const eased = await api.call("PATCH", `/api/members/${strict.body.member.id}`, { rules: { minUnitProfit: 700 } });
@@ -1314,8 +1404,8 @@ test("routes: honest creation messages, asking-price lookups, re-checks and memb
 
     // Claim messages use people's times; the promotion flag must be true or false.
     const ann = (await api.call("POST", "/api/members", { name: "Ann", paidTier: "diamond", paidUntil: "2026-12-31", alertsOptIn: true, alertLocalities: ["Camden"] })).body.member;
-    assert.equal((await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: ann.id, units: 1, qualifiesForPromotion: "yes" })).status, 400);
-    const made = await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: ann.id, units: 1 });
+    assert.equal((await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: ann.id, units: 1, qualifiesForPromotion: "yes", ...TRIP })).status, 400);
+    const made = await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: ann.id, units: 1, ...TRIP });
     assert.equal(made.status, 201);
     assert.match(made.body.message, /^Claim recorded for 1 unit until 2 Nov 2026, 12:00\./);
 
@@ -1340,8 +1430,498 @@ test("routes: honest creation messages, asking-price lookups, re-checks and memb
     const practice = await api.call("POST", `/api/bounties/${sample.id}/reports`, { memberId: zed.id, unitsSeen: 2 });
     assert.match(practice.body.message, /practice and earns no reputation points/);
     assert.doesNotMatch(practice.body.message, /earns reputation points once/);
-    assert.equal((await api.call("POST", `/api/bounties/${sample.id}/claims`, { memberId: ann.id, units: 1 })).status, 409);
+    assert.equal((await api.call("POST", `/api/bounties/${sample.id}/claims`, { memberId: ann.id, units: 1, ...TRIP })).status, 409);
   } finally {
+    await api.close();
+  }
+});
+
+// ------------------------------------------------------------ round two
+
+test("every read re-checks the evidence: a branch check that found none stops the trip and tells members (R2B1)", async () => {
+  const db = memoryDb(schema, auditSchema);
+  const { api } = await setup({ db });
+  try {
+    const b = liveBounty(db, {}, fakeEstimate({ alert: { checks: stockChecks } }));
+    const ann = diamond(db, "Ann"); // alerted
+    const bo = diamond(db, "Bo", { alertsOptIn: false }); // holds a claim, never alerted
+    assert.deepEqual(dispatchAlerts(db, b.id, T0).sent.map((x) => x.name), ["Ann"]);
+    claim(db, { bountyId: b.id, memberId: bo.id, units: 1, now: T0 });
+    // A helper records a branch check that found none. Nothing else runs.
+    recordCheck(
+      db,
+      { barcode: GTIN, retailer: "Argos", locality: "Camden", checkedAt: at(-10), method: "in_store", inStock: false, unitsSeen: 0 },
+      { now: T0 },
+    );
+    const inbox = (await api.call("GET", `/api/members/${ann.id}/alerts`)).body;
+    assert.equal(inbox.alerts[0].trip.state, "out-of-stock");
+    assert.equal(inbox.alerts[0].trip.go, false);
+    assert.match(inbox.alerts[0].trip.headline, /^Don't make the trip: the latest branch check \(2 Nov 2026, 08:50\) found none on the shelf/);
+    assert.equal(inbox.stopNotices.length, 1);
+    assert.match(inbox.stopNotices[0].message, /^Don't make the trip: the latest branch check \(2 Nov 2026, 08:50\) found none/);
+    // Bo, who claimed without an alert, was told in the same read.
+    assert.equal(memberNotices(db, bo.id).length, 1);
+    const card = (await api.call("GET", `/api/bounties/${b.id}?viewer=${bo.id}`)).body.bounty;
+    assert.equal(card.trip.state, "out-of-stock");
+    assert.equal(card.viewer.activeClaim.paused, true);
+    assert.equal(check(card, "availability").ok, false);
+    assert.match(check(card, "local-stock").detail, /newer branch check \(2 Nov 2026, 08:50\) found none/);
+    assert.equal((await api.call("GET", "/api/bounties")).body.bounties[0].trip.state, "out-of-stock");
+    // Reads never repeat the notice.
+    assert.equal(memberNotices(db, ann.id).length, 1);
+    assert.equal(memberNotices(db, bo.id).length, 1);
+    // recheckOpenBounties (for the lead after a branch check) reports it,
+    // for any spelling of the barcode, and only at that retailer.
+    const again = recheckOpenBounties(db, { barcode: "5012345678900", retailer: "argos", now: T0 });
+    assert.equal(again.checked, 1);
+    assert.equal(again.stopped[0].bountyId, b.id);
+    assert.match(again.stopped[0].reasons[0], /found none on the shelf/);
+    assert.equal(again.stopped[0].noticesSent, 0);
+    assert.equal(recheckOpenBounties(db, { barcode: GTIN, retailer: "Tesco", now: T0 }).checked, 0);
+    assert.equal(recheckOpenBounties(db, { barcode: "not a barcode", now: T0 }).checked, 0);
+  } finally {
+    await api.close();
+  }
+});
+
+test("recheckOpenBounties sends the notice itself when nobody has read the bounty", () => {
+  const db = memoryDb(schema, auditSchema);
+  const b = liveBounty(db);
+  const ann = diamond(db, "Ann");
+  dispatchAlerts(db, b.id, T0);
+  recordCheck(db, { barcode: GTIN, retailer: "Argos", locality: "Camden", checkedAt: at(-5), method: "phone", inStock: false, unitsSeen: 0 }, { now: T0 });
+  const out = recheckOpenBounties(db, { barcode: GTIN, now: T0 });
+  assert.deepEqual(out.stopped.map((x) => [x.bountyId, x.noticesSent]), [[b.id, 1]]);
+  assert.equal(memberNotices(db, ann.id).length, 1);
+  // A check in another locality does not count.
+  const db2 = memoryDb(schema, auditSchema);
+  const b2 = liveBounty(db2);
+  recordCheck(db2, { barcode: GTIN, retailer: "Argos", locality: "Leeds", checkedAt: at(-5), method: "phone", inStock: false, unitsSeen: 0 }, { now: T0 });
+  assert.equal(tripState(db2, b2, T0).go, true);
+});
+
+test("a price rise or a removed offer in the evidence stops the trip on the next read, and a fall back reopens it", () => {
+  const db = memoryDb(schema);
+  db.exec(RESEARCH_TABLE);
+  const row = db.prepare(
+    "INSERT INTO research(provider, source_id, kind, title, price, observed) VALUES('awin', 'A1', 'Retail offer', 'Travel kettle 0.5 l', 1500, '2026-11-01')",
+  );
+  row.run();
+  const b = liveBounty(db, {}, fakeEstimate({ alert: { checks: stockChecks } }));
+  const ann = diamond(db, "Ann");
+  dispatchAlerts(db, b.id, T0);
+  assert.equal(viewAs(db, b, ann).trip.go, true);
+  db.prepare("UPDATE research SET price = 3400, observed = '2026-11-02' WHERE source_id = 'A1'").run();
+  const risen = viewAs(db, b, ann, at(5));
+  assert.equal(risen.trip.state, "blocked");
+  assert.equal(risen.trip.label, "Price has risen");
+  assert.match(risen.trip.headline, /^Don't make the trip: the offer price has risen from £15.00 to £34.00/);
+  assert.equal(check(risen, "offer-fresh").ok, false);
+  assert.equal(risen.checked.price, "2026-11-01"); // a higher price never freshens the old one
+  assert.match(risen.mainUncertainty, /price has risen/);
+  assert.match(memberNotices(db, ann.id)[0].message, /^Don't make the trip: the offer price has risen from £15.00 to £34.00/);
+  // Back to the old price, seen again today: open again, and Ann is told.
+  db.prepare("UPDATE research SET price = 1500 WHERE source_id = 'A1'").run();
+  const back = viewAs(db, b, ann, at(10));
+  assert.equal(back.trip.go, true);
+  assert.equal(back.checked.priceLabel, "Price seen 2 Nov 2026");
+  assert.deepEqual(memberNotices(db, ann.id).map((n) => n.kind), ["reopen", "stop"]);
+  // The offer leaving the evidence stops it again.
+  db.prepare("DELETE FROM research").run();
+  const gone = viewAs(db, b, ann, at(15));
+  assert.equal(gone.trip.label, "Offer no longer listed");
+  assert.equal(memberNotices(db, ann.id).filter((n) => n.kind === "stop" && !n.superseded).length, 1);
+});
+
+test("independent sales that age out of the 90-day window stop the trip", () => {
+  const db = memoryDb(schema);
+  const used = ["Ann's Attic", "Bob Sells", "Cy Store"].map((seller) => ({ seller, observed: "2026-08-03T12:00:00.000Z", price: 3200 }));
+  const b = liveBounty(db, {}, fakeEstimate({ sample: { used } }));
+  assert.equal(JSON.parse(b.estimate).sample.sellers.length, 3);
+  assert.equal(tripState(db, b, T0).go, true);
+  const later = at(24 * 60);
+  const list = blockerList(db, b, later);
+  assert.deepEqual(list.map((x) => x.id), ["sales-aged"]);
+  assert.match(list[0].text, /Only 0 of the 3 independent sales behind the figures are still from the last 90 days: fewer than 3/);
+  assert.equal(tripState(db, b, later).label, "Sales evidence out of date");
+});
+
+test("stock checks: a check one hour past its window blocks, an undated one blocks (BT5, BT7)", () => {
+  const db = memoryDb(schema);
+  const b = liveBounty(db, { expiresAt: at(10 * 24 * 60) });
+  const checked = Date.parse("2026-11-02T08:00:00.000Z");
+  const hour = 3600000;
+  const day = 24 * hour;
+  assert.equal(stockLapse(b, new Date(checked + CHECK_VALID_DAYS * day - hour).toISOString()).lapsed, false);
+  const late = new Date(checked + CHECK_VALID_DAYS * day + hour).toISOString();
+  assert.equal(stockLapse(b, late).lapsed, true);
+  assert.equal(tripState(db, b, late).state, "stock-unconfirmed");
+  const db2 = memoryDb(schema);
+  const undated = liveBounty(db2, {}, fakeEstimate({ stock: { check: { checked_at: null } } }));
+  assert.equal(JSON.parse(undated.estimate).stock.checkedAt, null);
+  assert.equal(stockLapse(undated, T0).lapsed, true);
+  assert.match(blockerList(db2, undated, T0)[0].text, /No dated branch stock check is recorded/);
+  assert.equal(tripState(db2, undated, T0).go, false);
+});
+
+test("an older empty report behind a newer one that paused sends no second notice (BN2)", () => {
+  const db = memoryDb(schema);
+  const b = liveBounty(db);
+  const ann = diamond(db, "Ann");
+  const zed = diamond(db, "Zed");
+  dispatchAlerts(db, b.id, T0);
+  addReport(db, { bountyId: b.id, memberId: zed.id, unitsSeen: 0, observedAt: at(50) }, { now: at(50) });
+  assert.equal(memberNotices(db, ann.id).length, 1);
+  addReport(db, { bountyId: b.id, memberId: zed.id, unitsSeen: 0, observedAt: at(45) }, { now: at(51) });
+  viewAs(db, b, ann, at(52));
+  memberAlerts(db, ann.id, { now: at(52) });
+  assert.equal(memberNotices(db, ann.id).length, 1);
+});
+
+test("member thresholds fail closed: unknown profit, and a weight exactly at the limit (BM2, BM3)", () => {
+  const db = memoryDb(schema);
+  const unknown = liveBounty(db, {}, fakeEstimate({ opportunity: { unitProfit: null } }));
+  const strict = diamond(db, "Strict", { rules: { minUnitProfit: 600 } });
+  assert.deepEqual(memberRuleFailures(unknown, memberRow(db, strict.id)), ["Profit per unit unknown, so your thresholds cannot be checked"]);
+  assert.match(dispatchAlerts(db, unknown.id, T0).notAlerted.find((x) => x.name === "Strict").reason, /Profit per unit unknown/);
+  // Without rules of their own the member is not judged on them.
+  assert.deepEqual(memberRuleFailures(unknown, memberRow(db, diamond(db, "Easy").id)), []);
+  const db2 = memoryDb(schema);
+  const b = liveBounty(db2); // 0.9 kg a unit
+  const at09 = diamond(db2, "Limit", { rules: { maxWeightKg: 0.9 } });
+  assert.deepEqual(memberRuleFailures(b, memberRow(db2, at09.id)), ["Unit weighs 0.9 kg, not under your limit of 0.9 kg"]);
+  const roomy = diamond(db2, "Roomy", { rules: { maxWeightKg: 1 } });
+  assert.deepEqual(memberRuleFailures(b, memberRow(db2, roomy.id)), []);
+});
+
+test("member rules with names from Object.prototype are refused, not a crash (R2B3)", () => {
+  const db = memoryDb(schema);
+  for (const key of ["toString", "valueOf", "constructor", "__proto__"]) {
+    const rules = JSON.parse(`{"${key}": 1}`);
+    const made = status(() => createMember(db, { name: "Odd " + key, rules }, { now: T0 }));
+    assert.equal(made.status, 400, key);
+    assert.match(made.message, /rules/, key);
+    const ok = createMember(db, { name: "Fine " + key }, { now: T0 });
+    assert.equal(status(() => updateMember(db, ok.id, { rules }, { now: T0 })).status, 400, key);
+  }
+});
+
+test("routes: a locality that is not text is refused with 400 (R2B4)", async () => {
+  const { api } = await setup();
+  try {
+    for (const locality of [{ toString: 1 }, [["Camden"]], 7])
+      assert.equal((await api.call("POST", "/api/bounties", { ...bountyInput(), estimate: { ...request, locality } })).status, 400);
+    assert.equal((await api.call("POST", "/api/bounties", { ...bountyInput({ locality: { toString: 1 } }), estimate: request })).status, 400);
+    assert.equal((await api.call("POST", "/api/bounties", { ...bountyInput(), estimate: { ...request, locality: "camden" } })).status, 201);
+  } finally {
+    await api.close();
+  }
+});
+
+test("a claim takes the member's own journey and is checked at the units claimed (R2M1, R2P1)", () => {
+  const db = memoryDb(schema);
+  const b = liveBounty(db);
+  const ann = diamond(db, "Ann");
+  // Both journey figures are required; a blank is never zero.
+  for (const journey of [undefined, { cost: 300 }, { minutes: 30 }, { cost: "", minutes: 30 }, { cost: null, minutes: 0 }])
+    assert.match(
+      status(() => rawClaim(db, { bountyId: b.id, memberId: ann.id, units: 1, journey, check: ownCheck(1), now: T0 })).message,
+      /A blank is never counted as zero/,
+    );
+  assert.equal(status(() => journeyInput({ journeyCost: -1, journeyMinutes: 10 })).status, 400);
+  assert.deepEqual(journeyInput({ journeyCost: 0, journeyMinutes: 0 }), { cost: 0, minutes: 0 });
+  // Figures for other units, or another journey, are refused.
+  const wrongUnits = status(() => rawClaim(db, { bountyId: b.id, memberId: ann.id, units: 1, journey: JOURNEY, check: ownCheck(2), now: T0 }));
+  assert.equal(wrongUnits.status, 409);
+  assert.match(wrongUnits.message, /worked out for 2 units, not your 1/);
+  const wrongTrip = status(() =>
+    rawClaim(db, { bountyId: b.id, memberId: ann.id, units: 1, journey: JOURNEY, check: ownCheck(1, { cost: 900, minutes: 30 }), now: T0 }),
+  );
+  assert.match(wrongTrip.message, /do not use your journey cost/);
+  // Failing on the member's own figures: 409 with the reasons.
+  const failing = fakeEstimate({
+    units: 1,
+    journeyCost: 300,
+    alert: { eligible: false, reasons: ["Below the hourly floor or working time unknown"], checks: [] },
+    opportunity: { meetsThresholds: false, reasons: ["Profit per unit below £5"] },
+  });
+  const refused = status(() => rawClaim(db, { bountyId: b.id, memberId: ann.id, units: 1, journey: JOURNEY, check: failing, now: T0 }));
+  assert.equal(refused.status, 409);
+  assert.equal(
+    refused.message,
+    "At 1 unit with your journey (£3.00, 30 minutes) this trip fails: Profit per unit below £5; Below the hourly floor or working time unknown.",
+  );
+  assert.equal(memberTripCheck({ error: "Offer not found" }, { units: 1, journey: JOURNEY }).ok, false);
+  // Passing: the claim keeps the journey and the figures it was checked on.
+  const made = rawClaim(db, { bountyId: b.id, memberId: ann.id, units: 1, journey: JOURNEY, check: ownCheck(1), now: T0 });
+  assert.equal(made.journey_cost, 300);
+  assert.equal(made.journey_minutes, 30);
+  assert.equal(JSON.parse(made.figures).units, 1);
+  assert.equal(JSON.parse(made.figures).unitProfit, 700);
+  const mine = viewAs(db, b, ann).claims[0];
+  assert.equal(mine.journeyCost, 300);
+  assert.equal(mine.figures.contribution, 700);
+});
+
+test("bounty figures say how many units and whose journey; category, attributes, checks and access needs are shown", () => {
+  const db = memoryDb(schema);
+  const est = fakeEstimate({
+    offer: { pack: "1", attributeSource: { pack: "operator", condition: "assumed" }, operatorConfirmed: ["pack"] },
+    alert: { checks: [{ id: "exact-match", ok: true, detail: "Barcode, size, pack, model and condition match" }, ...stockChecks] },
+    extra: {
+      category: { chosen: "general", suggested: "clothing", applied: "clothing", reason: null, warning: "The title suggests clothing. You chose General, so the clothing rules still apply" },
+      mainUncertainty: "Whether buyers still pay about £32.00: the estimate rests on 26 confirmed sales",
+    },
+  });
+  const b = createBounty(db, bountyInput(), {
+    estimate: est,
+    request: { offer: { provider: "awin", sourceId: "A1" }, units: 2, costs: { journeyCost: 500, journeyMinutes: 30 } },
+    now: T0,
+  });
+  const ann = diamond(db, "Ann");
+  dispatchAlerts(db, b.id, T0);
+  const view = viewAs(db, b, ann);
+  assert.equal(
+    view.figures.label,
+    "Figures for 2 units, the most one member can claim, using the operator's return journey (£5.00, 30 minutes). Your own journey cost and time are used when you claim.",
+  );
+  assert.equal(view.figures.units, 2);
+  assert.equal(view.category.applied, "Clothing");
+  assert.equal(view.category.suggested, "Clothing");
+  assert.match(view.category.warning, /clothing rules still apply/);
+  assert.deepEqual(view.attributes.map((a) => a.text), [
+    "Pack 1: confirmed by the operator, not stated by the source",
+    "Condition new: assumed for a shop's offer, not stated by the source",
+  ]);
+  assert.match(check(view, "exact-match").detail, /Pack 1: confirmed by the operator, not stated by the source/);
+  assert.equal(view.checked.priceLabel, "Price seen 1 Nov 2026");
+  assert.equal(view.checked.stockLabel, "Stock last checked 2 Nov 2026, 08:00 (branch check)");
+  assert.match(view.mainUncertainty, /^Whether buyers still pay about £32.00/);
+  assert.deepEqual(view.accessNeeds.map((n) => n.label), ["Widely accessible"]);
+  const inbox = memberAlerts(db, ann.id, { now: T0 })[0];
+  assert.equal(inbox.kind, "alert");
+  assert.equal(inbox.category.applied, "Clothing");
+  assert.equal(inbox.attributes[0].text, "Pack 1: confirmed by the operator, not stated by the source");
+  assert.deepEqual(inbox.accessNeeds.map((n) => n.id), ["widely-accessible"]);
+  assert.match(inbox.figures.label, /^Figures for 2 units/);
+  assert.deepEqual(attributeNotes({ pack: null }), []);
+  // Few units on the shelf: limited local stock.
+  const db2 = memoryDb(schema);
+  const few = liveBounty(db2, {}, fakeEstimate({ stock: { check: { units_seen: 3 } } }));
+  assert.deepEqual(bountyView(db2, few, { now: T0 }).accessNeeds.map((n) => n.label), ["Limited local stock"]);
+  // The older category shape still reads.
+  const db3 = memoryDb(schema);
+  const old = liveBounty(db3, {}, fakeEstimate({ extra: { category: { id: "food", name: "Food", chosen: "suggested" } } }));
+  assert.equal(bountyView(db3, old, { now: T0 }).category.applied, "Food");
+});
+
+test("tier reasons follow the card's current pressure and competition (R2Q8)", () => {
+  const db = memoryDb(schema);
+  const b = liveBounty(db, {}, fakeEstimate({ opportunity: { reasons: ["Resale competition high or unknown", "Sourcing pressure high or unknown"] } }));
+  const view = bountyView(db, b, { now: T0 });
+  assert.equal(view.pressure.sourcing.ratio, 0);
+  assert.match(view.opportunity.reasons[1], /^Sourcing pressure is 0 now, within the 0.5 Priority 1 allows/);
+  assert.doesNotMatch(view.opportunity.reasons.join(" "), /high or unknown/);
+});
+
+test("promotion answers: a first-order offer already used at a retailer is never alerted there again (P2)", async () => {
+  const { api, db, state } = await setup();
+  try {
+    state.estimate = fakeEstimate({ offer: { promotion: "New customers only: 20% off your first order", price: 1500, regularPrice: null } });
+    const b = (await api.call("POST", "/api/bounties", { ...bountyInput(), estimate: request })).body.bounty;
+    const make = async (name) =>
+      (await api.call("POST", "/api/members", { name, alertsOptIn: true, alertLocalities: ["Camden"], paidTier: "diamond", paidUntil: "2026-12-31" })).body.member;
+    const pat = await make("Pat");
+    const sam = await make("Sam");
+    const sent = (await api.call("POST", `/api/bounties/${b.id}/alerts`, {})).body;
+    assert.deepEqual(sent.sent, []);
+    assert.equal(sent.asked.length, 2);
+    const question = (await api.call("GET", `/api/members/${pat.id}/alerts`)).body.alerts[0];
+    assert.equal(question.kind, "question");
+    assert.equal(question.figures, null);
+    assert.match(question.eligibility.question, /first-order or new-customer offer at Argos/);
+    // A claim-check before answering is refused; the figures depend on it.
+    assert.equal((await api.call("POST", `/api/bounties/${b.id}/claim-check`, { memberId: pat.id, units: 1, ...TRIP })).status, 409);
+    // Pat qualifies: the question becomes the alert, with figures.
+    const yes = await api.call("POST", `/api/bounties/${b.id}/eligibility`, { memberId: pat.id, answer: "qualifies" });
+    assert.equal(yes.status, 200);
+    assert.equal(yes.body.alerted, true);
+    assert.ok(yes.body.bounty.estimate.economics);
+    const alert = (await api.call("GET", `/api/members/${pat.id}/alerts`)).body.alerts[0];
+    assert.equal(alert.kind, "alert");
+    assert.ok(alert.figures);
+    const preview = await api.call("POST", `/api/bounties/${b.id}/claim-check`, { memberId: pat.id, units: 1, ...TRIP });
+    assert.equal(preview.status, 200);
+    assert.equal(preview.body.check.ok, true);
+    assert.match(preview.body.message, /^At 1 unit with your journey \(£3.00, 30 minutes\): profit per unit £7.00/);
+    // Sam already used a first-order offer at Argos.
+    const used = await api.call("POST", `/api/bounties/${b.id}/eligibility`, { memberId: sam.id, answer: "used" });
+    assert.match(used.body.message, /first-order offers at Argos will not be sent to you again/);
+    const samView = (await api.call("GET", `/api/bounties/${b.id}?viewer=${sam.id}`)).body.bounty;
+    assert.match(samView.viewer.blockers.join(" "), /already used a first-order offer at Argos/);
+    assert.equal(samView.viewer.canClaim, false);
+    assert.equal(samView.estimate.economics, null);
+    const refused = await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: sam.id, units: 1, ...TRIP });
+    assert.equal(refused.status, 409);
+    assert.match(refused.body.error, /already used a first-order offer at Argos/);
+    // A later first-order bounty at Argos is not sent to Sam.
+    await api.call("POST", `/api/bounties/${b.id}/withdraw`, {});
+    const next = (await api.call("POST", "/api/bounties", { ...bountyInput(), estimate: request })).body.bounty;
+    const later = (await api.call("POST", `/api/bounties/${next.id}/alerts`, {})).body;
+    assert.match(later.notAlerted.find((x) => x.name === "Sam").reason, /already used a first-order offer at Argos/);
+    // Bad answers.
+    assert.equal((await api.call("POST", `/api/bounties/${next.id}/eligibility`, { memberId: pat.id, answer: "maybe" })).status, 400);
+    const plain = memoryDb(schema);
+    const none = liveBounty(plain);
+    const who = diamond(plain, "Who");
+    assert.equal(status(() => answerPromotion(plain, { bountyId: none.id, memberId: who.id, answer: "qualifies", now: T0 })).status, 409);
+    db.prepare("SELECT 1").get();
+  } finally {
+    await api.close();
+  }
+});
+
+test("a loyalty price can be answered qualifies or not, never used", () => {
+  const db = memoryDb(schema);
+  const b = createBounty(db, bountyInput(), {
+    estimate: fakeEstimate({ offer: { promotion: "Clubcard price", price: 1500, regularPrice: null } }),
+    request: {},
+    now: T0,
+  });
+  const pat = diamond(db, "Pat");
+  assert.equal(status(() => answerPromotion(db, { bountyId: b.id, memberId: pat.id, answer: "used", now: T0 })).status, 400);
+  const no = answerPromotion(db, { bountyId: b.id, memberId: pat.id, answer: "not", now: T0 });
+  assert.equal(no.confirmed, false);
+  assert.match(dispatchAlerts(db, b.id, T0).notAlerted.find((x) => x.name === "Pat").reason, /do not qualify/);
+});
+
+test("routes: claims need the member's journey and re-run the figures at their units", async () => {
+  const seen = [];
+  const { api, state } = await setup({
+    estimate: (_db, req) => {
+      seen.push(req);
+      // A long, costly journey makes one unit fail the hourly floor.
+      if (req.costs?.journeyCost > 900)
+        return fakeEstimate({
+          units: req.units,
+          journeyCost: req.costs.journeyCost,
+          alert: { eligible: false, reasons: ["Below the hourly floor or working time unknown"], checks: [] },
+        });
+      return state.estimate.remake(req);
+    },
+  });
+  try {
+    state.estimate = fakeEstimate({ stock: { check: { in_stock: 1, units_seen: 1 } } });
+    const created = await api.call("POST", "/api/bounties", { ...bountyInput(), estimate: request });
+    const b = created.body.bounty;
+    // Cap 1: the estimate was worked out again for 1 unit before the bounty was made.
+    assert.equal(b.cap, 1);
+    assert.deepEqual(seen.map((r) => r.units), [2, 1]);
+    assert.equal(b.figures.units, 1);
+    assert.equal(b.alert.eligible, true);
+    assert.match(b.figures.label, /^Figures for 1 unit, the most one member can claim, using the operator's return journey/);
+    const ann = (await api.call("POST", "/api/members", { name: "Ann", paidTier: "diamond", paidUntil: "2026-12-31" })).body.member;
+    const blank = await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: ann.id, units: 1, journeyCost: 300 });
+    assert.equal(blank.status, 400);
+    assert.match(blank.body.error, /A blank is never counted as zero/);
+    const costly = await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: ann.id, units: 1, journeyCost: 1200, journeyMinutes: 90 });
+    assert.equal(costly.status, 409);
+    assert.match(costly.body.error, /^At 1 unit with your journey \(£12.00, 90 minutes\) this trip fails: Below the hourly floor/);
+    const own = seen.at(-1);
+    assert.equal(own.units, 1);
+    assert.equal(own.costs.journeyCost, 1200);
+    assert.equal(own.costs.journeyMinutes, 90);
+    assert.equal(own.promotionEligible, false);
+    const made = await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: ann.id, units: 1, journeyCost: 0, journeyMinutes: 20 });
+    assert.equal(made.status, 201);
+    assert.equal(made.body.check.ok, true);
+    assert.match(made.body.message, /At 1 unit with your journey \(£0.00, 20 minutes\): profit per unit £10.00/);
+  } finally {
+    await api.close();
+  }
+});
+
+test("routes: a report of stock while an earlier empty shelf holds the bounty says it waits for verification (R2Q9)", async () => {
+  const { api, state } = await setup();
+  try {
+    const b = (await api.call("POST", "/api/bounties", { ...bountyInput(), estimate: request })).body.bounty;
+    const bob = (await api.call("POST", "/api/members", { name: "Bob" })).body.member;
+    const alice = (await api.call("POST", "/api/members", { name: "Alice" })).body.member;
+    const empty = await api.call("POST", `/api/bounties/${b.id}/reports`, { memberId: bob.id, unitsSeen: 0 });
+    // The operator verifies it; the re-check's branch check is that report.
+    state.estimate = fakeEstimate({
+      alert: { eligible: false, reasons: ["Latest branch check found none on the shelf"], checks: [] },
+      stock: { confirmed: false, availability: "out_of_stock", check: { in_stock: 0, units_seen: 0, checked_at: T0 } },
+    });
+    await api.call("POST", `/api/reports/${empty.body.reportId}/verify`, { accurate: true });
+    state.now = at(1);
+    const seen = await api.call("POST", `/api/bounties/${b.id}/reports`, { memberId: alice.id, unitsSeen: 3 });
+    assert.equal(seen.status, 201);
+    assert.match(
+      seen.body.message,
+      /^Thanks: your report of 3 units is waiting for the operator to verify it\. Until then the bounty stays paused after the earlier empty-shelf report\./,
+    );
+    assert.doesNotMatch(seen.body.message, /found none/);
+    assert.match(seen.body.bounty.trip.headline, /the operator confirmed a report of none on the shelf at 2 Nov 2026, 09:00\. A newer report of 3 units at 2 Nov 2026, 09:01 is waiting/);
+  } finally {
+    await api.close();
+  }
+});
+
+test("paid access lasts to the end of the UK day and is shown as a UK date (Q15)", () => {
+  const db = memoryDb(schema);
+  const m = member(db, "Summer", { paidTier: "ruby", paidUntil: "2026-07-01" });
+  const row = memberRow(db, m.id);
+  const view = memberView(db, row, { now: "2026-07-01T22:30:00.000Z" });
+  assert.equal(view.paid.untilLabel, "1 Jul 2026");
+  assert.equal(view.paid.endsAt, "2026-07-01T23:00:00.000Z");
+  assert.equal(view.paid.current, true);
+  assert.equal(memberView(db, row, { now: "2026-07-01T23:30:00.000Z" }).paid.current, false);
+  const winter = memberRow(db, member(db, "Winter", { paidTier: "ruby", paidUntil: "2026-12-31" }).id);
+  assert.equal(memberView(db, winter, { now: T0 }).paid.endsAt, "2027-01-01T00:00:00.000Z");
+});
+
+test("a competing-listings count the evidence calls stale keeps the cap at 0 and says why (R2M5)", () => {
+  const db = memoryDb(schema);
+  const note = "Competing listings last checked 20 Oct 2026: run an asking-price lookup before sharing";
+  const stale = fakeEstimate({ competition: { activeListings: null, sellers: null, lowestAsking: null, note } });
+  const b = createBounty(db, bountyInput(), { estimate: stale, request: {}, lookup: { provider: "ebay", fetched: at(-60) }, now: T0 });
+  assert.equal(b.cap, 0);
+  assert.equal(b.competing_listings, null);
+  assert.match(JSON.parse(b.cap_basis).notes.join(" "), /Competing listings last checked 20 Oct 2026: run an asking-price lookup before sharing\. Competing listings unknown, so the cap is 0/);
+  const view = bountyView(db, b, { now: T0 });
+  assert.equal(view.pressure.resale.competingListings, null);
+  assert.equal(view.pressure.resale.note, note);
+  assert.equal(view.alert.canSend, false);
+});
+
+test("recording an empty-shelf check through the research route stops the bounty at once", async () => {
+  const { routes: researchRoutes } = await import("./routes-research.mjs");
+  const db = memoryDb(schema, auditSchema);
+  const b = liveBounty(db);
+  const ann = diamond(db, "Ann");
+  dispatchAlerts(db, b.id, T0);
+  assert.equal(memberNotices(db, ann.id).length, 0);
+  const api = await serve(db, [{ routes: researchRoutes }]);
+  // The route reads the server clock; hold it at the fixtures' time.
+  mock.timers.enable({ apis: ["Date"], now: Date.parse(T0) });
+  try {
+    const res = await api.call("POST", "/api/research/checks", {
+      barcode: GTIN,
+      retailer: "Argos",
+      locality: "Camden",
+      method: "phone",
+      inStock: false,
+      unitsSeen: 0,
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.bounties.checked, 1);
+    assert.deepEqual(res.body.bounties.stopped.map((x) => x.bountyId), [b.id]);
+    const notices = memberNotices(db, ann.id);
+    assert.equal(notices.length, 1);
+    assert.match(JSON.stringify(notices[0]), /none on the shelf/);
+  } finally {
+    mock.timers.reset();
     await api.close();
   }
 });

@@ -92,7 +92,7 @@ function SourceRow({ source }: { source: Source }) {
         <dt>Rows stored</dt>
         <dd>{source.rows.toLocaleString("en-GB")}</dd>
         <dt>Last fetch</dt>
-        <dd>{source.lastSuccess ? dateTime(source.lastSuccess) + " UTC" : "never"}</dd>
+        <dd>{source.lastSuccess ? dateTime(source.lastSuccess) : "never"}</dd>
         <dt>Last error</dt>
         <dd className={source.lastError && !errorResolved ? "warn" : undefined}>
           {source.lastError
@@ -115,7 +115,7 @@ function RunsTable({ runs }: { runs: Run[] }) {
       <table>
         <thead>
           <tr>
-            <th>Started (UTC)</th>
+            <th>Started</th>
             <th>Source</th>
             <th>Mode</th>
             <th>Query or file</th>
@@ -239,7 +239,7 @@ function Permissions({
                 <th>Programme</th>
                 <th>Display</th>
                 <th>Note</th>
-                <th>Updated (UTC)</th>
+                <th>Updated</th>
               </tr>
             </thead>
             <tbody>
@@ -276,7 +276,7 @@ function ObservationRow({ o }: { o: Observation }) {
         <b>{o.title}</b>
         <small>{place}</small>
         <small>
-          Observed {o.day} · Imported {dateTime(o.imported)} UTC
+          Observed {o.day} · Imported {dateTime(o.imported)}
           {o.quantity && " · Quantity " + o.quantity}
           {o.barcode && " · Barcode " + o.barcode}
           {o.proof_id && " · Proof #" + o.proof_id}
@@ -406,6 +406,12 @@ export default function Sources() {
           them from the command line, are cached locally and never send a key to the browser.
           "Credential configured" means a value is set on the server, not that the provider
           accepted it. A feed or online catalogue never confirms that a branch has stock.
+        </p>
+        <p className="muted">
+          eBay asking prices count as current competition for 7 days after the lookup that saw
+          them. After that, competition is shown as not known until you run the lookup again. A
+          copy of one of the repository's sample files is refused on import, so example data
+          never becomes evidence.
         </p>
         {sources.map((s) => (
           <SourceRow key={s.provider} source={s} />

@@ -8,7 +8,7 @@
 // income: a recorded sale is not cash until the marketplace pays it out, and a
 // prediction is never cash at all. Household savings (the saving against the
 // usual price on things bought for the home) are never earnings or proceeds.
-import { bool, fail, int, isoDate, oneOf, text, transaction } from "./http.mjs";
+import { bool, fail, int, isoDate, londonDate, oneOf, text, transaction } from "./http.mjs";
 import { removesMetadata } from "./proofs.mjs";
 
 export const TRIP_SOURCES = Object.freeze(["planner", "research", "bounty", "manual"]);
@@ -52,8 +52,12 @@ const TRIPS_TABLE = `CREATE TABLE IF NOT EXISTS ledger_trips (
  created TEXT NOT NULL,
  closed_at TEXT
 )`;
-const ENTRIES_TABLE = `CREATE TABLE IF NOT EXISTS ledger_entries (
- id INTEGER PRIMARY KEY,
+// Entries and proofs can be deleted, so their ids use AUTOINCREMENT: an id is
+// never given to a new row after its row was deleted, and a stale tab or a
+// retried DELETE can only ever reach the row it meant (or nothing).
+const ENTRY_COLUMNS = "id, trip_id, type, amount, units, reference, occurred, minutes, note, created";
+const entriesTable = (name) => `CREATE TABLE IF NOT EXISTS ${name} (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
  trip_id INTEGER NOT NULL REFERENCES ledger_trips(id),
  type TEXT NOT NULL,
  amount INTEGER NOT NULL CHECK (amount >= 0),
@@ -65,10 +69,11 @@ const ENTRIES_TABLE = `CREATE TABLE IF NOT EXISTS ledger_entries (
  created TEXT NOT NULL
 )`;
 // Metadata only. The files live in the private proof directory (proofs.mjs).
-const PROOFS_TABLE = `CREATE TABLE IF NOT EXISTS ledger_proofs (
- id INTEGER PRIMARY KEY,
+const PROOF_COLUMNS = "id, trip_id, entry_id, sha256, bytes, media_type, label, created";
+const proofsTable = (name, entries = "ledger_entries") => `CREATE TABLE IF NOT EXISTS ${name} (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
  trip_id INTEGER NOT NULL REFERENCES ledger_trips(id),
- entry_id INTEGER REFERENCES ledger_entries(id),
+ entry_id INTEGER REFERENCES ${entries}(id),
  sha256 TEXT NOT NULL,
  bytes INTEGER NOT NULL,
  media_type TEXT NOT NULL,
@@ -83,31 +88,76 @@ const LEGACY_TABLE = `CREATE TABLE IF NOT EXISTS ledger_legacy_outcomes (
  migrated TEXT NOT NULL
 )`;
 
-/** Creates the ledger tables (idempotent) and migrates legacy outcomes. */
+/**
+ * Creates the ledger tables (idempotent), rebuilds entry and proof tables
+ * made before their ids used AUTOINCREMENT, and migrates legacy outcomes.
+ */
 export function schema(db, { now = new Date() } = {}) {
-  db.exec(TRIPS_TABLE);
-  db.exec(ENTRIES_TABLE);
-  db.exec(PROOFS_TABLE);
-  db.exec(LEGACY_TABLE);
-  db.exec("CREATE INDEX IF NOT EXISTS ledger_entries_trip ON ledger_entries(trip_id)");
-  db.exec("CREATE INDEX IF NOT EXISTS ledger_entries_occurred ON ledger_entries(occurred)");
-  db.exec("CREATE INDEX IF NOT EXISTS ledger_proofs_trip ON ledger_proofs(trip_id)");
-  migrateLegacyOutcomes(db, now);
+  transaction(db, () => {
+    db.exec(TRIPS_TABLE);
+    db.exec(entriesTable("ledger_entries"));
+    db.exec(proofsTable("ledger_proofs"));
+    db.exec(LEGACY_TABLE);
+    migrateToAutoincrement(db);
+    db.exec("CREATE INDEX IF NOT EXISTS ledger_entries_trip ON ledger_entries(trip_id)");
+    db.exec("CREATE INDEX IF NOT EXISTS ledger_entries_occurred ON ledger_entries(occurred)");
+    db.exec("CREATE INDEX IF NOT EXISTS ledger_proofs_trip ON ledger_proofs(trip_id)");
+    db.exec("CREATE INDEX IF NOT EXISTS ledger_proofs_sha256 ON ledger_proofs(sha256)");
+    migrateLegacyOutcomes(db, now);
+  });
+}
+
+const usesAutoincrement = (db, table) =>
+  /\bAUTOINCREMENT\b/i.test(
+    db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)?.sql || "",
+  );
+
+/**
+ * Rebuilds ledger_entries and ledger_proofs with AUTOINCREMENT ids when they
+ * were created without it (before this change SQLite could give a new row the
+ * id of the newest row just deleted). Every row keeps its id, its trip and
+ * its entry link, and no proof file is touched. Runs inside the schema
+ * transaction, so a failure leaves the old tables as they were. The new
+ * tables are filled before the old ones are dropped, and proofs (which
+ * reference entries) are rebuilt whenever entries are, so foreign keys hold
+ * throughout. Returns true when anything was rebuilt.
+ */
+export function migrateToAutoincrement(db) {
+  const entries = !usesAutoincrement(db, "ledger_entries");
+  const proofs = entries || !usesAutoincrement(db, "ledger_proofs");
+  if (!proofs) return false;
+  transaction(db, () => {
+    if (entries) {
+      db.exec("DROP TABLE IF EXISTS ledger_entries_rebuild");
+      db.exec(entriesTable("ledger_entries_rebuild"));
+      db.exec(
+        `INSERT INTO ledger_entries_rebuild (${ENTRY_COLUMNS}) SELECT ${ENTRY_COLUMNS} FROM ledger_entries ORDER BY id`,
+      );
+    }
+    db.exec("DROP TABLE IF EXISTS ledger_proofs_rebuild");
+    db.exec(proofsTable("ledger_proofs_rebuild", entries ? "ledger_entries_rebuild" : "ledger_entries"));
+    db.exec(
+      `INSERT INTO ledger_proofs_rebuild (${PROOF_COLUMNS}) SELECT ${PROOF_COLUMNS} FROM ledger_proofs ORDER BY id`,
+    );
+    db.exec("DROP TABLE ledger_proofs");
+    if (entries) {
+      db.exec("DROP TABLE ledger_entries");
+      // Renaming also points the rebuilt proofs' entry link at ledger_entries.
+      db.exec("ALTER TABLE ledger_entries_rebuild RENAME TO ledger_entries");
+    }
+    db.exec("ALTER TABLE ledger_proofs_rebuild RENAME TO ledger_proofs");
+  });
+  return true;
 }
 
 // ---------------------------------------------------------------------------
 // Dates
 
 const DAY_MS = 86400000;
-const londonFormat = new Intl.DateTimeFormat("en-CA", {
-  timeZone: "Europe/London",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
 
-/** Today's calendar date in the UK (YYYY-MM-DD), the date a user would write. */
-export const londonDate = (now = new Date()) => londonFormat.format(now);
+// Today's calendar date in the UK (YYYY-MM-DD), the date a user would write.
+// Re-exported from http.mjs so every module counts days from the same today.
+export { londonDate };
 
 const dayNumber = (date) => Date.parse(date + "T00:00:00Z") / DAY_MS;
 const daysBetween = (from, to) => Math.round(dayNumber(to) - dayNumber(from));
@@ -174,7 +224,9 @@ export function migrateLegacyOutcomes(db, now = new Date()) {
   transaction(db, () => {
     for (const row of rows) {
       const created = legacyTimestamp(row.created) || stamp;
-      const occurred = created.slice(0, 10) <= today ? created.slice(0, 10) : today;
+      // The UK calendar day of the old timestamp, never after today.
+      const day = londonDate(created);
+      const occurred = day <= today ? day : today;
       const sku = typeof row.sku === "string" && row.sku.trim() ? row.sku.trim().slice(0, 120) : null;
       const trip = Number(
         insertTrip.run(
@@ -296,10 +348,12 @@ function loadAll(db) {
     db.prepare("SELECT * FROM ledger_proofs ORDER BY id").all().map(proofView),
     "trip_id",
   );
+  const uses = proofUses(db);
   return trips.map((trip) => ({
     trip,
     entries: entries.get(trip.id) || [],
     proofs: proofs.get(trip.id) || [],
+    uses,
   }));
 }
 
@@ -320,13 +374,13 @@ export function getTrip(db, id) {
     .prepare("SELECT * FROM ledger_proofs WHERE trip_id = ? ORDER BY id")
     .all(id)
     .map(proofView);
-  return { trip, entries, proofs, reconciliation: reconcile(trip, entries, proofs) };
+  return { trip, entries, proofs, reconciliation: reconcile(trip, entries, proofs, proofUses(db)) };
 }
 
 /** All trips, newest first, each with its headline reconciliation figures. */
 export function listTrips(db) {
-  return loadAll(db).map(({ trip, entries, proofs }) => {
-    const r = reconcile(trip, entries, proofs);
+  return loadAll(db).map(({ trip, entries, proofs, uses }) => {
+    const r = reconcile(trip, entries, proofs, uses);
     return {
       ...trip,
       entries: entries.length,
@@ -348,6 +402,8 @@ export function listTrips(db) {
 // Reconciliation
 
 const pounds = (pence) => "£" + (pence / 100).toFixed(2);
+// Entries that move cash: payouts in; receipts, expenses and refunds out.
+const CASH_TYPES = Object.freeze(["payout", "receipt", "expense", "refund"]);
 const sumOf = (entries, type, field = "amount") =>
   entries.filter((e) => e.type === type).reduce((total, e) => total + (e[field] ?? 0), 0);
 const byDate = (a, b) => (a.occurred === b.occurred ? a.id - b.id : a.occurred < b.occurred ? -1 : 1);
@@ -466,23 +522,127 @@ export function findDiscrepancies(trip, entries) {
   return discrepancies;
 }
 
+const PROOF_KIND = Object.freeze({ receipt: "purchase receipt", payout: "payout" });
+
+/** One receipt or payout entry a file is attached to, as a proof use. */
+const proofUse = (row) => ({
+  entryId: Number(row.entry_id),
+  tripId: Number(row.trip_id),
+  tripLabel: row.trip_label ?? null,
+  type: row.type,
+  occurred: row.occurred,
+  amount: Number(row.amount),
+});
+
+/** Adds a use to a Map sha256 -> uses, once per entry. */
+function addUse(uses, sha256, use) {
+  const list = uses.get(sha256);
+  if (!list) uses.set(sha256, [use]);
+  else if (!list.some((u) => u.entryId === use.entryId)) list.push(use);
+}
+
+/**
+ * Every receipt or payout entry each stored file is attached to, across the
+ * whole ledger: Map sha256 -> [{ entryId, tripId, tripLabel, type, occurred,
+ * amount }]. Pass it to verification() so a file counts for one entry in the
+ * whole ledger, not one per trip.
+ */
+export function proofUses(db) {
+  const uses = new Map();
+  const rows = db
+    .prepare(
+      `SELECT p.sha256, p.entry_id, p.trip_id, t.label AS trip_label, e.type, e.occurred, e.amount
+       FROM ledger_proofs p
+       JOIN ledger_entries e ON e.id = p.entry_id AND e.trip_id = p.trip_id
+       JOIN ledger_trips t ON t.id = p.trip_id
+       WHERE e.type IN ('receipt', 'payout')
+       ORDER BY p.entry_id, p.id`,
+    )
+    .all();
+  for (const row of rows) addUse(uses, row.sha256, proofUse(row));
+  return uses;
+}
+
+/** The same map built from one trip's own records (for pure calls). */
+function tripUses(trip, entries, proofs) {
+  const byId = new Map(entries.map((e) => [e.id, e]));
+  const uses = new Map();
+  for (const p of proofs) {
+    const e = p.entry_id === null ? null : byId.get(p.entry_id);
+    if (!e || !PROOF_KIND[e.type]) continue;
+    addUse(uses, p.sha256, proofUse({ ...e, entry_id: e.id, trip_id: trip.id, trip_label: trip.label }));
+  }
+  return uses;
+}
+
+/** Where a proof use is, in words, seen from the trip tripId. */
+function useWhere(use, tripId) {
+  const what = `${PROOF_KIND[use.type]} (${shortDate(use.occurred)}, ${pounds(use.amount)})`;
+  return use.tripId === tripId ? `the ${what} on this trip` : `the ${what} on "${use.tripLabel}"`;
+}
+
+/**
+ * The receipt or payout entry, other than entryId, that a file is already
+ * the proof for, anywhere in the ledger; null when there is none or when the
+ * proof goes on the whole trip (entryId null). excludeProofId leaves out the
+ * proof record being moved.
+ */
+export function proofConflict(db, { sha256, entryId, excludeProofId = null }) {
+  if (entryId === null || entryId === undefined) return null;
+  const row = db
+    .prepare(
+      `SELECT p.sha256, p.entry_id, p.trip_id, t.label AS trip_label, e.type, e.occurred, e.amount
+       FROM ledger_proofs p
+       JOIN ledger_entries e ON e.id = p.entry_id AND e.trip_id = p.trip_id
+       JOIN ledger_trips t ON t.id = p.trip_id
+       WHERE p.sha256 = ? AND p.entry_id != ? AND p.id IS NOT ? AND e.type IN ('receipt', 'payout')
+       ORDER BY p.id LIMIT 1`,
+    )
+    .get(sha256, entryId, excludeProofId);
+  return row ? proofUse(row) : null;
+}
+
+/**
+ * Refuses (409) a file that is already the proof for another receipt or
+ * payout entry: one document proves one purchase or one payout.
+ */
+function refuseReusedProof(db, { tripId, entryId, sha256, excludeProofId = null }) {
+  const use = proofConflict(db, { sha256, entryId, excludeProofId });
+  if (!use) return;
+  const where =
+    use.tripId === tripId
+      ? `this trip's ${PROOF_KIND[use.type]} (${shortDate(use.occurred)}, ${pounds(use.amount)})`
+      : `${use.tripLabel} (${PROOF_KIND[use.type]}, ${shortDate(use.occurred)}, ${pounds(use.amount)})`;
+  fail(`This file is already the proof for ${where}: attach the document for this purchase or payout`, 409);
+}
+
+/** Number of proof records, on any trip, that refer to a stored file. */
+export function proofFileUses(db, sha256) {
+  return Number(db.prepare("SELECT COUNT(*) AS n FROM ledger_proofs WHERE sha256 = ?").get(sha256).n);
+}
+
 /**
  * The PRD rule: a verified trade needs the purchase receipt and the payout
  * record, which together prove realised profit. So a resale trade is verified
  * only when all of these hold:
  *   - at least one purchase receipt, one sold listing and one payout;
  *   - every receipt entry and every payout entry has its own proof attached
- *     to that entry (a whole-trip proof never counts, and one proof never
- *     covers several entries: a file attached to more than one receipt or
- *     payout entry counts for none of them);
+ *     to that entry. A whole-trip proof never counts, and one file proves one
+ *     entry in the whole ledger: a file attached to more than one receipt or
+ *     payout entry, on this trip or any other, counts for none of them, and
+ *     every trip using it says so. New attachments of such a file are refused
+ *     (recordProof, relinkProof); this catches duplicates made before that.
  *   - the records reconcile: findDiscrepancies() finds nothing, so no payout
  *     or sale is dated before the purchase and the amounts and units agree.
+ * Work time is not needed: it only makes earnings per hour known.
  * Household trips and legacy totals are never verified.
+ * uses is proofUses(db) for the whole ledger; left out, only this trip's
+ * proofs are compared (pure calls and tests).
  * Returns { verified, missing, proofedEntries } where missing gives every
  * reason the trade is not verified, in words, and proofedEntries lists the
  * receipt and payout entry ids whose proof counts.
  */
-export function verification(trip, entries, proofs = []) {
+export function verification(trip, entries, proofs = [], uses = null) {
   if (trip.kind !== "resale")
     return {
       verified: false,
@@ -498,19 +658,15 @@ export function verification(trip, entries, proofs = []) {
   const receipts = entries.filter((e) => e.type === "receipt").sort(byDate);
   const payouts = entries.filter((e) => e.type === "payout").sort(byDate);
   const needsProof = new Set([...receipts, ...payouts].map((e) => e.id));
-  // Which receipt or payout entries each file is attached to.
-  const uses = new Map();
+  // Which receipt or payout entries, in the whole ledger, each file is on.
+  const ledger = uses || tripUses(trip, entries, proofs);
+  const proofed = new Set();
+  const shared = new Map(); // sha256 -> { label, others }
   for (const p of proofs) {
     if (p.entry_id === null || !needsProof.has(p.entry_id)) continue;
-    const use = uses.get(p.sha256) || { entries: new Set(), label: p.label };
-    use.entries.add(p.entry_id);
-    uses.set(p.sha256, use);
-  }
-  const proofed = new Set();
-  const shared = [];
-  for (const use of uses.values()) {
-    if (use.entries.size === 1) proofed.add([...use.entries][0]);
-    else shared.push(use.label);
+    const others = (ledger.get(p.sha256) || []).filter((u) => u.entryId !== p.entry_id);
+    if (!others.length) proofed.add(p.entry_id);
+    else if (!shared.has(p.sha256)) shared.set(p.sha256, { label: p.label, others });
   }
 
   const missing = [];
@@ -522,10 +678,12 @@ export function verification(trip, entries, proofs = []) {
     if (!proofed.has(e.id)) missing.push(`Attach a proof to the purchase receipt (${describe(e)}).`);
   for (const e of payouts)
     if (!proofed.has(e.id)) missing.push(`Attach a proof to the payout (${describe(e)}).`);
-  for (const label of shared)
+  for (const { label, others } of shared.values())
     missing.push(
       `The file "${label}" is attached to more than one receipt or payout entry, so it counts for none ` +
-        "of them. Attach each document to the one entry it records.",
+        `of them: it is also on ${others.map((u) => useWhere(u, trip.id)).join(" and ")}. ` +
+        "One document proves one purchase or one payout: keep it on the entry it records and attach the " +
+        "right document to the other.",
     );
   for (const d of findDiscrepancies(trip, entries)) missing.push("Records do not reconcile: " + d.message);
   return {
@@ -536,8 +694,8 @@ export function verification(trip, entries, proofs = []) {
 }
 
 /**
- * Reconciles one trip's records. Pure: pass the trip, its entries and its
- * proof metadata.
+ * Reconciles one trip's records. Pure: pass the trip, its entries, its
+ * proof metadata and, for verification across the whole ledger, proofUses(db).
  *
  * Resale trips:
  *   realisedContribution = payouts - receipts - expenses - refunds. Only
@@ -554,7 +712,7 @@ export function verification(trip, entries, proofs = []) {
  * Household trips: saving entries count only as householdSavings, never as
  *   earnings or proceeds; netHouseholdSaving deducts the trip's expenses.
  */
-export function reconcile(trip, entries, proofs = []) {
+export function reconcile(trip, entries, proofs = [], uses = null) {
   const resale = trip.kind === "resale";
   const open = trip.status !== "closed";
   const has = (type) => entries.some((e) => e.type === type);
@@ -612,7 +770,7 @@ export function reconcile(trip, entries, proofs = []) {
   const discrepancies = findDiscrepancies(trip, entries);
   checklist.reconciled = checklist.complete && discrepancies.length === 0;
 
-  const { verified, missing, proofedEntries } = verification(trip, entries, proofs);
+  const { verified, missing, proofedEntries } = verification(trip, entries, proofs, uses);
 
   let forecast = null;
   if (resale && trip.predicted) {
@@ -846,8 +1004,10 @@ function requireProof(db, tripId, proofId) {
  * Moves a stored proof to another entry on the same trip, or to the whole
  * trip with entryId null (which does not count towards verification). When
  * the same file is already attached to that entry, the duplicate record is
- * removed instead. Works on open and closed trips, since proofs are evidence
- * about the records rather than records themselves. Returns the trip detail.
+ * removed instead. Moving a file onto an entry is refused (409) while it is
+ * the proof for another receipt or payout entry anywhere in the ledger.
+ * Works on open and closed trips, since proofs are evidence about the
+ * records rather than records themselves. Returns the trip detail.
  */
 export function relinkProof(db, tripId, proofId, input) {
   const { trip, row } = requireProof(db, tripId, proofId);
@@ -855,6 +1015,7 @@ export function relinkProof(db, tripId, proofId, input) {
     fail("Send entryId: an entry on this trip, or null for the whole trip");
   const entryId = entryOnTrip(db, trip, input.entryId);
   transaction(db, () => {
+    refuseReusedProof(db, { tripId: trip.id, entryId, sha256: row.sha256, excludeProofId: row.id });
     const duplicate = db
       .prepare("SELECT id FROM ledger_proofs WHERE trip_id = ? AND entry_id IS ? AND sha256 = ? AND id != ?")
       .get(trip.id, entryId, row.sha256, row.id);
@@ -873,29 +1034,44 @@ export function removeProof(db, tripId, proofId) {
   const { row } = requireProof(db, tripId, proofId);
   return transaction(db, () => {
     db.prepare("DELETE FROM ledger_proofs WHERE id = ?").run(row.id);
-    const others = db.prepare("SELECT COUNT(*) AS n FROM ledger_proofs WHERE sha256 = ?").get(row.sha256);
-    return { sha256: row.sha256, fileUnused: Number(others.n) === 0 };
+    return { sha256: row.sha256, fileUnused: proofFileUses(db, row.sha256) === 0 };
   });
 }
 
 /**
  * Records proof metadata after the file is stored. The same content attached
  * to the same entry again returns the existing record instead of a copy.
- * Returns { proof, created }.
+ * A file that is already the proof for another receipt or payout entry,
+ * on this trip or any other, is refused with 409 when it is attached to an
+ * entry: one document proves one purchase or one payout. (Kept on the whole
+ * trip, entryId null, it is stored but never counts.) Returns
+ * { proof, created }.
  */
 export function recordProof(db, { tripId, entryId, label, sha256, bytes, mediaType }, { now = new Date() } = {}) {
-  const existing = db
-    .prepare("SELECT * FROM ledger_proofs WHERE trip_id = ? AND entry_id IS ? AND sha256 = ?")
-    .get(tripId, entryId, sha256);
-  if (existing) return { proof: proofView(existing), created: false };
-  const result = db
-    .prepare(
-      `INSERT INTO ledger_proofs (trip_id, entry_id, sha256, bytes, media_type, label, created)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(tripId, entryId, sha256, bytes, mediaType, label, now.toISOString());
-  const row = db.prepare("SELECT * FROM ledger_proofs WHERE id = ?").get(result.lastInsertRowid);
-  return { proof: proofView(row), created: true };
+  return transaction(db, () => {
+    const existing = db
+      .prepare("SELECT * FROM ledger_proofs WHERE trip_id = ? AND entry_id IS ? AND sha256 = ?")
+      .get(tripId, entryId, sha256);
+    if (existing) return { proof: proofView(existing), created: false };
+    refuseReusedProof(db, { tripId, entryId, sha256 });
+    const result = db
+      .prepare(
+        `INSERT INTO ledger_proofs (trip_id, entry_id, sha256, bytes, media_type, label, created)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(tripId, entryId, sha256, bytes, mediaType, label, now.toISOString());
+    const row = db.prepare("SELECT * FROM ledger_proofs WHERE id = ?").get(result.lastInsertRowid);
+    return { proof: proofView(row), created: true };
+  });
+}
+
+/**
+ * Checks, before a file is written, that it may be attached where asked
+ * (409 when it is already the proof for another receipt or payout entry).
+ * recordProof checks again inside its transaction.
+ */
+export function checkProofTarget(db, { tripId, entryId, sha256 }) {
+  refuseReusedProof(db, { tripId, entryId, sha256 });
 }
 
 // ---------------------------------------------------------------------------
@@ -913,8 +1089,14 @@ export function recordProof(db, { tripId, entryId, label, sha256, bytes, mediaTy
  *     than it saved lowers the figure. Never earnings. This is the figure a
  *     savings goal counts. householdSavingsGross and householdTripCosts are
  *     its two parts.
- *   realisedMinutes = resale work minutes dated in the month;
- *     realisedHourly = realisedEarnings per hour of that time (null without).
+ *   realisedMinutes = resale work minutes dated in the month.
+ *   realisedHourly = earnings per hour on the trips that logged work time in
+ *     the month only: those trips' realised earnings in the month divided by
+ *     their work time in the month. Money from trips with no work time in the
+ *     month is never divided by someone else's hours; hourly.leftOutTrips and
+ *     hourly.leftOutEarnings say how much was left out. Null ("not known")
+ *     when no trip with work time in the month has realised money in it.
+ *     hourly = { trips, minutes, earnings, leftOutTrips, leftOutEarnings }.
  *   payouts / verifiedPayouts / verifiedEarnings = the same cash figures, in
  *     total and for verified trades only (see verification(): every receipt
  *     and payout has its own proof, a sale is recorded and the records
@@ -952,20 +1134,33 @@ export function summary(db, month) {
     unverifiedTrips: 0,
   };
   const leftOut = { sample: 0, basisUnknown: 0, nothingBought: 0 };
-  for (const { trip, entries, proofs } of loadAll(db)) {
+  const hourly = { trips: 0, minutes: 0, earnings: 0, withMoney: 0, leftOutTrips: 0, leftOutEarnings: 0 };
+  for (const { trip, entries, proofs, uses } of loadAll(db)) {
     const monthEntries = entries.filter(inMonth);
     if (trip.kind === "household") {
       totals.householdSavingsGross += sumOf(monthEntries, "saving");
       totals.householdTripCosts += sumOf(monthEntries, "expense");
       continue;
     }
-    const r = reconcile(trip, entries, proofs);
+    const r = reconcile(trip, entries, proofs, uses);
     const payouts = sumOf(monthEntries, "payout");
     const costs =
       sumOf(monthEntries, "receipt") + sumOf(monthEntries, "expense") + sumOf(monthEntries, "refund");
+    const minutes = sumOf(monthEntries, "work", "minutes");
     totals.realisedEarnings += payouts - costs;
     totals.payouts += payouts;
-    totals.realisedMinutes += sumOf(monthEntries, "work", "minutes");
+    totals.realisedMinutes += minutes;
+    // Realised money: cash in or out this month (a sale is not cash yet).
+    const money = monthEntries.some((e) => CASH_TYPES.includes(e.type));
+    if (minutes > 0) {
+      hourly.trips += 1;
+      hourly.minutes += minutes;
+      hourly.earnings += payouts - costs;
+      if (money) hourly.withMoney += 1;
+    } else if (money) {
+      hourly.leftOutTrips += 1;
+      hourly.leftOutEarnings += payouts - costs;
+    }
     if (monthEntries.length) totals[r.verified ? "verifiedTrips" : "unverifiedTrips"] += 1;
     if (r.verified) {
       totals.verifiedPayouts += payouts;
@@ -1002,9 +1197,14 @@ export function summary(db, month) {
     unsoldUnits: totals.unsoldUnits,
     realisedMinutes: totals.realisedMinutes,
     realisedHourly:
-      totals.realisedMinutes > 0
-        ? Math.round((totals.realisedEarnings * 60) / totals.realisedMinutes)
-        : null,
+      hourly.withMoney > 0 ? Math.round((hourly.earnings * 60) / hourly.minutes) : null,
+    hourly: {
+      trips: hourly.trips,
+      minutes: hourly.minutes,
+      earnings: hourly.earnings,
+      leftOutTrips: hourly.leftOutTrips,
+      leftOutEarnings: hourly.leftOutEarnings,
+    },
     payouts: totals.payouts,
     verifiedPayouts: totals.verifiedPayouts,
     verifiedEarnings: totals.verifiedEarnings,
@@ -1015,7 +1215,8 @@ export function summary(db, month) {
       "Cash basis: payouts dated in the month minus receipts, expenses and refunds dated in the month. " +
       "Household savings are savings dated in the month less household trip expenses dated in the month. " +
       "Pending payouts, potential proceeds, cash tied up and unsold units are the current position of open resale trips. " +
-      "Potential proceeds count only live-evidence predictions on trips with a purchase receipt.",
+      "Potential proceeds count only live-evidence predictions on trips with a purchase receipt. " +
+      "Realised hourly divides the earnings of trips with work time in the month by that time; money from trips without work time is left out.",
   };
 }
 
@@ -1052,7 +1253,7 @@ export function metrics(db) {
   const legacyTrips = all.filter(({ trip }) => trip.legacy).length;
   const closed = all
     .filter(({ trip }) => trip.kind === "resale" && trip.status === "closed" && !trip.legacy)
-    .map(({ trip, entries, proofs }) => ({ trip, r: reconcile(trip, entries, proofs) }));
+    .map(({ trip, entries, proofs, uses }) => ({ trip, r: reconcile(trip, entries, proofs, uses) }));
   const leftOut = { sample: 0, basisUnknown: 0, notTaken: 0 };
   const predicted = closed.filter(({ trip, r }) => {
     if (!trip.predicted) return false;

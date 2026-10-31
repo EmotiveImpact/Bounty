@@ -10,7 +10,8 @@ import {
   estimateFromEvidence,
   listOffers,
 } from "./estimate.mjs";
-import { listChecks, listItems, progress, recordCheck, recordItem } from "./audit.mjs";
+import { listChecks, listItems, progress, recordCheck, recordItem, signOff, tableExists } from "./audit.mjs";
+import { recheckOpenBounties } from "./bounties.mjs";
 
 // Query-string helpers: values arrive as text and are validated like JSON.
 function queryInt(url, name, min, max, fallback) {
@@ -81,7 +82,18 @@ export function routes(db) {
     [
       "POST",
       "/api/research/checks",
-      ({ body }) => reply(201, recordCheck(db, body, { now: serverNow() })),
+      ({ body }) => {
+        const now = serverNow();
+        const check = recordCheck(db, body, { now });
+        // A check that finds the shelf empty (or stock again) reaches open
+        // bounties for the item at once: alerted members and claim holders
+        // get "Don't make the trip" (or "Open for trips again") now, not on
+        // their next read.
+        const bounties = tableExists(db, "bounties")
+          ? recheckOpenBounties(db, { barcode: check.barcode, retailer: check.retailer, now })
+          : null;
+        return reply(201, { ...check, bounties });
+      },
     ],
     [
       "GET",
@@ -105,6 +117,25 @@ export function routes(db) {
       "GET",
       "/api/audit/progress",
       ({ url }) => progress(db, queryText(url, "locality", 120)),
+    ],
+    [
+      // The operator's acceptance of a complete audit in a locality. This
+      // pilot has no accounts (see routes-bounties.mjs), so operator-only
+      // means it is an operator action: a request made as a member (a
+      // memberId in the body, or a member as the viewer) is refused.
+      // 409 unless the audit is complete, or when the counts the operator
+      // saw no longer match.
+      "POST",
+      "/api/audit/signoff",
+      ({ url, body }) => {
+        const viewer = url.searchParams.get("viewer");
+        const asMember =
+          (viewer !== null && viewer !== "" && viewer !== "operator") ||
+          (body && typeof body === "object" && body.memberId !== undefined && body.memberId !== null);
+        if (asMember) fail("Only the operator can sign off the audit", 403);
+        const result = signOff(db, body, { now: serverNow() });
+        return reply(result.created ? 201 : 200, result);
+      },
     ],
   ];
 }

@@ -13,7 +13,8 @@ import {
   tripTiming,
 } from "./goals.mjs";
 
-// The server clock decides dates such as "today" for payout timing.
+// The server clock decides dates such as "today" for payout timing; goals.mjs
+// turns it into the London calendar date.
 const serverNow = () => new Date().toISOString();
 
 function idParam(value) {
@@ -24,14 +25,18 @@ function idParam(value) {
 export function routes(db) {
   return [
     // Ranked sample trips for the profile: fitting ones first, then by
-    // earnings per hour, with payout timing from the saved goals. Offers
-    // failing a hard filter are listed separately. Never a buy alert.
+    // earnings per hour, with payout timing from the saved goals for the
+    // units each trip buys (the last unit must sell before the cash is
+    // back). Offers failing any buying threshold are listed separately.
+    // Never a buy alert.
     [
       "POST",
       "/api/plan",
       ({ body }) => {
+        const profile = readProfile(body);
         const now = serverNow();
-        return planTrips(readProfile(body), { now, timing: tripTiming(getGoals(db), { now }) });
+        const goals = getGoals(db);
+        return planTrips(profile, { now, timing: (sale) => tripTiming(goals, { now, items: [sale] }) });
       },
     ],
     ["GET", "/api/goals", () => getGoals(db)],

@@ -38,6 +38,7 @@ const passingAlert = (economics, over = {}) =>
     hourly: economics.hourly,
     hourlyFloor: 0,
     journeyKnown: true,
+    missingInputs: [],
     offerObserved: "2026-10-30",
     now: "2026-10-31T12:00:00Z",
     localStockConfirmed: true,
@@ -215,6 +216,18 @@ test("access tier is the earlier of current paid and earned, shown separately", 
   assert.equal(lapsed.tier.id, "new");
 });
 
+test("demand and the time to sell every unit follow the sales rate", async () => {
+  const { demandUnits, daysToSellAll } = await import("./opportunity.mjs");
+  assert.equal(demandUnits({ salesPerWeek: 2, competingListings: 1 }), 3);
+  assert.equal(demandUnits({ salesPerWeek: 0.23, competingListings: 0 }), 0);
+  assert.equal(demandUnits({ salesPerWeek: null, competingListings: 0 }), null);
+  assert.equal(demandUnits({ salesPerWeek: 2, competingListings: null }), null);
+  assert.equal(daysToSellAll({ units: 1, daysToSell: 4, salesPerWeek: 0.23 }), 4);
+  assert.equal(daysToSellAll({ units: 3, daysToSell: 4, salesPerWeek: 0.23 }), 92);
+  assert.equal(daysToSellAll({ units: 3, daysToSell: 4, salesPerWeek: 7 }), 4);
+  assert.equal(daysToSellAll({ units: 3, daysToSell: null, salesPerWeek: 7 }), null);
+});
+
 test("members can tighten the thresholds but never loosen them", async () => {
   const { effectiveRules } = await import("./opportunity.mjs");
   const tight = effectiveRules({ minUnitProfit: 800, minReturn: 0.5, maxWeightKg: 1, maxUnitPrice: 3000 });
@@ -229,4 +242,75 @@ test("members can tighten the thresholds but never loosen them", async () => {
   assert.equal(loose.maxUnitPrice, OPPORTUNITY_RULES.maxUnitPrice);
   assert.equal(loose.minUnitPrice, OPPORTUNITY_RULES.minUnitPrice);
   assert.equal(effectiveRules({ minReturn: "high" }).minReturn, OPPORTUNITY_RULES.minReturn);
+});
+
+test("profit of exactly £5 per unit qualifies and a penny less does not", () => {
+  const exact = trip({ unitCost: 1162 });
+  assert.equal(unitReturns(exact).unitProfit, 500);
+  const at = classifyOpportunity({ ...strong, unitPrice: 1162, economics: exact, alert: passingAlert(exact) });
+  assert.equal(at.meetsThresholds, true, at.reasons.join("; "));
+  const under = trip({ unitCost: 1163 });
+  assert.equal(unitReturns(under).unitProfit, 499);
+  const below = classifyOpportunity({ ...strong, unitPrice: 1163, economics: under, alert: passingAlert(under) });
+  assert.equal(below.tier, "Watch");
+  assert.ok(below.reasons.some((r) => /Profit per unit below £5/.test(r)));
+});
+
+test("the price band includes exactly £5.00 and exactly £50.00", () => {
+  assert.deepEqual(hardFilters({ unitPrice: 500, weightKg: 0.4 }), []);
+  assert.deepEqual(hardFilters({ unitPrice: 5000, weightKg: 0.4 }), []);
+  assert.equal(hardFilters({ unitPrice: 499, weightKg: 0.4 }).length, 1);
+  assert.equal(hardFilters({ unitPrice: 5001, weightKg: 0.4 }).length, 1);
+});
+
+test("profit per unit is whole pence rounded down before the return test", () => {
+  const split = { units: 2, contribution: 1001, unitCost: 1000 };
+  assert.equal(unitReturns(split).unitProfit, 500);
+  // 701p over 2 units is 350.5p; rounded down to 350p it is 34.97% of £10.01.
+  const edge = { units: 2, contribution: 701, unitCost: 1001 };
+  const { unitProfit } = unitReturns(edge);
+  assert.equal(unitProfit, 350);
+  assert.equal(meetsReturn(unitProfit, 1001), false);
+});
+
+test("a target price under £5 is not offered as a Watch target", () => {
+  const e = trip({ salePrice: 1600 });
+  assert.equal(targetPrice({ ...e }, { ...OPPORTUNITY_RULES, minUnitPrice: 0 }) > 0, true);
+  assert.equal(targetPrice(e), null);
+  const c = classifyOpportunity({ ...strong, economics: e, alert: passingAlert(e) });
+  assert.equal(c.tier, "Reject");
+  assert.equal(c.targetPrice, null);
+});
+
+test("a member's stricter return is used to the tenth of a percent", async () => {
+  const { effectiveRules } = await import("./opportunity.mjs");
+  assert.equal(effectiveRules({ minReturn: 0.355 }).minReturn, 0.355);
+  assert.equal(meetsReturn(354, 1000, 0.355), false);
+  assert.equal(meetsReturn(355, 1000, 0.355), true);
+  assert.equal(meetsReturn(354, 1000), true);
+});
+
+test("category checks treat blanks as missing and keep the 30-day boundary", () => {
+  const now = "2026-10-31T12:00:00Z";
+  assert.equal(categoryChecks({ category: "clothing", size: "   ", returnsRate: 0.15 }).length, 1);
+  const food = { category: "food", packagingChecked: true, daysToSell: 10, now };
+  assert.equal(categoryChecks({ ...food, packagingChecked: undefined, bestBefore: "2027-03-01" }).length, 1);
+  assert.equal(categoryChecks({ ...food, packagingChecked: "yes", bestBefore: "2027-03-01" }).length, 1);
+  // Sale expected on 10 November; 30 full days after it is 11 December.
+  assert.deepEqual(categoryChecks({ ...food, bestBefore: "2026-12-11" }), []);
+  assert.equal(categoryChecks({ ...food, bestBefore: "2026-12-10" }).length, 1);
+});
+
+test("an opportunity with no checks run, or category rules not run, is Review", () => {
+  const e = trip();
+  const none = classifyOpportunity({ ...strong, economics: e, alert: undefined });
+  assert.equal(none.tier, "Review");
+  assert.ok(none.reasons.includes("Evidence checks were not run"));
+  const empty = classifyOpportunity({ ...strong, economics: e, alert: { checks: [] } });
+  assert.equal(empty.tier, "Review");
+  for (const categoryFailures of [null, "none", {}]) {
+    const c = classifyOpportunity({ ...strong, categoryFailures, economics: e, alert: passingAlert(e) });
+    assert.equal(c.tier, "Review", String(categoryFailures));
+    assert.ok(c.reasons.includes("Category rules were not checked"));
+  }
 });

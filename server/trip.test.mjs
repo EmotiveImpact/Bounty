@@ -87,6 +87,8 @@ const passing = {
   hourly: 1500,
   hourlyFloor: 1200,
   journeyKnown: true,
+  missingInputs: [],
+  demandUnits: 4,
   offerObserved: "2026-10-30",
   now: "2026-10-31T12:00:00Z",
   localStockConfirmed: true,
@@ -122,6 +124,10 @@ test("alerts require every check and explain each failure", () => {
     ["hourly", 1000],
     ["journeyKnown", false],
     ["journeyKnown", undefined],
+    ["missingInputs", ["packaging"]],
+    ["missingInputs", undefined],
+    ["demandUnits", 2],
+    ["demandUnits", null],
     ["meetsThresholds", false],
     ["units", 4],
     ["units", 0],
@@ -149,6 +155,19 @@ test("a future-dated offer or a negative time to sell never passes", () => {
   assert.equal(badNow.eligible, false);
 });
 
+test("demand and blank inputs are explained", () => {
+  const short = evaluateAlert({ ...passing, units: 3, demandUnits: 1 });
+  assert.match(short.reasons.join(" "), /about 1 unit within 2 weeks/);
+  const blank = evaluateAlert({ ...passing, missingInputs: ["packaging", "handling time"] });
+  assert.match(blank.reasons.join(" "), /Not entered: packaging, handling time/);
+});
+
+test("London dates do not jump at midnight UTC in summer", async () => {
+  const { londonDate } = await import("./http.mjs");
+  assert.equal(londonDate(new Date("2026-07-11T23:30:00Z")), "2026-07-12");
+  assert.equal(londonDate("2026-12-31T23:30:00Z"), "2026-12-31");
+});
+
 test("an empty shelf is named as such in the availability check", () => {
   const empty = evaluateAlert({ ...passing, localStockConfirmed: false, availability: "out_of_stock" });
   assert.match(empty.reasons.join(" "), /none on the shelf/);
@@ -164,6 +183,25 @@ test("the cash date is checked against the payout, not the sale", () => {
   assert.match(late.reasons.join(" "), /payout in 8 days/);
   const none = evaluateAlert({ ...passing, cashNeededDays: null, payoutDays: null });
   assert.equal(none.eligible, true);
+});
+
+test("a cash date of today or tomorrow is still checked", () => {
+  // Zero days is a real cash date, not a missing one.
+  for (const cashNeededDays of [0, 1]) {
+    const soon = evaluateAlert({ ...passing, cashNeededDays, payoutDays: 3 });
+    assert.equal(soon.eligible, false, "cash needed in " + cashNeededDays + " days");
+    assert.equal(soon.checks.find((c) => c.id === "days-to-sell").ok, false);
+  }
+  const sameDay = evaluateAlert({ ...passing, cashNeededDays: 0, payoutDays: 0 });
+  assert.equal(sameDay.checks.find((c) => c.id === "days-to-sell").ok, true);
+});
+
+test("a negative or non-numeric payout figure is never treated as known", () => {
+  for (const payoutDays of [-1, -0.5, Number.NaN, Infinity, "3"]) {
+    const result = evaluateAlert({ ...passing, cashNeededDays: 14, payoutDays });
+    assert.equal(result.eligible, false, "payoutDays=" + String(payoutDays));
+    assert.match(result.reasons.join(" "), /Payout date unknown/);
+  }
 });
 
 test("a loyalty price needs confirmed eligibility; empty input fails closed", () => {
@@ -183,7 +221,7 @@ test("a loyalty price needs confirmed eligibility; empty input fails closed", ()
     evaluateAlert({ ...passing, promotion: "LOYALTY_PROGRAM", costedAtRegularPrice: true }).eligible,
     true,
   );
-  assert.equal(evaluateAlert({ ...passing, units: 8, provenItem: true }).eligible, true);
+  assert.equal(evaluateAlert({ ...passing, units: 8, provenItem: true, demandUnits: 8 }).eligible, true);
   const empty = evaluateAlert({});
   assert.equal(empty.eligible, false);
   assert.ok(empty.checks.every((c) => !c.ok || c.id === "promotion"));

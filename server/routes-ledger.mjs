@@ -2,25 +2,26 @@
 // monthly summary and forecast metrics. Proof files are written to a private
 // directory and never served: no route returns their contents.
 import { join } from "node:path";
-import { fail, int, reply } from "./http.mjs";
+import { fail, int, londonDate, reply } from "./http.mjs";
 import { dataDir } from "./db.mjs";
 import {
   addEntry,
+  checkProofTarget,
   closeTrip,
   createTrip,
   deleteEntry,
   getTrip,
   listTrips,
-  londonDate,
   metrics,
   monthParam,
+  proofFileUses,
   proofTarget,
   recordProof,
   relinkProof,
   removeProof,
   summary,
 } from "./ledger.mjs";
-import { decodeBase64, deleteProofFile, ProofError, PROOF_TYPES, storeProof } from "./proofs.mjs";
+import { decodeBase64, deleteProofFile, prepareProof, ProofError, PROOF_TYPES, writeProof } from "./proofs.mjs";
 
 // A 5 MB file is about 6.7 MB as base64, plus the label and JSON framing.
 export const PROOF_BODY_LIMIT = 7 * 1024 * 1024;
@@ -72,19 +73,31 @@ export function routes(db, { proofDir, now = () => new Date() } = {}) {
         const { trip, entryId, label } = proofTarget(db, idParam(params.id), body);
         if (!PROOF_TYPES.includes(body.mediaType))
           fail("mediaType must be one of: " + PROOF_TYPES.join(", "));
-        let stored;
+        let prepared;
         try {
-          stored = storeProof(proofs(), decodeBase64(body.data), body.mediaType);
+          prepared = prepareProof(decodeBase64(body.data), body.mediaType);
         } catch (error) {
           if (error instanceof ProofError) fail(error.message);
           throw error;
         }
-        const { proof, created } = recordProof(
-          db,
-          { tripId: trip.id, entryId, label, sha256: stored.sha256, bytes: stored.bytes, mediaType: body.mediaType },
-          { now: now() },
-        );
-        return reply(created ? 201 : 200, { proof, ...getTrip(db, trip.id) });
+        // One file proves one receipt or payout in the whole ledger: refuse a
+        // file that already proves another entry before anything is written.
+        checkProofTarget(db, { tripId: trip.id, entryId, sha256: prepared.sha256 });
+        const stored = writeProof(proofs(), prepared);
+        let result;
+        try {
+          result = recordProof(
+            db,
+            { tripId: trip.id, entryId, label, sha256: stored.sha256, bytes: stored.bytes, mediaType: body.mediaType },
+            { now: now() },
+          );
+        } catch (error) {
+          // Refused after writing (another request attached it first): do not
+          // leave a new file behind that no proof record refers to.
+          if (!stored.existed && proofFileUses(db, stored.sha256) === 0) deleteProofFile(proofs(), stored.sha256);
+          throw error;
+        }
+        return reply(result.created ? 201 : 200, { proof: result.proof, ...getTrip(db, trip.id) });
       },
       { limit: PROOF_BODY_LIMIT },
     ],

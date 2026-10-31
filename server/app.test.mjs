@@ -162,6 +162,24 @@ test("cross-site PUT and DELETE are refused, and so are lookalike hosts and type
     assert.equal(sameOrigin.status, 200);
     const nullOrigin = await api.call("POST", "/api/echo", {}, { Origin: "null" });
     assert.equal(nullOrigin.status, 403);
+    for (const origin of [
+      "http://evil-localhost:5173",
+      "http://localhost.evil.example",
+      "http://localhost:5173.evil.example",
+      "http://127.0.0.1.evil.example",
+      "http://0x7f.1:5173",
+      "http://2130706433",
+      "http://127.1",
+      "localhost:5173",
+      "http://localhost:5173/path",
+    ]) {
+      const res = await api.call("POST", "/api/echo", {}, { Origin: origin });
+      assert.equal(res.status, 403, origin);
+    }
+    for (const origin of ["http://localhost:5173", "http://127.0.0.1:4174", "http://[::1]:5173"]) {
+      const res = await api.call("POST", "/api/echo", { a: 1 }, { Origin: origin });
+      assert.equal(res.status, 200, origin);
+    }
     for (const host of ["localhost.attacker.example", "127.0.0.1.attacker.example", "attacker.example:4174", "0x7f.1", "2130706433", "127.1", "localhost:4174:1"]) {
       const res = await raw(api.base, { path: "/api/items/1", headers: { Host: host } });
       assert.equal(res.status, 403, host);

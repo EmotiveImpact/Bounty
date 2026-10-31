@@ -73,6 +73,18 @@ export const isoDate = (value, name, { optional = false } = {}) => {
   return isCalendarDate(value) ? value : fail(`${name} must be a calendar date (YYYY-MM-DD)`);
 };
 
+// Today's calendar date in the UK (YYYY-MM-DD), the date a person would
+// write. Use it, never the UTC date, to start payout and deadline counts, so
+// the answer does not change at midnight UTC during British Summer Time.
+const londonFormat = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/London",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+export const londonDate = (now = new Date()) =>
+  londonFormat.format(typeof now === "string" ? new Date(now) : now);
+
 // Runs fn inside BEGIN IMMEDIATE so concurrent writers serialise. Inside an
 // open transaction (for example a schema migration) fn joins it.
 export function transaction(db, fn) {

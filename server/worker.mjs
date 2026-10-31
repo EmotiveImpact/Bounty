@@ -7,7 +7,7 @@
 //   node server/worker.mjs --scheduled   used by worker:loop
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
-import { openPrices, SourceError } from "./sources.mjs";
+import { openPrices, requestError, SourceError } from "./sources.mjs";
 import { recordRun, upsertObservations } from "./evidence.mjs";
 
 export const OPEN_PRICES_URL = "https://prices.openfoodfacts.org/api/v1/prices";
@@ -46,6 +46,8 @@ export async function fetchJson(url, { request = fetch, sleep = delay, attempts 
       const res = await request(url, {
         headers: { Accept: "application/json", "User-Agent": USER_AGENT },
         signal: AbortSignal.timeout(30000),
+        // A redirect to another address is refused, never followed.
+        redirect: "error",
       });
       if (res.ok) {
         try {
@@ -58,10 +60,7 @@ export async function fetchJson(url, { request = fetch, sleep = delay, attempts 
       await res.body?.cancel().catch(() => {});
       throw new SourceError("Open Prices returned HTTP " + res.status, res.status);
     } catch (error) {
-      lastError =
-        error instanceof SourceError
-          ? error
-          : new SourceError("Open Prices request failed: " + (error?.cause?.code || error?.message || error));
+      lastError = error instanceof SourceError ? error : requestError("Open Prices", error);
       if (!lastError.transient || attempt === attempts) break;
       const wait = backoff(attempt, retryAfter);
       log(`${lastError.message}; retrying in ${Math.round(wait / 1000)} s (attempt ${attempt + 1} of ${attempts})`);
@@ -150,6 +149,11 @@ async function main() {
       `Imported ${saved} UK observations from ${fetched} GBP Open Prices records ` +
         `(${options.pages} page${options.pages === 1 ? "" : "s"}). Data: Open Prices, ODbL.`,
     );
+    // New prices reach open bounties at once (see research.mjs).
+    const { recheckOpenBounties } = await import("./bounties.mjs");
+    const out = recheckOpenBounties(db, { now: new Date().toISOString() });
+    if (out.stopped.length || out.reopened.length)
+      console.log(`Re-checked open bounties: ${out.stopped.length} stopped, ${out.reopened.length} open again.`);
   } catch (error) {
     console.error("Open Prices import failed: " + error.message + (error.saved ? ` (${error.saved} rows saved before the failure)` : ""));
     process.exitCode = 1;

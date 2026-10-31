@@ -12,15 +12,19 @@ import { ALERT_RULES, evaluateAlert } from "./alerts.mjs";
 import { SAMPLE_ASSUMPTIONS, tripEconomics } from "./trip.mjs";
 import {
   CATEGORY_IDS,
+  CATEGORY_RULES,
   OPPORTUNITY_RULES,
   categoryChecks,
   categoryReturnsRate,
   categoryRule,
   classifyOpportunity,
+  daysToSellAll,
+  demandUnits,
   effectiveRules,
 } from "./opportunity.mjs";
-import { displayPermitted } from "./evidence.mjs";
-import { bool, fail, int, isoDate, num, oneOf, text } from "./http.mjs";
+import { cachedLookup, displayPermitted } from "./evidence.mjs";
+import { accessNeeds, defaults as profileDefaults, gbp } from "./catalog.mjs";
+import { bool, fail, int, isoDate, londonDate, num, oneOf, text } from "./http.mjs";
 import {
   CONDITION_VOCABULARY,
   compare,
@@ -39,7 +43,7 @@ import {
   titleTokens,
 } from "./matching.mjs";
 import { CHECK_VALID_DAYS, stockStatus, tableExists } from "./audit.mjs";
-import { DEFAULT_GOALS, cashTiming, getGoals, payoutDate } from "./goals.mjs";
+import { DEFAULT_GOALS, addDays, getGoals, payoutDate } from "./goals.mjs";
 
 const DAY = 86400000;
 export const OPEN_PRICES = "openprices";
@@ -59,16 +63,21 @@ export function ensureFunctions(db) {
 
 /**
  * True for records the importer marked as sample or fixture data (provider,
- * licence or source id naming sample, fixture or demo). Such data is shown
- * with a Sample label and can never produce a buy alert.
+ * licence or source id naming sample, fixture or demo), and for records from
+ * a retailer or merchant named "Example ...", the made-up shops in the
+ * repository's own sample feeds, wherever the file was imported from. Such
+ * data is shown with a Sample label and can never produce a buy alert.
  */
 export function isSampleRecord(row) {
   if (!row) return false;
   const marked = /\b(sample|fixture|demo)\b/i;
+  const example = /^\s*example\b/i;
   return (
     marked.test(String(row.provider ?? "")) ||
     marked.test(String(row.licence ?? "")) ||
-    /^(sample|fixture|demo)\b/i.test(String(row.source_id ?? row.sourceId ?? ""))
+    /^(sample|fixture|demo)\b/i.test(String(row.source_id ?? row.sourceId ?? "")) ||
+    example.test(String(row.retailer ?? "")) ||
+    example.test(String(row.merchant ?? row.merchant_name ?? ""))
   );
 }
 
@@ -107,10 +116,23 @@ const CLOTHING_WORDS =
 const FOOD_WORDS =
   /\b(honey|chocolates?|biscuits?|cookies?|crisps|sweets|flapjacks?|cereals?|granola|muesli|porridge|oats|coffee|teabags?|tea|jam|marmalade|syrup|sauces?|ketchup|mayonnaise|pasta|noodles|rice|nuts|peanuts|almonds|raisins|cakes?|snacks?|crackers|spreads?|peanut butter|olive oil|vinegar|spices?|gravy|stock cubes|soups?|beans|tinned|canned|juice|cordial|squash|protein bars?|cereal bars?|sugar|flour)\b/;
 
+// A quantity sold by weight or volume (340 g, 1.5kg, 500 ml, 2 l), as food is.
+// "4G" and "5G" (mobile networks) are not weights.
+const FOOD_QUANTITY = /(?<![\w.])(\d+(?:[.,]\d+)?)\s?(kg|g|ml|cl|l)(?![a-z0-9])/i;
+const NETWORK = /^[2-6]G$/;
+const foodQuantity = (value) => {
+  const found = String(value ?? "").match(FOOD_QUANTITY);
+  return found && !NETWORK.test(found[0]) ? found[0] : null;
+};
+
 /**
- * The category an offer suggests from its title: { id, basis }. "clothing" or
- * "food" only when a title word clearly names one, otherwise "general". This
- * is a starting point; the estimate request's category always wins.
+ * The category an offer suggests: { id, basis }. Clothing when a title word
+ * clearly names clothing. Food when a title word names food, when the offer
+ * is an Open Prices observation (Open Prices comes from Open Food Facts, a
+ * food database) or when its size or title gives a food quantity (g, kg, ml,
+ * l). Otherwise general. The estimate keeps the suggested category's rules
+ * unless the request names another category and, when that drops any of the
+ * suggested rules, gives a reason (categoryDecision).
  */
 export function suggestCategory(offer) {
   const title = String(offer?.title ?? "").toLowerCase();
@@ -118,7 +140,74 @@ export function suggestCategory(offer) {
   if (clothing) return { id: "clothing", basis: `The title mentions "${clothing[0]}"` };
   const food = title.match(FOOD_WORDS);
   if (food) return { id: "food", basis: `The title mentions "${food[0]}"` };
+  if (offer?.provider === OPEN_PRICES || offer?.origin === "observations")
+    return { id: "food", basis: "Open Prices records come from Open Food Facts, a food database" };
+  const sized = foodQuantity(offer?.size);
+  if (sized) return { id: "food", basis: `The size "${String(offer.size).trim()}" is a food quantity` };
+  const titled = foodQuantity(offer?.title);
+  if (titled) return { id: "food", basis: `The title gives a food quantity ("${titled}")` };
   return { id: "general", basis: "The title does not clearly name clothing or food" };
+}
+
+// What each category's rules check, in plain words, so a downgrade can name
+// what it drops.
+function ruleChecks(id) {
+  const rule = CATEGORY_RULES[id] ?? CATEGORY_RULES.general;
+  const out = [];
+  if (rule.minReturnsRate)
+    out.push(`the ${Math.round(rule.minReturnsRate * 1000) / 10}% returns allowance`);
+  if (rule.needsSize) out.push("the size check");
+  if (rule.needsPackaging) out.push("the sealed packaging check");
+  if (rule.minShelfLifeDays) out.push(`the ${rule.minShelfLifeDays}-day best-before check`);
+  return out;
+}
+const andList = (items) =>
+  items.length <= 1 ? items.join("") : items.slice(0, -1).join(", ") + " and " + items[items.length - 1];
+const lowerFirst = (s) => s.charAt(0).toLowerCase() + s.slice(1);
+
+/**
+ * Which category's rules apply. requested is the request's category (null
+ * when none was named); reason the request's categoryReason.
+ *
+ * A category that drops any rule of the suggested one (General for an item
+ * the title or source suggests is clothing or food, or one of those for the
+ * other) is looser. A looser choice applies only with a reason; without one
+ * the suggested rules stay. Either way the warning names what was dropped.
+ *
+ * Returns { chosen, suggested, applied, reason, warning, dropped, basis }:
+ * chosen the requested id or null, suggested the suggested id, applied the
+ * id whose rules are used, reason the trimmed text or null, warning the text
+ * or null, dropped the plain-word checks a looser choice removes.
+ */
+export function categoryDecision(suggestion, requested = null, reason = null) {
+  const suggested = suggestion?.id && CATEGORY_RULES[suggestion.id] ? suggestion.id : "general";
+  const basis = suggestion?.basis ?? "The source suggests it";
+  const given = typeof reason === "string" && reason.trim() ? reason.trim() : null;
+  const target = requested ?? suggested;
+  const keep = new Set(ruleChecks(target));
+  const dropped = target === suggested ? [] : ruleChecks(suggested).filter((c) => !keep.has(c));
+  const name = (id) => (CATEGORY_RULES[id] ?? CATEGORY_RULES.general).name;
+  if (!dropped.length)
+    return { chosen: requested, suggested, applied: target, reason: given, warning: null, dropped, basis };
+  if (!given)
+    return {
+      chosen: requested,
+      suggested,
+      applied: suggested,
+      reason: null,
+      warning: `${basis}, which suggests ${name(suggested).toLowerCase()}. You chose ${name(target)}, which would drop ${andList(dropped)}, so the ${name(suggested).toLowerCase()} rules still apply. Give a reason to cost it as ${name(target)}`,
+      dropped,
+      basis,
+    };
+  return {
+    chosen: requested,
+    suggested,
+    applied: target,
+    reason: given,
+    warning: `Costed as ${name(target)} although ${lowerFirst(basis)}, which suggests ${name(suggested).toLowerCase()}: ${andList(dropped)} ${dropped.length === 1 ? "is" : "are"} dropped. Your reason: ${given}`,
+    dropped,
+    basis,
+  };
 }
 
 // Label for an Open Prices price marked as discounted without a discount
@@ -459,12 +548,17 @@ export function candidatesFor(
   const other = rows
     .filter((r) => r.kind !== KIND.SOLD && r.kind !== KIND.ASKING)
     .map(describe);
+  // Listings count as competition only while recent (matching.competition);
+  // none recorded and no lookup on record means competition is not known.
+  const lookup = askingLookup(db, offer.gtin, now);
+  const listed = competition(offer, rows, { now, lookup });
+  const known = demandFor({ rate: null, competition: listed, lookup }).competingListings;
   return {
     offer,
     sales,
     listings,
     other,
-    competition: competition(offer, rows),
+    competition: { ...listed, lookup, competingListings: known },
     offerAttributes: { applied: attributes.applied, ignored: attributes.ignored },
   };
 }
@@ -649,6 +743,15 @@ export function validateEstimateRequest(request) {
     // Category rules (opportunity.mjs CATEGORY_RULES). Missing means the
     // category the offer suggests (suggestCategory).
     category: optional(request.category, (v) => oneOf(v, "category", CATEGORY_IDS)) ?? null,
+    // Why a looser category than the suggested one is right (categoryDecision).
+    categoryReason:
+      optional(request.categoryReason, (v) =>
+        typeof v === "string" && !v.trim() ? null : text(v, "categoryReason", 300),
+      ) ?? null,
+    // The member's carry limit in kilograms, for the access needs. Missing
+    // means the default profile's limit.
+    carryKg:
+      optional(request.carryKg, (v) => num(v, "carryKg", 0, 1000)) ?? null,
     packagingChecked:
       optional(request.packagingChecked, (v) => bool(v, "packagingChecked")) ?? false,
     bestBefore: isoDate(request.bestBefore, "bestBefore", { optional: true }),
@@ -657,10 +760,18 @@ export function validateEstimateRequest(request) {
   };
 }
 
-// Whole days from now until the start of a calendar date; negative once the
-// date has begun. Rounds down so the cash date is never stretched.
-const daysUntil = (date, now) =>
-  Math.floor((Date.parse(date + "T00:00:00Z") - Date.parse(now)) / DAY);
+// Calendar days from one date (YYYY-MM-DD) to another. Counts start from
+// today's date in London (londonDate), never the UTC date.
+const calendarDays = (from, to) =>
+  Math.round((Date.parse(to + "T00:00:00Z") - Date.parse(from + "T00:00:00Z")) / DAY);
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+/** A calendar date for people: "8 Nov 2026". Never the raw YYYY-MM-DD. */
+export function ukDate(date) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(date ?? ""));
+  return m ? `${Number(m[3])} ${MONTHS[Number(m[2]) - 1]} ${m[1]}` : "an unknown date";
+}
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 /**
  * Approximate sales per week of the exact variant: the confirmed sample
@@ -681,14 +792,16 @@ export function salesPerWeek(count, maxSaleAgeDays = ALERT_RULES.maxSaleAgeDays)
 /**
  * Resale weeks of supply: active asking-price listings with the offer's
  * barcode divided by salesPerWeek, to two decimals. Null when the sales rate
- * is unknown (no confirmed sales). Also null when no active listing is
- * recorded: an empty list can mean nobody looked, so it never counts as low
- * competition. Listings of any variant with the same barcode count, which
- * again errs towards more competition.
+ * is unknown (no confirmed sales) or the count is unknown (null). Pass the
+ * count demandFor settled on: 0 only when an asking-price lookup found no
+ * listings, because an empty list can mean nobody looked. Listings of any
+ * variant with the same barcode count, which errs towards more competition.
  */
 export function resaleWeeksOfSupply(activeListings, rate) {
   if (!Number.isFinite(rate) || rate <= 0) return null;
-  if (!Number.isSafeInteger(activeListings) || activeListings <= 0) return null;
+  // The caller passes a count only when competition is known: 0 is a
+  // lookup that found none, never "nobody looked" (that is null).
+  if (!Number.isSafeInteger(activeListings) || activeListings < 0) return null;
   return Math.round((activeListings / rate) * 100) / 100;
 }
 
@@ -703,57 +816,114 @@ function savedGoals(db) {
 
 /**
  * When the cash from this trip comes back, from goals.payoutDate: the trip
- * is today (the decision date), each unit is listed the same day and sells
- * after the sold sample's days to sell, then posting, delivery and payout
- * follow the saved goals (dispatch days, delivery days, payout delay).
+ * is today in London (londonDate, the decision date) and every unit is
+ * listed the same day. One unit sells after the sold sample's days to sell;
+ * several units take as long as the sales rate needs to absorb them all
+ * (opportunity.daysToSellAll), so the last unit is not assumed to sell as
+ * fast as the first. Posting, delivery and payout follow the saved goals
+ * (dispatch days, delivery days, payout delay).
  *
- * Returns { start, sold, dispatch, delivered, date, note, days, goals,
- * cashNeededBy, cashNeededDays, timing }. days counts whole days from now to
- * the start of the payout date, the same way cashNeededDays counts to the
- * cash date, so a payout on the cash date is on time. timing is
- * { status: "on time" | "late" | "unknown", daysLate, note }.
+ * input: now, daysToSell (median for one unit), goals, units (default 1),
+ * salesPerWeek (confirmed sales rate; needed for more than one unit),
+ * cashNeededBy (a date) or cashNeededDays (calendar days from today).
+ *
+ * Returns { start, sold, dispatch, delivered, date, note, days, units,
+ * unitPayouts, cashDate, unitsByCashDate, goals, cashNeededBy,
+ * cashNeededDays, timing }. sold to date describe the last unit; days counts
+ * calendar days from today to its payout, the same way cashNeededDays counts
+ * to the cash date, so a payout on the cash date is on time. unitPayouts is
+ * the payout date of each unit in turn (null when it cannot be scheduled);
+ * unitsByCashDate how many are paid out by the cash date (null without one).
+ * timing is { status: "on time" | "late" | "unknown", daysLate, note }.
+ * Notes write dates as "8 Nov 2026".
  */
-export function payoutSchedule({ now, daysToSell, goals, cashNeededBy = null, cashNeededDays = null }) {
-  const start = new Date(Date.parse(now)).toISOString().slice(0, 10);
-  const schedule = Number.isInteger(daysToSell)
-    ? payoutDate({
-        start,
-        daysToSell,
-        dispatchDays: goals.dispatchDays,
-        deliveryDays: goals.deliveryDays,
-        payoutDelayDays: goals.payoutDelayDays,
-      })
-    : {
-        sold: null,
-        dispatch: null,
-        delivered: null,
-        date: null,
-        note: "Days to sell are unknown from the confirmed sales, so a payout date cannot be scheduled.",
-      };
-  const days = schedule.date ? daysUntil(schedule.date, now) : null;
+export function payoutSchedule({
+  now,
+  daysToSell,
+  goals,
+  cashNeededBy = null,
+  cashNeededDays = null,
+  units = 1,
+  salesPerWeek = null,
+}) {
+  const start = londonDate(now);
+  const n = Number.isInteger(units) && units >= 1 ? units : 1;
+  const sellIn = (k) =>
+    Number.isInteger(daysToSell) ? daysToSellAll({ units: k, daysToSell, salesPerWeek }) : null;
+  const plan = (days) =>
+    payoutDate({
+      start,
+      daysToSell: days,
+      dispatchDays: goals.dispatchDays,
+      deliveryDays: goals.deliveryDays,
+      payoutDelayDays: goals.payoutDelayDays,
+    });
+  const unknown = (note) => ({ sold: null, dispatch: null, delivered: null, date: null, note });
+  const lastSells = sellIn(n);
+  let schedule;
+  if (!Number.isInteger(daysToSell))
+    schedule = unknown("Days to sell are unknown from the confirmed sales, so a payout date cannot be scheduled.");
+  else if (lastSells === null)
+    schedule = unknown(
+      `The confirmed sales rate is unknown, so the payout for all ${n} units cannot be scheduled.`,
+    );
+  else {
+    const p = plan(lastSells);
+    schedule = p.date
+      ? {
+          ...p,
+          note: `Assumes ${n === 1 ? "a sale" : `the last of ${n} units sells`} by ${ukDate(p.sold)}, posting on ${ukDate(p.dispatch)}, delivery by ${ukDate(p.delivered)} and payout on ${ukDate(p.date)}.`,
+        }
+      : p;
+  }
+  const days = schedule.date ? calendarDays(start, schedule.date) : null;
+  const unitPayouts = Array.from({ length: n }, (_, i) => {
+    const d = sellIn(i + 1);
+    return d === null ? null : plan(d).date;
+  });
+  const cashDate = cashNeededBy
+    ? cashNeededBy
+    : Number.isFinite(cashNeededDays)
+      ? addDays(start, cashNeededDays)
+      : null;
+  const unitsByCashDate = cashDate ? unitPayouts.filter((d) => d !== null && d <= cashDate).length : null;
+  const lastUnit = n === 1 ? "Payout" : `Payout of the last of ${n} units`;
   let timing;
-  if (cashNeededBy) timing = cashTiming({ payoutDate: schedule.date, cashNeededBy });
-  else if (Number.isFinite(cashNeededDays)) {
-    if (days === null)
-      timing = {
-        status: "unknown",
-        daysLate: null,
-        note: `The payout date is unknown, so it cannot be checked against the ${cashNeededDays} days until you need the cash.`,
-      };
-    else if (days > cashNeededDays)
-      timing = {
-        status: "late",
-        daysLate: days - cashNeededDays,
-        note: `Payout expected ${schedule.date}, ${days - cashNeededDays} day${days - cashNeededDays === 1 ? "" : "s"} after you need the cash.`,
-      };
-    else timing = { status: "on time", daysLate: 0, note: `Payout expected ${schedule.date}, before you need the cash.` };
-  } else timing = cashTiming({ payoutDate: schedule.date, cashNeededBy: null });
+  if (!cashDate)
+    timing = { status: "unknown", daysLate: null, note: "No date is set for when you need the cash back." };
+  else if (!schedule.date)
+    timing = {
+      status: "unknown",
+      daysLate: null,
+      note: `The payout date is unknown, so it cannot be checked against ${ukDate(cashDate)}, when you need the cash.`,
+    };
+  else {
+    const late = calendarDays(cashDate, schedule.date);
+    timing =
+      late > 0
+        ? {
+            status: "late",
+            daysLate: late,
+            note: `${lastUnit} expected ${ukDate(schedule.date)}, ${plural(late, "day")} after you need the cash (${ukDate(cashDate)}).`,
+          }
+        : {
+            status: "on time",
+            daysLate: 0,
+            note: `${lastUnit} expected ${ukDate(schedule.date)}, on or before ${ukDate(cashDate)}, when you need the cash.`,
+          };
+  }
   return {
     start,
     ...schedule,
     days,
+    units: n,
+    unitPayouts,
+    cashDate,
+    unitsByCashDate,
     goals: {
       daysToSell: Number.isInteger(daysToSell) ? daysToSell : null,
+      daysToSellAll: lastSells,
+      salesPerWeek: Number.isFinite(salesPerWeek) ? Math.round(salesPerWeek * 100) / 100 : null,
       daysToSellSource: "confirmed sold sample",
       dispatchDays: [...goals.dispatchDays],
       deliveryDays: goals.deliveryDays,
@@ -935,11 +1105,108 @@ export function withJourneyCheck(alert, journey) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Required costs and times. A blank is never zero: 0 counts only when typed.
+// Each entry is [request cost key, plain label]. A blank money input leaves
+// the contribution unknown to the gate; any blank leaves earnings per hour
+// unknown. The fee, fixed fee, returns and in-store time fall back to stated
+// sample assumptions instead (never zero), so they are not listed.
+export const REQUIRED_INPUTS = Object.freeze([
+  ["postage", "parcel cost"],
+  ["packaging", "packaging cost"],
+  ["journeyCost", "return journey cost"],
+  ["journeyMinutes", "journey time"],
+  ["handlingMinutes", "handling time"],
+]);
+const MONEY_INPUTS = new Set(["postage", "packaging", "journeyCost"]);
+
+/** Plain labels of the required inputs the request left blank, in form order. */
+export function missingInputsOf(defaulted = []) {
+  const blank = new Set(defaulted);
+  return REQUIRED_INPUTS.filter(([key]) => blank.has(key)).map(([, label]) => label);
+}
+
+// Ways a barcode may have been typed into an asking-price lookup: the
+// 14-digit GTIN and its shorter forms without leading zeros.
+const barcodeQueries = (gtin) =>
+  [...new Set([14, 13, 12, 8].filter((n) => /^0*$/.test(gtin.slice(0, 14 - n))).map((n) => gtin.slice(14 - n)))];
+
+/**
+ * The latest eBay asking-price lookup for the barcode still inside its time
+ * to live (evidence.mjs lookup cache), { provider, fetched } or null. With no
+ * lookup on record, an empty list of asking prices means nobody looked, so
+ * competition is unknown rather than zero.
+ */
+export function askingLookup(db, gtin, now) {
+  if (typeof gtin !== "string" || !/^\d{14}$/.test(gtin) || !tableExists(db, "lookup_cache")) return null;
+  let best = null;
+  for (const query of barcodeQueries(gtin)) {
+    const hit = cachedLookup(db, "ebay", query, { now });
+    if (hit && (!best || hit.fetched > best.fetched)) best = { provider: "ebay", fetched: hit.fetched };
+  }
+  return best;
+}
+
+/**
+ * Units the evidence supports selling within the sell window, with the
+ * figures behind it: { units, salesPerWeek, competingListings,
+ * sellWindowWeeks, note }. Competing listings are known when listings are
+ * recorded, or when none are and an asking-price lookup on record found
+ * none. A null count (the listings on record are too old, or nobody looked)
+ * leaves demand unknown, which fails the buy-alert gate.
+ */
+export function demandFor({ rate, competition: resale, lookup }) {
+  const weeks = OPPORTUNITY_RULES.sellWindowWeeks;
+  const listings = resale?.activeListings;
+  const competingListings =
+    Number.isSafeInteger(listings) && listings > 0 ? listings : listings === 0 && lookup ? 0 : null;
+  const units = demandUnits({ salesPerWeek: rate, competingListings }, weeks);
+  const shownRate = rate === null ? null : Math.round(rate * 100) / 100;
+  const note =
+    rate === null
+      ? "No confirmed sales, so demand is not known"
+      : competingListings === null
+        ? listings === 0
+          ? "Competition not known: no competing listings are recorded and no asking-price lookup for this barcode is on record, so nobody may have looked. Run an eBay asking-price lookup (see Sources)"
+          : `Competition not known. ${resale?.note ?? "The competing listings on record are too old to count: run an asking-price lookup before sharing"}`
+        : `About ${plural(units, "unit")} can sell within ${weeks} weeks at ${shownRate} confirmed sales a week, ${
+            competingListings === 0
+              ? "with no competing listings found by the latest asking-price lookup"
+              : `after allowing for ${plural(competingListings, "competing listing")}`
+          }`;
+  return { units, salesPerWeek: shownRate, competingListings, sellWindowWeeks: weeks, note };
+}
+
+/**
+ * The one thing most likely to make the estimate wrong, in plain words,
+ * checked in order of how badly it would mislead.
+ */
+function mainUncertainty({ sampleData, economics, match, offer, missing, stock, demand, sample }) {
+  if (sampleData) return "Sample figures: illustrative only, never observed evidence";
+  if (!economics)
+    return match === "research"
+      ? "No confirmed completed sale of this exact item yet, so what buyers pay is not known"
+      : "No completed sales recorded for this item, so what buyers pay is not known";
+  if (offer.expired)
+    return offer.freshness === "unknown"
+      ? "The offer price has no observation date, so it may have changed"
+      : `The offer price was last seen ${plural(offer.ageDays ?? 0, "day")} ago and may have changed`;
+  if (missing.length) return `${andList(missing)} not entered, so profit and earnings per hour are not known`.replace(/^./, (c) => c.toUpperCase());
+  if (stock.availability === "out_of_stock") return "The latest branch check found none on the shelf";
+  if (!stock.confirmed) return "Branch stock has not been confirmed by a recent check in this locality";
+  if (demand.units === null) return demand.note;
+  if (sample.independent < ALERT_RULES.minIndependentSales)
+    return `Only ${plural(sample.independent, "independent seller")} in the confirmed sales`;
+  return `Whether buyers still pay about ${gbp(sample.lowerMedian)}: the estimate rests on ${plural(sample.count, "confirmed sale")}`;
+}
+
 /**
  * estimateFromEvidence(db, request, options?) per docs/ARCHITECTURE.md.
  *
  * options.now overrides request.now; the HTTP route passes the server clock
- * so a client cannot make an expired offer look fresh.
+ * so a client cannot make an expired offer look fresh. options.lookup (an
+ * asking-price lookup { provider, fetched } or null) overrides the lookup
+ * read from the cache (askingLookup).
  *
  * Request additions beyond the architecture contract:
  *  weightKg  weight of one unit in kilograms; null or missing means unknown,
@@ -952,19 +1219,29 @@ export function withJourneyCheck(alert, journey) {
  *  category  "general" | "clothing" | "food"; missing means the offer's
  *            suggested category. Clothing raises the returns allowance to its
  *            floor and needs a size; food needs packagingChecked and a
- *            bestBefore date with enough shelf life after the expected sale.
+ *            bestBefore date with enough shelf life after the last unit sells.
+ *  categoryReason  why a category looser than the suggested one is right.
+ *            Without it the suggested category's rules stay (categoryDecision).
  *  packagingChecked, bestBefore  food checks (categoryChecks).
- *  costs.journeyCost, costs.journeyMinutes  must be entered (0 is allowed
- *            when entered); a blank one fails the journey check, makes the
- *            hourly floor and contribution unknown to the gate and sends the
- *            tier to Review.
+ *  carryKg   the member's carry limit for the access needs (default profile
+ *            limit when missing).
+ *  costs     postage, packaging, journeyCost, journeyMinutes and
+ *            handlingMinutes must be entered (0 is allowed when entered). A
+ *            blank one is listed in missingInputs and fails the gate's
+ *            inputs-entered check (the tier goes to Review); a blank money
+ *            input leaves the contribution unknown to the gate and any blank
+ *            leaves earnings per hour unknown. A blank journey also fails the
+ *            journey check.
  *
  * Returns { offer, sample, competition, match, economics, opportunity,
  * alert } plus thresholds, stock (the availability check used), permission,
- * unitCost, cashNeededDays, payout (payoutSchedule), prices
- * (priceComparison), category, journey, offerAttributes, inputs,
- * assumptions and warnings. economics is null unless at least one confirmed
- * exact sale qualifies.
+ * unitCost, cashNeededDays, payout (payoutSchedule), demand (demandFor),
+ * prices (priceComparison), category (categoryDecision plus the rule, the
+ * returns rate and the failures), journey, missingInputs, access
+ * ({ needs, carryKg, carrySource }), checked ({ price, stock }),
+ * mainUncertainty, offerAttributes, inputs, assumptions and warnings.
+ * economics is null unless at least one confirmed exact sale qualifies.
+ * competition carries the lookup used and the known competingListings.
  *
  * opportunity is classifyOpportunity(...) from opportunity.mjs (tier,
  * reasons, unitProfit, returnOnCost, targetPrice, meetsThresholds,
@@ -973,12 +1250,13 @@ export function withJourneyCheck(alert, journey) {
  * heading to the shelf at research time, so it is unknown and the best tier
  * an estimate can reach is Priority 2) and provenItem.
  *
- * The alert always comes from evaluateAlert, run twice: a screening pass
- * supplies the evidence and stock checks that classifyOpportunity reads,
- * then the final pass adds meetsThresholds from the classification, units
- * and the trial batch size from the effective rules. provenItem is false
- * because there is no link to verified ledger trades yet, so every item is
- * held to a trial batch.
+ * The alert always comes from evaluateAlert, run twice with the same
+ * missingInputs, demandUnits and sellWindowWeeks: a screening pass supplies
+ * the evidence and stock checks that classifyOpportunity reads, then the
+ * final pass adds meetsThresholds from the classification, units and the
+ * trial batch size from the effective rules. provenItem is false because
+ * there is no link to verified ledger trades yet, so every item is held to a
+ * trial batch.
  */
 export function estimateFromEvidence(db, request, options = {}) {
   const input = validateEstimateRequest(request);
@@ -993,7 +1271,11 @@ export function estimateFromEvidence(db, request, options = {}) {
   const rows = findCandidates(db, offer);
   const confirmed = new Set(input.sales.map((s) => `${s.provider}|${s.sourceId}`));
   const sample = soldSample(offer, rows, { now, confirmed });
-  const resale = competition(offer, rows);
+  const lookup = options.lookup !== undefined ? options.lookup : askingLookup(db, offer.gtin, now);
+  const listed = competition(offer, rows, { now, lookup });
+  const rate = salesPerWeek(sample.count);
+  const demand = demandFor({ rate, competition: listed, lookup });
+  const resale = { ...listed, lookup: lookup ?? null, competingListings: demand.competingListings };
   const warnings = [];
   const assumptions = [];
 
@@ -1018,9 +1300,12 @@ export function estimateFromEvidence(db, request, options = {}) {
     }
   }
 
-  // Category rules: the returns allowance floor applies to the economics.
+  // Category rules: the suggested category's rules stay unless a looser
+  // choice comes with a reason. The returns allowance floor applies to the
+  // economics.
   const suggestion = offer.suggestedCategory;
-  const categoryId = input.category ?? suggestion.id;
+  const decision = categoryDecision(suggestion, input.category, input.categoryReason);
+  const categoryId = decision.applied;
   const rule = categoryRule(categoryId);
   const returnsRate = categoryReturnsRate(categoryId, input.costs.returnsRate);
   const costs = { ...input.costs, returnsRate };
@@ -1032,6 +1317,8 @@ export function estimateFromEvidence(db, request, options = {}) {
     costKnown: !journeyMissing.includes("journeyCost"),
     minutesKnown: !journeyMissing.includes("journeyMinutes"),
   };
+  const missingInputs = missingInputsOf(input.defaulted);
+  const moneyKnown = !input.defaulted.some((k) => MONEY_INPUTS.has(k));
 
   const economics =
     sample.count > 0
@@ -1059,8 +1346,9 @@ export function estimateFromEvidence(db, request, options = {}) {
   });
   const permission = displayPermission(db, offer);
   const sampleData = offer.sample || sample.used.some(isSampleRecord);
+  // Calendar days from today in London to the cash date.
   const cashNeededDays = input.cashNeededBy
-    ? daysUntil(input.cashNeededBy, now)
+    ? calendarDays(londonDate(now), input.cashNeededBy)
     : input.cashNeededDays;
   const payout = payoutSchedule({
     now,
@@ -1068,26 +1356,30 @@ export function estimateFromEvidence(db, request, options = {}) {
     goals: savedGoals(db),
     cashNeededBy: input.cashNeededBy,
     cashNeededDays,
+    units: input.units,
+    salesPerWeek: rate,
   });
 
+  // Food keeps its shelf life until the last unit is expected to sell.
   const categoryFailures = categoryChecks({
     category: categoryId,
     size: offer.size,
     returnsRate,
     packagingChecked: input.packagingChecked,
     bestBefore: input.bestBefore,
-    daysToSell: sample.daysToSell,
+    daysToSell: payout.goals.daysToSellAll,
     now,
   });
 
   const alertInput = {
     evidenceClass: sampleData ? "sample" : "live",
     match,
-    // A blank journey cost leaves the contribution unknown; a blank journey
-    // cost or time leaves earnings per hour unknown. Both fail closed.
-    contribution: economics && journey.costKnown ? economics.contribution : null,
-    hourly: economics && journey.known ? economics.hourly : null,
+    // A blank cost leaves the contribution unknown; any blank cost or time
+    // leaves earnings per hour unknown. Both fail closed.
+    contribution: economics && moneyKnown ? economics.contribution : null,
+    hourly: economics && missingInputs.length === 0 ? economics.hourly : null,
     hourlyFloor: input.hourlyFloor,
+    missingInputs,
     journeyKnown: journey.known,
     offerObserved: offer.observed,
     now,
@@ -1102,13 +1394,16 @@ export function estimateFromEvidence(db, request, options = {}) {
     cashNeededDays,
     payoutDays: payout.days,
     displayPermitted: permission.permitted,
+    demandUnits: demand.units,
+    sellWindowWeeks: demand.sellWindowWeeks,
   };
   // Screening pass: classifyOpportunity reads only its evidence and stock
   // checks. Its buying-thresholds and trial-batch results are discarded.
   const screening = withJourneyCheck(evaluateAlert(alertInput), journey);
   const thresholds = thresholdsFor(input.rules);
-  const rate = salesPerWeek(sample.count);
-  const weeksOfSupply = resaleWeeksOfSupply(resale.activeListings, rate);
+  // Weeks of supply use the same competing-listings count as demand, so a
+  // count nobody checked never reads as low competition.
+  const weeksOfSupply = resaleWeeksOfSupply(demand.competingListings, rate);
   // The purchase price per unit is the price the stock is costed at: the
   // offer price, or the regular price when a promotion's eligibility is not
   // confirmed. The same figure is the base of the return on purchase price.
@@ -1160,6 +1455,7 @@ export function estimateFromEvidence(db, request, options = {}) {
   );
 
   if (sampleData) warnings.push("Sample data: illustrative only and never a buy alert");
+  if (decision.warning) warnings.push(decision.warning);
   if (input.weightKg === null)
     warnings.push("Unit weight not entered: an item of unknown weight is rejected by the buying thresholds");
   if (thresholds.ignored.length)
@@ -1184,16 +1480,26 @@ export function estimateFromEvidence(db, request, options = {}) {
       stock.reason ??
         `Branch stock is not confirmed: record an availability check from the last ${CHECK_VALID_DAYS} days`,
     );
-  if (input.costs.postage <= 0)
-    warnings.push("No parcel cost entered: contribution leaves out postage");
+  if (input.defaulted.includes("postage"))
+    warnings.push("No parcel cost entered: profit cannot be judged until you enter what you pay to post one unit");
+  else if (input.costs.postage <= 0)
+    warnings.push("Parcel cost entered as 0: contribution leaves out postage, so the parcel cost is treated as unknown");
+  if (input.defaulted.includes("packaging"))
+    warnings.push(
+      "No packaging cost entered: profit cannot be judged until you enter it. Enter 0 only if your packaging truly costs nothing",
+    );
   if (!journey.costKnown)
     warnings.push(
       "No return journey cost entered: profit leaves out travel. Enter 0 only if the trip costs nothing, for example walking",
     );
   if (!journey.minutesKnown)
     warnings.push("No journey time entered: earnings per hour leave out travel time");
-  if (input.costs.handlingMinutes <= 0)
-    warnings.push("No handling time entered: earnings per hour leave out listing, packing and dispatch");
+  if (input.defaulted.includes("handlingMinutes"))
+    warnings.push(
+      "No handling time entered: earnings per hour cannot be judged until you enter the minutes for listing, packing and dispatch",
+    );
+  else if (input.costs.handlingMinutes <= 0)
+    warnings.push("Handling time entered as 0: earnings per hour leave out listing, packing and dispatch");
   for (const x of attributes.ignored) warnings.push(x.reason);
   if (economics && sample.count < ALERT_RULES.minIndependentSales)
     warnings.push(
@@ -1202,6 +1508,10 @@ export function estimateFromEvidence(db, request, options = {}) {
   if (economics && input.units > sample.count)
     warnings.push(
       `You plan ${input.units} units but there are ${sample.count} confirmed recent sales: they may not all sell`,
+    );
+  if (economics && demand.units !== null && input.units > demand.units)
+    warnings.push(
+      `${demand.note}, fewer than the ${plural(input.units, "unit")} planned: buy no more than the sales rate supports`,
     );
   if (economics)
     assumptions.push(
@@ -1213,6 +1523,12 @@ export function estimateFromEvidence(db, request, options = {}) {
     assumptions.push(
       `${rule.name} returns allowance raised to ${Math.round(returnsRate * 1000) / 10}%, the minimum for the category`,
     );
+  if (decision.dropped.length)
+    assumptions.push(
+      decision.applied === decision.suggested
+        ? `Costed under the ${rule.name.toLowerCase()} rules the source suggests, because no reason was given for ${categoryRule(decision.chosen).name}`
+        : `Costed under the ${rule.name.toLowerCase()} rules you chose instead of the suggested ${categoryRule(decision.suggested).name.toLowerCase()} rules, for the reason you gave`,
+    );
   const confirmedKeys = Object.keys(attributes.applied);
   if (confirmedKeys.length)
     assumptions.push(
@@ -1222,16 +1538,40 @@ export function estimateFromEvidence(db, request, options = {}) {
         (confirmedKeys.length === 1 ? "it" : "them") +
         " blank",
     );
+  if (payout.units > 1 && payout.goals.daysToSellAll !== null)
+    assumptions.push(
+      `At ${payout.goals.salesPerWeek} confirmed sales a week, the last of ${payout.units} units is expected to sell after ${plural(payout.goals.daysToSellAll, "day")}, not after the ${plural(sample.daysToSell, "day")} one sale takes`,
+    );
+  if (payout.cashDate && payout.unitsByCashDate !== null)
+    assumptions.push(
+      `${payout.unitsByCashDate} of ${plural(payout.units, "unit")} expected to have paid out by ${ukDate(payout.cashDate)}, the date you need the cash`,
+    );
   assumptions.push(
     `Branch stock comes only from an availability check recorded in the last ${CHECK_VALID_DAYS} days, never from a feed or catalogue`,
     "Profit per unit is the contribution divided by units, so it already carries fees, postage, packaging, the returns allowance and the unit's share of travel",
     "Sourcing pressure is unknown at research time, so a research estimate can reach Priority 2 at best",
     `Resale competition uses the confirmed sales spread over ${ALERT_RULES.maxSaleAgeDays} days as the sales rate, which understates demand and so overstates competition`,
+    `Units are limited to what the sales rate supports in ${demand.sellWindowWeeks} weeks after competing listings`,
     "No verified trade is linked from the ledger yet, so every item is treated as unproven and held to the trial batch",
-    `Payout timing assumes the trip is today and each unit is listed the same day, then uses ${
+    `Payout timing assumes the trip is today (${ukDate(payout.start)}, London time) and each unit is listed the same day, then uses ${
       payout.goals.saved ? "your saved Goals" : "the default Goals settings"
     } for dispatch days, delivery and payout delay`,
   );
+
+  const carryKg = input.carryKg ?? profileDefaults.carry;
+  const access = {
+    needs: accessNeeds(
+      {
+        weight: input.weightKg,
+        stock: Number.isSafeInteger(stock.check?.units_seen) ? stock.check.units_seen : stock.check?.in_stock === 0 ? 0 : null,
+        stockChecked: stock.check?.checked_at ?? null,
+        storageNeeds: null,
+      },
+      { carry: carryKg },
+    ),
+    carryKg,
+    carrySource: input.carryKg === null ? "default" : "request",
+  };
 
   const { now: _now, ...inputs } = input;
   return {
@@ -1251,11 +1591,17 @@ export function estimateFromEvidence(db, request, options = {}) {
     // alert, and a trip tracked from it is a sample trip in the ledger.
     sampleData,
     payout,
+    demand,
     prices: priceComparison(db, offer, rows, sample, now),
     category: {
+      chosen: decision.chosen,
+      suggested: decision.suggested,
+      applied: decision.applied,
+      reason: decision.reason,
+      warning: decision.warning,
+      dropped: decision.dropped,
       id: rule.id,
       name: rule.name,
-      chosen: input.category ? "request" : "suggested",
       suggestion,
       rule,
       returnsRate,
@@ -1265,6 +1611,19 @@ export function estimateFromEvidence(db, request, options = {}) {
       bestBefore: input.bestBefore,
     },
     journey,
+    missingInputs,
+    access,
+    checked: { price: offer.observed ?? null, stock: stock.check?.checked_at ?? null, locality: stock.locality ?? null },
+    mainUncertainty: mainUncertainty({
+      sampleData,
+      economics,
+      match,
+      offer,
+      missing: missingInputs,
+      stock,
+      demand,
+      sample,
+    }),
     offerAttributes: { applied: attributes.applied, ignored: attributes.ignored },
     inputs,
     assumptions,

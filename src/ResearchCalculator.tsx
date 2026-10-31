@@ -95,11 +95,20 @@ type Candidate = {
   confirmable?: boolean;
   blocker?: string | null;
 };
+// activeListings counts listings seen recently; null when the newest one on
+// record is too old, so competition is not known. competingListings is the
+// count the demand check uses: also null when no listings are recorded and
+// no asking-price lookup is on record (nobody may have looked).
 type Competition = {
-  activeListings: number;
-  sellers: number;
+  activeListings: number | null;
+  sellers: number | null;
   lowestAsking: number | null;
   lowestAskingIncludesShipping: boolean | null;
+  competingListings?: number | null;
+  lookup?: { provider: string; fetched: string } | null;
+  checkedAt?: string | null;
+  olderListings?: number;
+  note?: string | null;
 };
 type Candidates = {
   offer: Offer;
@@ -246,6 +255,9 @@ type Payout = {
   days: number | null;
   goals: {
     daysToSell: number | null;
+    // Days until the last unit is expected to sell, at the sales rate.
+    daysToSellAll?: number | null;
+    salesPerWeek?: number | null;
     dispatchDays: number[];
     deliveryDays: number;
     payoutDelayDays: number;
@@ -254,7 +266,20 @@ type Payout = {
   cashNeededBy: string | null;
   cashNeededDays: number | null;
   timing: { status: "on time" | "late" | "unknown"; daysLate: number | null; note: string };
+  // Added in round two: the payout of several units follows the sales rate.
+  units?: number;
+  unitPayouts?: (string | null)[];
+  cashDate?: string | null;
+  unitsByCashDate?: number | null;
 };
+type Demand = {
+  units: number | null;
+  salesPerWeek: number | null;
+  competingListings: number | null;
+  sellWindowWeeks: number;
+  note: string;
+};
+type AccessNeed = { id: string; label: string; detail: string };
 type Estimate = {
   offer: Offer;
   sample: {
@@ -283,10 +308,17 @@ type Estimate = {
   sampleData?: boolean;
   payout?: Payout;
   prices?: Prices;
+  // chosen is the category you picked (null: the suggestion), applied the
+  // one whose rules are used, warning set when a looser choice drops rules.
   category?: {
     id: CategoryId;
     name: string;
-    chosen: "request" | "suggested";
+    chosen: CategoryId | null;
+    suggested: CategoryId;
+    applied: CategoryId;
+    reason: string | null;
+    warning: string | null;
+    dropped: string[];
     suggestion: { id: CategoryId; basis: string };
     rule: CategoryRule;
     returnsRate: number;
@@ -294,6 +326,11 @@ type Estimate = {
     failures: string[];
   };
   journey?: { known: boolean; missing: string[]; costKnown: boolean; minutesKnown: boolean };
+  missingInputs?: string[];
+  demand?: Demand;
+  access?: { needs: AccessNeed[]; carryKg: number; carrySource: "request" | "default" };
+  checked?: { price: string | null; stock: string | null; locality: string | null };
+  mainUncertainty?: string;
   offerAttributes?: AttributeResult;
   inputs?: { defaulted: string[]; costs: Record<string, number> };
   assumptions: string[];
@@ -311,6 +348,8 @@ type EstimateRequest = {
   cashNeededBy?: string;
   locality?: string;
   category?: CategoryId;
+  categoryReason?: string;
+  carryKg?: number;
   packagingChecked?: boolean;
   bestBefore?: string;
   offerAttributes?: Partial<Record<AttrKey, string>>;
@@ -344,14 +383,19 @@ export const cash = (pence: number | null | undefined) =>
   pence === null || pence === undefined || !Number.isFinite(pence)
     ? "not known"
     : money(pence);
+// The same rule as server/estimate.mjs isSampleRecord: sample, fixture or
+// demo in the provider, licence or source id, or a made-up "Example ..."
+// retailer from the repository's own sample feeds.
 export const isSampleRow = (row: {
   provider?: string | null;
   licence?: string | null;
   source_id?: string | null;
+  retailer?: string | null;
 }) =>
   /\b(sample|fixture|demo)\b/i.test(row.provider || "") ||
   /\b(sample|fixture|demo)\b/i.test(row.licence || "") ||
-  /^(sample|fixture|demo)\b/i.test(row.source_id || "");
+  /^(sample|fixture|demo)\b/i.test(row.source_id || "") ||
+  /^\s*example\b/i.test(row.retailer || "");
 // sources marks attributes the operator confirmed after looking at the item
 // (the source left them blank) and a retail offer's assumed condition.
 export const attributesText = (
@@ -420,6 +464,8 @@ type Inputs = {
   locality: string;
   // "" means the category the offer suggests.
   category: "" | CategoryId;
+  // Why a looser category than the suggested one is right.
+  categoryReason: string;
   packagingChecked: boolean;
   bestBefore: string;
 };
@@ -448,16 +494,31 @@ function initialInputs(): Inputs {
     // operator states for this trip, never one assumed from the profile.
     locality: "",
     category: "",
+    categoryReason: "",
     packagingChecked: false,
     bestBefore: "",
   };
 }
+// Costs and times the estimate needs entered: a blank is never counted as
+// zero, and 0 counts only when typed (server/estimate.mjs REQUIRED_INPUTS).
+const REQUIRED_FIELDS = new Set<keyof Inputs>([
+  "postage",
+  "packaging",
+  "journeyCost",
+  "journeyMinutes",
+  "handlingMinutes",
+]);
 type FieldKind = "pounds" | "percent" | "minutes" | "count" | "kg";
 const FIELDS: [keyof Inputs, string, FieldKind, string?][] = [
   ["units", "Units to buy", "count", "A first purchase is a small trial batch"],
   ["weightKg", "Unit weight (kg)", "kg", "One unit as posted. Unknown weight is rejected"],
-  ["postage", "Parcel cost per unit sold (£)", "pounds", "What you pay to post one unit"],
-  ["packaging", "Packaging per unit (£)", "pounds"],
+  ["postage", "Parcel cost per unit sold (£), required", "pounds", "What you pay to post one unit"],
+  [
+    "packaging",
+    "Packaging per unit (£), required",
+    "pounds",
+    "Mailer, box and filler. Enter 0 only if it truly costs nothing",
+  ],
   ["feeRate", "Marketplace fee rate (%)", "percent", "Up to 50%"],
   ["feeFixed", "Fixed fee per sale (£)", "pounds"],
   ["returnsRate", "Returns allowance (%)", "percent", "Share of the sale price set aside"],
@@ -474,7 +535,12 @@ const FIELDS: [keyof Inputs, string, FieldKind, string?][] = [
     "Door to door, there and back. A blank journey is never treated as free or instant",
   ],
   ["overheadMinutes", "Minutes in store", "minutes"],
-  ["handlingMinutes", "Handling minutes per unit", "minutes", "Listing, packing and dispatch"],
+  [
+    "handlingMinutes",
+    "Handling minutes per unit, required",
+    "minutes",
+    "Listing, packing and dispatch. A blank is never treated as no time",
+  ],
   ["hourlyFloor", "Hourly floor (£ per hour)", "pounds"],
 ];
 
@@ -556,6 +622,7 @@ function buildRequest(
   inputs: Inputs,
   stricter: Stricter,
   offerAttributes: Partial<Record<AttrKey, string>>,
+  carryKg: number | null,
 ): EstimateRequest | string {
   const read = (field: keyof Inputs, kind: FieldKind) => readNumber(String(inputs[field]), kind);
   const costs: Record<string, number> = {};
@@ -573,7 +640,8 @@ function buildRequest(
     if (Number.isNaN(readNumber(stricter[key], kind))) return label + " must be a number";
   const rules = stricterRules(stricter);
   const hourlyFloor = read("hourlyFloor", "pounds");
-  const food = (inputs.category || offer.suggestedCategory?.id) === "food";
+  const food = categoryChoice(inputs, offer).applied === "food";
+  const reason = inputs.categoryReason.trim();
   return {
     offer: { provider: offer.provider, sourceId: offer.sourceId },
     sales: confirmed.map((k) => {
@@ -589,6 +657,8 @@ function buildRequest(
     ...(inputs.cashNeededBy ? { cashNeededBy: inputs.cashNeededBy } : {}),
     ...(inputs.locality.trim() ? { locality: inputs.locality.trim() } : {}),
     ...(inputs.category ? { category: inputs.category } : {}),
+    ...(inputs.category && reason ? { categoryReason: reason.slice(0, 300) } : {}),
+    ...(carryKg !== null ? { carryKg } : {}),
     ...(food ? { packagingChecked: inputs.packagingChecked } : {}),
     ...(food && inputs.bestBefore ? { bestBefore: inputs.bestBefore } : {}),
     ...(Object.keys(offerAttributes).length ? { offerAttributes } : {}),
@@ -627,26 +697,117 @@ function confirmedAttributes(offer: Offer | null, draft: AttrDraft) {
 }
 const blankAttributes = (offer: Offer) => ATTR_KEYS.filter((k) => !offer[k]);
 
+/**
+ * The category choice as the server makes it (estimate.mjs
+ * categoryDecision): a choice that drops any rule of the suggested category
+ * is looser, and applies only with a reason; otherwise the suggested rules
+ * stay. General has no rules of its own, so any other choice than the
+ * suggestion is looser when the suggestion is clothing or food.
+ */
+function categoryChoice(inputs: Inputs, offer: Offer | null) {
+  const suggested: CategoryId = offer?.suggestedCategory?.id ?? "general";
+  const chosen: CategoryId | null = inputs.category || null;
+  const looser = chosen !== null && chosen !== suggested && suggested !== "general";
+  const reasoned = inputs.categoryReason.trim() !== "";
+  const applied: CategoryId = looser && !reasoned ? suggested : (chosen ?? suggested);
+  return { suggested, chosen, looser, reasoned, applied };
+}
+
+// The calculator's inputs for this browser tab, so following the page's own
+// links (Sources, Goals) or reloading does not lose the work. Kept in
+// sessionStorage, which can be unavailable: then the draft lasts as long as
+// the page is open.
+const DRAFT_KEY = "bounty-research-draft";
+type Draft = {
+  query: string;
+  selected: Offer | null;
+  confirmed: string[];
+  attrs: AttrDraft;
+  inputs: Inputs;
+  goalsCashDate: string | null;
+};
+const isText = (v: unknown): v is string => typeof v === "string";
+function loadDraft(): Draft | null {
+  try {
+    const raw = sessionStorage.getItem(DRAFT_KEY);
+    if (!raw) return null;
+    const d = JSON.parse(raw) as Partial<Draft>;
+    if (!d || typeof d !== "object") return null;
+    const base = initialInputs();
+    const inputs = { ...base };
+    if (d.inputs && typeof d.inputs === "object")
+      for (const k of Object.keys(base) as (keyof Inputs)[]) {
+        const v = (d.inputs as Record<string, unknown>)[k];
+        if (typeof v === typeof base[k]) (inputs as Record<string, unknown>)[k] = v;
+      }
+    if (!["", "general", "clothing", "food"].includes(inputs.category)) inputs.category = "";
+    const o = d.selected as Offer | null | undefined;
+    const selected =
+      o && typeof o === "object" && isText(o.provider) && isText(o.sourceId) && isText(o.title) ? o : null;
+    const values = d.attrs?.values as Record<string, unknown> | undefined;
+    const attrs: AttrDraft =
+      values && ATTR_KEYS.every((k) => isText(values[k]))
+        ? { values: values as Record<AttrKey, string>, confirmed: d.attrs?.confirmed === true }
+        : NO_ATTRS;
+    return {
+      query: isText(d.query) ? d.query : "",
+      selected,
+      confirmed: selected && Array.isArray(d.confirmed) ? d.confirmed.filter(isText) : [],
+      attrs: selected ? attrs : NO_ATTRS,
+      inputs,
+      goalsCashDate: isText(d.goalsCashDate) ? d.goalsCashDate : null,
+    };
+  } catch {
+    return null;
+  }
+}
+function saveDraft(draft: Draft) {
+  try {
+    sessionStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+  } catch {
+    /* storage unavailable: the draft lasts while the page is open */
+  }
+}
+/** Forgets the saved Research inputs, for example after the tab failed. */
+export function clearResearchDraft() {
+  try {
+    sessionStorage.removeItem(DRAFT_KEY);
+  } catch {
+    /* nothing stored */
+  }
+}
+// The member's carry limit from the shared profile, for the access needs.
+function profileCarry(): number | null {
+  const carry = loadProfile().carry;
+  return typeof carry === "number" && Number.isFinite(carry) && carry >= 0 && carry <= 1000 ? carry : null;
+}
+
 export function ResearchCalculator({
   onAuditDraft,
 }: {
   onAuditDraft?: (draft: AuditDraft) => void;
 }) {
-  const [query, setQuery] = useState("");
+  // Restored once, on mount, from this browser tab's saved draft.
+  const [restored] = useState(loadDraft);
+  const [carryKg] = useState(profileCarry);
+  const [query, setQuery] = useState(restored?.query ?? "");
   const [offers, setOffers] = useState<{ rows: Offer[]; total: number }>({
     rows: [],
     total: 0,
   });
   const [offerError, setOfferError] = useState("");
-  const [selected, setSelected] = useState<Offer | null>(null);
+  const [selected, setSelected] = useState<Offer | null>(restored?.selected ?? null);
   const [candidates, setCandidates] = useState<Candidates | null>(null);
   const [candidateError, setCandidateError] = useState("");
-  const [confirmed, setConfirmed] = useState<string[]>([]);
-  const [attrs, setAttrs] = useState<AttrDraft>(NO_ATTRS);
-  const [inputs, setInputs] = useState<Inputs>(initialInputs);
+  const [confirmed, setConfirmed] = useState<string[]>(restored?.confirmed ?? []);
+  const [attrs, setAttrs] = useState<AttrDraft>(restored?.attrs ?? NO_ATTRS);
+  const [inputs, setInputs] = useState<Inputs>(() => restored?.inputs ?? initialInputs());
   const [stricter, setStricter] = useState<Stricter>(loadStricter);
   const [agreed, setAgreed] = useState<Agreed | null>(null);
-  const [goalsCashDate, setGoalsCashDate] = useState<string | null>(null);
+  const [goalsCashDate, setGoalsCashDate] = useState<string | null>(restored?.goalsCashDate ?? null);
+  // The cash date Goals held when the draft was saved, so a date that came
+  // from Goals follows a change made there.
+  const previousGoalsDate = useRef(restored?.goalsCashDate ?? null);
   // The latest estimate with the request it answers. When the inputs have
   // moved on it is shown as out of date and never tracked or drafted.
   const [result, setResult] = useState<{ data: Estimate; key: string } | null>(null);
@@ -688,15 +849,22 @@ export function ResearchCalculator({
     };
   }, []);
 
-  // A cash date saved in Goals fills an empty cash date here.
+  // A cash date saved in Goals fills an empty cash date here, and replaces
+  // one that came from Goals before (after "Change these in Goals").
   useEffect(() => {
     let active = true;
     api<{ cashNeededBy: string | null }>("goals")
       .then((goals) => {
-        const date = goals?.cashNeededBy;
-        if (!active || !date || date < localToday()) return;
+        if (!active) return;
+        const saved = goals?.cashNeededBy;
+        const date = saved && saved >= localToday() ? saved : null;
+        const before = previousGoalsDate.current;
         setGoalsCashDate(date);
-        setInputs((current) => (current.cashNeededBy ? current : { ...current, cashNeededBy: date }));
+        setInputs((current) =>
+          !current.cashNeededBy || (before !== null && current.cashNeededBy === before)
+            ? { ...current, cashNeededBy: date ?? "" }
+            : current,
+        );
       })
       .catch(() => {
         /* goals are optional here */
@@ -709,8 +877,15 @@ export function ResearchCalculator({
   // Shared with the Planner: thresholds saved here apply there and back.
   useEffect(() => saveMemberRules(stricterRules(stricter)), [stricter]);
 
-  // A new offer starts from a clean slate.
+  // A new offer starts from a clean slate. The offer restored from the draft
+  // keeps its confirmed sales and attributes.
+  const lastOffer = useRef<string | null>(
+    restored?.selected ? key(restored.selected.provider, restored.selected.sourceId) : null,
+  );
   useEffect(() => {
+    const k = selected ? key(selected.provider, selected.sourceId) : null;
+    if (k === lastOffer.current) return;
+    lastOffer.current = k;
     setCandidates(null);
     setCandidateError("");
     setResult(null);
@@ -718,6 +893,12 @@ export function ResearchCalculator({
     setAttrs(NO_ATTRS);
     setNotice("");
   }, [selected]);
+
+  // Keep the draft for this browser tab.
+  useEffect(
+    () => saveDraft({ query, selected, confirmed, attrs, inputs, goalsCashDate }),
+    [query, selected, confirmed, attrs, inputs, goalsCashDate],
+  );
 
   const offerAttributes = useMemo(() => confirmedAttributes(selected, attrs), [selected, attrs]);
   const attrKey = JSON.stringify(offerAttributes);
@@ -750,8 +931,8 @@ export function ResearchCalculator({
 
   const request = useMemo(
     () =>
-      selected ? buildRequest(selected, confirmed, inputs, stricter, offerAttributes) : null,
-    [selected, confirmed, inputs, stricter, offerAttributes],
+      selected ? buildRequest(selected, confirmed, inputs, stricter, offerAttributes, carryKg) : null,
+    [selected, confirmed, inputs, stricter, offerAttributes, carryKg],
   );
   const requestKey = request && typeof request === "object" ? JSON.stringify(request) : null;
 
@@ -882,7 +1063,8 @@ export function ResearchCalculator({
     setNotice("Audit form filled from this estimate. Review it below before saving.");
   }
 
-  const categoryId: CategoryId = inputs.category || selected?.suggestedCategory?.id || "general";
+  const choice = categoryChoice(inputs, selected);
+  const categoryId: CategoryId = choice.applied;
 
   return (
     <article className="research-calculator">
@@ -940,7 +1122,7 @@ export function ResearchCalculator({
                   {o.promotion && <span className="badge">Promotion</span>}
                 </span>
                 <em>
-                  Barcode {o.barcode} · Source date {o.observed || "unknown"} ·{" "}
+                  Barcode {o.barcode} · Source date {dateTime(o.observed)} ·{" "}
                   {o.stockNote}
                 </em>
               </span>
@@ -1011,8 +1193,8 @@ export function ResearchCalculator({
                     {c.sample && <span className="badge sample">Sample</span>}
                     <b>{c.row.title}</b>
                     <small>
-                      Sold {c.row.observed || "date unknown"}
-                      {c.row.listed ? " · listed " + c.row.listed : ""} · seller{" "}
+                      Sold {c.row.observed ? dateTime(c.row.observed) : "date unknown"}
+                      {c.row.listed ? " · listed " + dateTime(c.row.listed) : ""} · seller{" "}
                       {c.row.seller || "unknown"} · {c.row.provider}
                     </small>
                     <small>{attributesText(c.row)}</small>
@@ -1040,18 +1222,7 @@ export function ResearchCalculator({
                 sellers are asking, not what buyers paid, so they never enter the
                 sold sample.
               </p>
-              <p>
-                {candidates.competition.activeListings} active listing
-                {candidates.competition.activeListings === 1 ? "" : "s"} from{" "}
-                {candidates.competition.sellers} seller
-                {candidates.competition.sellers === 1 ? "" : "s"}
-                {candidates.competition.lowestAsking !== null &&
-                  " · lowest asking " +
-                    money(candidates.competition.lowestAsking) +
-                    (candidates.competition.lowestAskingIncludesShipping
-                      ? " including shipping"
-                      : " excluding unknown shipping")}
-              </p>
+              <CompetitionLine competition={candidates.competition} />
               {candidates.listings.map((c) => (
                 <div className="evidence-row" key={key(c.row.provider, c.row.source_id)}>
                   <div>
@@ -1060,7 +1231,7 @@ export function ResearchCalculator({
                     <b>{c.row.title}</b>
                     <small>
                       Seller {c.row.seller || "unknown"} · {c.row.provider} · seen{" "}
-                      {c.row.observed || dateTime(c.row.imported)}
+                      {dateTime(c.row.observed || c.row.imported)}
                     </small>
                   </div>
                   <div className="amount">
@@ -1082,7 +1253,8 @@ export function ResearchCalculator({
                     <div className="row" key={key(c.row.provider, c.row.source_id)}>
                       <span>
                         <small>
-                          {c.row.provider} · {c.row.kind} · {c.row.observed || "date unknown"}
+                          {c.row.provider} · {c.row.kind} ·{" "}
+                          {c.row.observed ? dateTime(c.row.observed) : "date unknown"}
                         </small>
                         <b>{c.row.title}</b>
                       </span>
@@ -1117,10 +1289,7 @@ export function ResearchCalculator({
                     }
                     step={kind === "pounds" || kind === "kg" ? 0.01 : kind === "percent" ? 0.1 : 1}
                     value={String(inputs[field])}
-                    aria-invalid={
-                      (field === "journeyCost" || field === "journeyMinutes") &&
-                      String(inputs[field]).trim() === ""
-                    }
+                    aria-invalid={REQUIRED_FIELDS.has(field) && String(inputs[field]).trim() === ""}
                     onChange={(ev) => set(field, ev.target.value)}
                   />
                   {hint && <span className="muted">{hint}</span>}
@@ -1176,6 +1345,8 @@ export function ResearchCalculator({
             suggestion={selected.suggestedCategory ?? null}
             chosen={inputs.category}
             id={categoryId}
+            looser={choice.looser}
+            reason={inputs.categoryReason}
             rules={agreed?.categories ?? null}
             packagingChecked={inputs.packagingChecked}
             bestBefore={inputs.bestBefore}
@@ -1183,6 +1354,11 @@ export function ResearchCalculator({
             failures={
               estimate?.category && estimate.category.id === categoryId
                 ? estimate.category.failures
+                : null
+            }
+            warning={
+              current?.category && (current.category.chosen ?? "") === inputs.category
+                ? current.category.warning
                 : null
             }
           />
@@ -1414,25 +1590,44 @@ function categoryRuleText(id: CategoryId, rule: CategoryRule | null) {
   return ["No rules beyond the buying thresholds"];
 }
 
-/** Category choice, the rules it brings and any that fail. */
+// What the suggested category's rules check, for the reason prompt.
+function droppedText(suggested: CategoryId, rule: CategoryRule | null) {
+  if (suggested === "clothing")
+    return "the " + percent(rule?.minReturnsRate ?? 0.15) + " returns allowance and the size check";
+  if (suggested === "food")
+    return "the sealed packaging check and the " + (rule?.minShelfLifeDays ?? 30) + "-day best-before check";
+  return "no rules";
+}
+
+/**
+ * Category choice, the rules it brings and any that fail. A choice looser
+ * than the suggestion keeps the suggested rules until a reason is given,
+ * and the estimate always warns about what it drops.
+ */
 function CategoryPanel({
   suggestion,
   chosen,
   id,
+  looser,
+  reason,
   rules,
   packagingChecked,
   bestBefore,
   onChange,
   failures,
+  warning,
 }: {
   suggestion: { id: CategoryId; basis: string } | null;
   chosen: "" | CategoryId;
   id: CategoryId;
+  looser: boolean;
+  reason: string;
   rules: Record<CategoryId, CategoryRule> | null;
   packagingChecked: boolean;
   bestBefore: string;
   onChange: (field: keyof Inputs, value: string | boolean) => void;
   failures: string[] | null;
+  warning: string | null;
 }) {
   const suggested = suggestion?.id ?? "general";
   return (
@@ -1451,11 +1646,28 @@ function CategoryPanel({
           </select>
           <span className="muted">
             {chosen
-              ? "Chosen by you"
+              ? "Chosen by you. Suggested: " + CATEGORY_NAME[suggested] + ". " + (suggestion?.basis ?? "")
               : (suggestion?.basis ?? "No clear category in the title") + ". Change it if that is wrong"}
           </span>
         </label>
+        {looser && (
+          <label>
+            Why is this {CATEGORY_NAME[chosen || suggested]}, not {CATEGORY_NAME[suggested].toLowerCase()}?
+            <input
+              value={reason}
+              maxLength={300}
+              aria-invalid={!reason.trim()}
+              onChange={(ev) => onChange("categoryReason", ev.target.value)}
+            />
+            <span className={reason.trim() ? "muted" : "warn"}>
+              {reason.trim()
+                ? "Costed as " + CATEGORY_NAME[chosen || suggested] + " without " + droppedText(suggested, rules?.[suggested] ?? null) + ". The estimate says so"
+                : "Until you give a reason the " + CATEGORY_NAME[suggested].toLowerCase() + " rules still apply (" + droppedText(suggested, rules?.[suggested] ?? null) + ")"}
+            </span>
+          </label>
+        )}
       </div>
+      {warning && <p className="warn note">{warning}.</p>}
       <p className="muted">{CATEGORY_NAME[id]} items need, on top of the buying thresholds:</p>
       <ul className="threshold-list">
         {categoryRuleText(id, rules?.[id] ?? null).map((t) => (
@@ -1496,7 +1708,8 @@ function CategoryPanel({
   );
 }
 
-const day = (value: string | null | undefined) => (value ? value.slice(0, 10) : "date unknown");
+// A calendar date for people ("30 Oct 2026"), never the raw ISO form.
+const day = (value: string | null | undefined) => (value ? dateTime(value.slice(0, 10)) : "date unknown");
 const span = (r: { lowest: number | null; highest: number | null }) =>
   r.lowest === null
     ? "not known"
@@ -1752,11 +1965,14 @@ const TIER_MEANING: Record<Tier, string> = {
 function TierCard({
   opportunity: o,
   rules,
-  beforeTravel,
+  leftOut,
+  demand,
 }: {
   opportunity: Opportunity;
   rules: Rules;
-  beforeTravel: boolean;
+  // Costs left blank, which profit per unit does not include yet.
+  leftOut: string[];
+  demand: Demand | null;
 }) {
   const meets = (ok: boolean | null) => (ok === null ? "" : ok ? "ok" : "warn");
   return (
@@ -1781,14 +1997,16 @@ function TierCard({
         <dt>Purchase price per unit</dt>
         <dd>{money(o.unitPrice)}</dd>
         <dt>Profit per unit after variable costs</dt>
-        <dd className={meets(o.unitProfit === null ? null : o.unitProfit >= rules.minUnitProfit)}>
+        {/* A figure that leaves out a blank cost is never shown as passing. */}
+        <dd className={leftOut.length ? "warn" : meets(o.unitProfit === null ? null : o.unitProfit >= rules.minUnitProfit)}>
           {o.unitProfit === null ? "not known" : money(o.unitProfit)}
-          {beforeTravel && o.unitProfit !== null ? " before travel, which is not entered" : ""} (needs at
-          least {money(rules.minUnitProfit)})
+          {leftOut.length && o.unitProfit !== null ? " leaving out the " + listText(leftOut) + ", not entered" : ""}{" "}
+          (needs at least {money(rules.minUnitProfit)})
         </dd>
         <dt>Return on purchase price</dt>
-        <dd className={meets(o.returnOnCost === null ? null : o.returnOnCost >= rules.minReturn)}>
-          {o.returnOnCost === null ? "not known" : percent(o.returnOnCost)} (needs at least{" "}
+        <dd className={leftOut.length ? "warn" : meets(o.returnOnCost === null ? null : o.returnOnCost >= rules.minReturn)}>
+          {o.returnOnCost === null ? "not known" : percent(o.returnOnCost)}
+          {leftOut.length && o.returnOnCost !== null ? " leaving out the " + listText(leftOut) + ", not entered" : ""} (needs at least{" "}
           {percent(rules.minReturn)})
         </dd>
         <dt>Unit weight</dt>
@@ -1798,11 +2016,22 @@ function TierCard({
         </dd>
         <dt>Confirmed sales per week</dt>
         <dd>{o.salesPerWeek === null ? "not known" : o.salesPerWeek}</dd>
+        {demand && (
+          <>
+            <dt>Units the sales rate supports in {plural(demand.sellWindowWeeks, "week")}</dt>
+            <dd className={demand.units === null || demand.units === 0 ? "warn" : ""}>
+              {demand.units === null ? "not known" : demand.units}
+              <span className="note">{demand.note}.</span>
+            </dd>
+          </>
+        )}
         <dt>Resale weeks of supply</dt>
         <dd>
           {o.resaleWeeksOfSupply === null
             ? "not known"
-            : o.resaleWeeksOfSupply + " weeks of competing listings"}
+            : o.resaleWeeksOfSupply === 0
+              ? "none: the latest asking-price lookup found no competing listings"
+              : o.resaleWeeksOfSupply + " weeks of competing listings"}
         </dd>
         <dt>Sourcing pressure</dt>
         <dd>{o.sourcingPressure === null ? "not known at research time" : o.sourcingPressure}</dd>
@@ -1859,7 +2088,7 @@ function OfferSummary({ offer }: { offer: Offer }) {
         </dd>
         <dt>Observed</dt>
         <dd>
-          {offer.observed || "unknown"}
+          {dateTime(offer.observed)}
           {offer.ageDays !== null
             ? " (" + offer.ageDays + (offer.ageDays === 1 ? " day" : " days") + " ago)"
             : ""}
@@ -1896,29 +2125,86 @@ function OfferSummary({ offer }: { offer: Offer }) {
 }
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+// "a, b and c" for short lists of plain labels.
+const listText = (items: string[]) =>
+  items.length <= 1 ? items.join("") : items.slice(0, -1).join(", ") + " and " + items[items.length - 1];
+// Costs whose blank the figures leave out (server/estimate.mjs REQUIRED_INPUTS).
+const MONEY_LABELS: Record<string, string> = {
+  postage: "parcel cost",
+  packaging: "packaging cost",
+  journeyCost: "return journey cost",
+};
 
-/** When the cash comes back, from the Goals payout model. */
+/** Resale competition in words; an unknown count says so and why. */
+function CompetitionLine({ competition: c }: { competition: Competition }) {
+  if (c.activeListings === null)
+    return (
+      <p className="warn">
+        Competition not known. {c.note || "The competing listings on record are too old to count"}.
+        Without a current count no buy alert can be sent.
+      </p>
+    );
+  if (c.activeListings === 0 && c.competingListings === null)
+    return (
+      <p className="warn">
+        Competition not known: no competing listings are recorded and no asking-price lookup for this
+        barcode is on record, so nobody may have looked. Run an eBay asking-price lookup (see Sources)
+        before relying on it.
+      </p>
+    );
+  return (
+    <p>
+      {plural(c.activeListings, "active listing")} from {plural(c.sellers ?? 0, "seller")}
+      {c.activeListings === 0 && c.lookup ? " (an asking-price lookup on " + dateTime(c.lookup.fetched) + " found none)" : ""}
+      {c.lowestAsking !== null &&
+        " · lowest asking " +
+          money(c.lowestAsking) +
+          (c.lowestAskingIncludesShipping ? " including shipping" : " excluding unknown shipping")}
+      {c.note ? ". " + c.note : ""}
+    </p>
+  );
+}
+
+/** When the cash comes back, from the Goals payout model and the sales rate. */
 function PayoutPanel({ payout: p }: { payout: Payout }) {
   const g = p.goals;
   const status = p.timing.status === "late" ? "warn" : p.timing.status === "on time" ? "ok" : "";
+  const units = p.units ?? 1;
+  const cashDate = p.cashDate ?? p.cashNeededBy;
+  const last = units === 1 ? "Payout" : "Payout of the last of " + units + " units";
+  let headline: string;
+  if (!p.date) headline = "Payout date unknown. " + p.note;
+  else if (cashDate && p.timing.status === "late")
+    headline =
+      last + " expected " + dateTime(p.date) + ", " + plural(p.timing.daysLate ?? 0, "day") +
+      " after you need the cash (" + dateTime(cashDate) + ").";
+  else if (cashDate)
+    headline = last + " expected " + dateTime(p.date) + ", on or before " + dateTime(cashDate) + ", when you need the cash.";
+  else
+    headline =
+      last + " expected " + dateTime(p.date) +
+      (p.days === null ? "." : p.days <= 0 ? ", today." : ", in about " + plural(p.days, "day") + ".");
   return (
     <div className="payout">
       <h3>Time until payment</h3>
-      <p className={status}>
-        {p.cashNeededBy || p.cashNeededDays !== null
-          ? p.timing.note
-          : p.date
-            ? "Payout expected " +
-              p.date +
-              (p.days === null ? "." : p.days <= 0 ? ", today." : ", in about " + plural(p.days, "day") + ".")
-            : "Payout date unknown."}
-      </p>
+      <p className={status}>{headline}</p>
+      {cashDate && p.unitsByCashDate !== undefined && p.unitsByCashDate !== null && units > 1 && (
+        <p className={p.unitsByCashDate < units ? "warn" : "ok"}>
+          {p.unitsByCashDate} of {units} units expected to have paid out by {dateTime(cashDate)}.
+        </p>
+      )}
       <p className="muted">
-        {p.note} Assumes the trip is today ({p.start}) and each unit is listed the same day,
-        with{" "}
+        {p.date &&
+          (units === 1 ? "Assumes a sale by " : "Assumes the last unit sells by ") +
+            dateTime(p.sold) + ", posting on " + dateTime(p.dispatch) + ", delivery by " +
+            dateTime(p.delivered) + " and payout on " + dateTime(p.date) + ". "}
+        The trip is assumed to be today ({dateTime(p.start)}) and each unit listed the same day, with{" "}
         {g.daysToSell === null
           ? "days to sell unknown"
-          : plural(g.daysToSell, "day") + " to sell from the confirmed sales"}
+          : plural(g.daysToSell, "day") + " to sell one unit from the confirmed sales"}
+        {units > 1 && g.daysToSellAll != null
+          ? " and " + plural(g.daysToSellAll, "day") + " for " + (units === 2 ? "both units" : "all " + units + " units") + " at " + g.salesPerWeek + " confirmed sales a week"
+          : ""}
         , posting on{" "}
         {g.dispatchDays.length ? g.dispatchDays.map((d) => WEEKDAYS[d]).join(", ") : "no days"},{" "}
         {plural(g.deliveryDays, "day")} for delivery and {plural(g.payoutDelayDays, "day")} until
@@ -1926,6 +2212,55 @@ function PayoutPanel({ payout: p }: { payout: Payout }) {
         <a href="#Goals">Change these in Goals</a>.
       </p>
     </div>
+  );
+}
+
+/** Access needs as the Planner labels them (server/catalog.mjs accessNeeds). */
+function AccessLabels({ needs }: { needs: AccessNeed[] }) {
+  return (
+    <span className="badges access-needs">
+      {needs.map((n) => (
+        <span
+          key={n.id}
+          className={"badge access" + (n.id === "widely-accessible" ? " open" : "")}
+          title={n.detail}
+        >
+          {n.label}
+          <span className="sr-only">: {n.detail}</span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/** When the price and stock were last checked, and the main uncertainty. */
+function CheckedLine({ estimate }: { estimate: Estimate }) {
+  const c = estimate.checked;
+  if (!c && !estimate.mainUncertainty) return null;
+  const age = estimate.offer.ageDays;
+  return (
+    <p className="checked-line">
+      {c && (
+        <>
+          <b className="inline">Price checked:</b>{" "}
+          {c.price
+            ? dateTime(c.price) + (age !== null && age >= 0 ? " (" + (age === 0 ? "today" : plural(age, "day") + " ago") + ")" : "")
+            : "never"}
+          . <b className="inline">Stock checked:</b>{" "}
+          {c.stock
+            ? dateTime(c.stock) + (c.locality ? " in " + c.locality : "")
+            : c.locality
+              ? "no usable check in " + c.locality + " from the last 2 days"
+              : "not known, because no locality is entered"}
+          .{" "}
+        </>
+      )}
+      {estimate.mainUncertainty && (
+        <>
+          <b className="inline">Main uncertainty:</b> {estimate.mainUncertainty}.
+        </>
+      )}
+    </p>
   );
 }
 
@@ -1940,9 +2275,15 @@ function Result({ estimate, stale }: { estimate: Estimate; stale: boolean }) {
     costKnown: true,
     minutesKnown: true,
   };
+  const missing = estimate.missingInputs ?? [];
+  // Costs left blank: the figures count them as nothing, so they say so.
+  const leftOut = Object.keys(MONEY_LABELS)
+    .filter((k) => defaulted.has(k))
+    .map((k) => MONEY_LABELS[k]);
+  const leftOutText = leftOut.length ? " leaving out the " + listText(leftOut) + ", not entered" : "";
   // Figures that rest on a value left blank say so, so they never sit
   // beside a check that calls the value unknown without explanation.
-  const notEntered = (pence: number) => "not entered (counted as " + money(pence) + ")";
+  const notEntered = () => "not entered, so left out of these figures";
   const category = estimate.category;
   return (
     <section className={"result" + (stale ? " stale" : "")} aria-live="polite" aria-busy={stale}>
@@ -1952,10 +2293,20 @@ function Result({ estimate, stale }: { estimate: Estimate; stale: boolean }) {
           Updating for your latest changes. The figures below are for your previous inputs.
         </p>
       )}
+      {estimate.access && <AccessLabels needs={estimate.access.needs} />}
+      <CheckedLine estimate={estimate} />
+      {missing.length > 0 && (
+        <p className="notice warn">
+          Not entered: {listText(missing)}. A blank is never counted as zero, so profit and
+          earnings per hour cannot be judged and no buy alert can be sent. Enter 0 only if it
+          truly costs nothing or takes no time.
+        </p>
+      )}
       <TierCard
         opportunity={estimate.opportunity}
         rules={estimate.thresholds.rules}
-        beforeTravel={!journey.costKnown}
+        leftOut={leftOut}
+        demand={estimate.demand ?? null}
       />
       {!e && (
         <p className="notice">
@@ -1969,27 +2320,30 @@ function Result({ estimate, stale }: { estimate: Estimate; stale: boolean }) {
           <p className="muted">
             Based on {s.count} confirmed sale{s.count === 1 ? "" : "s"} from{" "}
             {s.independent} independent seller{s.independent === 1 ? "" : "s"}
-            {s.oldest ? ", sold " + s.oldest + " to " + s.newest : ""}.
+            {s.oldest ? ", sold " + between(s) : ""}.
             {s.withoutSeller ? " " + noSellerNote(s.withoutSeller) + "." : ""} Lower median
             sale {cash(s.lowerMedian)} including buyer postage. Stock costed at{" "}
-            {money(estimate.unitCost)} per unit.
+            {money(estimate.unitCost)} per unit
+            {category ? " under the " + category.name.toLowerCase() + " rules" : ""}.
           </p>
           <dl className="figures">
             <dt>Cash required before payout</dt>
             <dd>
               <b>{money(e.cashRequired)}</b>
-              {!journey.costKnown ? " plus travel, which is not entered" : ""}
+              {leftOut.length ? " plus the " + listText(leftOut) + ", not entered" : ""}
             </dd>
             <dt>Stock ({e.units} units)</dt>
             <dd>{money(e.costs.stock)}</dd>
             <dt>Packaging</dt>
-            <dd>{defaulted.has("packaging") ? notEntered(e.costs.packaging) : money(e.costs.packaging)}</dd>
+            <dd className={defaulted.has("packaging") ? "warn" : ""}>
+              {defaulted.has("packaging") ? notEntered() : money(e.costs.packaging)}
+            </dd>
             <dt>Parcel costs</dt>
             <dd className={e.costs.postage > 0 ? "" : "warn"}>
               {e.costs.postage > 0
                 ? money(e.costs.postage)
                 : defaulted.has("postage")
-                  ? notEntered(0)
+                  ? notEntered()
                   : money(0) + ", treated as unknown: enter what you pay to post one unit"}
             </dd>
             <dt>Marketplace fees</dt>
@@ -2005,24 +2359,25 @@ function Result({ estimate, stale }: { estimate: Estimate; stale: boolean }) {
             <dd className={journey.costKnown ? "" : "warn"}>
               {journey.costKnown
                 ? money(e.costs.travel) + " (" + money(e.journeyPerUnit) + " per unit)"
-                : notEntered(0)}
+                : notEntered()}
             </dd>
             <dt>Potential proceeds (not realised)</dt>
             <dd>{money(e.proceeds)}</dd>
             <dt>Contribution</dt>
-            <dd className={journey.costKnown && e.contribution > 0 ? "ok" : "warn"}>
+            <dd className={!leftOut.length && e.contribution > 0 ? "ok" : "warn"}>
               <b>{money(e.contribution)}</b>
-              {journey.costKnown ? "" : " before travel, which is not entered"}
+              {leftOutText}
             </dd>
             <dt>Active hours</dt>
             <dd>
               {hours(e.activeMinutes)}
-              {journey.minutesKnown ? "" : ", leaving out the journey, which is not entered"}
+              {!journey.minutesKnown ? ", leaving out the journey, which is not entered" : ""}
+              {defaulted.has("handlingMinutes") ? ", leaving out handling, which is not entered" : ""}
             </dd>
             <dt>Earnings per active hour</dt>
-            <dd className={journey.known ? "" : "warn"}>
-              {!journey.known
-                ? "not known until the journey cost and time are entered"
+            <dd className={missing.length ? "warn" : ""}>
+              {missing.length
+                ? "not known until the " + listText(missing) + " " + (missing.length === 1 ? "is" : "are") + " entered"
                 : e.hourly === null
                   ? "not known"
                   : money(e.hourly)}
@@ -2030,12 +2385,12 @@ function Result({ estimate, stale }: { estimate: Estimate; stale: boolean }) {
             <dt>Loss if nothing sells</dt>
             <dd className="warn">
               {money(e.unsoldLoss)}
-              {journey.costKnown ? "" : " plus travel"}
+              {leftOut.length ? " plus the " + listText(leftOut) : ""}
             </dd>
             <dt>Break-even sale price</dt>
             <dd>
               {cash(e.breakEvenSale)}
-              {journey.costKnown ? "" : " before travel"}
+              {leftOut.length ? " before the " + listText(leftOut) : ""}
             </dd>
             <dt>Sample size</dt>
             <dd>{s.count}</dd>
@@ -2045,7 +2400,7 @@ function Result({ estimate, stale }: { estimate: Estimate; stale: boolean }) {
               {s.withoutSeller ? <span className="note warn">{noSellerNote(s.withoutSeller)}</span> : null}
             </dd>
             <dt>Days to sell</dt>
-            <dd>{s.daysToSell === null ? "not known" : s.daysToSell + " days"}</dd>
+            <dd>{s.daysToSell === null ? "not known" : s.daysToSell + " days for one unit"}</dd>
           </dl>
         </>
       )}
@@ -2149,7 +2504,7 @@ function StockCheckForm({
             latest.locality +
             " on " +
             dateTime(latest.checked_at) +
-            " UTC."
+            "."
           : " No usable check yet."}
       </p>
       <form
@@ -2228,7 +2583,7 @@ function StockCheckForm({
           <table>
             <thead>
               <tr>
-                <th>Checked (UTC)</th>
+                <th>Checked</th>
                 <th>Retailer</th>
                 <th>Locality</th>
                 <th>Method</th>

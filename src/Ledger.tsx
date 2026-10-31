@@ -140,7 +140,10 @@ type Summary = {
   cashTiedUp: number;
   unsoldUnits: number;
   realisedMinutes: number;
+  // Earnings per hour on the trips with work time this month only; null
+  // when none of them has money in or out this month.
   realisedHourly: number | null;
+  hourly?: { trips: number; minutes: number; earnings: number; leftOutTrips: number; leftOutEarnings: number };
   payouts: number;
   verifiedPayouts: number;
   verifiedEarnings: number;
@@ -223,6 +226,11 @@ const size = (bytes: number) =>
     ? Math.max(1, Math.round(bytes / 1024)).toLocaleString("en-GB") + " KB"
     : (bytes / 1024 / 1024).toLocaleString("en-GB", { maximumFractionDigits: 1 }) + " MB";
 const plural = (n: number, word: string) => n.toLocaleString("en-GB") + " " + word + (n === 1 ? "" : "s");
+// The UK calendar day of a stored timestamp, such as when a trip was closed.
+const ukDay = (iso: string | null) =>
+  iso
+    ? new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "Europe/London" })
+    : "";
 const minutesText = (m: number | null) => (m === null ? "none recorded" : hours(m));
 
 export default function Ledger() {
@@ -369,11 +377,7 @@ function SummaryPanel({ version }: { version: number }) {
             <Stat
               label="Realised hourly"
               value={data.realisedHourly === null ? BLANK : money(data.realisedHourly)}
-              note={
-                data.realisedMinutes
-                  ? "Per hour over " + hours(data.realisedMinutes) + " of recorded work this month."
-                  : "No work time recorded this month."
-              }
+              note={hourlyNote(data)}
             />
           </div>
           <p className="muted">
@@ -383,7 +387,8 @@ function SummaryPanel({ version }: { version: number }) {
             payouts, potential proceeds, cash tied up and unsold units describe open trips as they
             stand today, whatever the month. Potential proceeds count a prediction only when it came
             from live evidence and stock has been bought, scaled to the units bought. Household
-            savings are net of those trips&apos; own costs.{" "}
+            savings are net of those trips&apos; own costs. Realised hourly counts only the trips with
+            work time recorded this month, so money is never divided by another trip&apos;s hours.{" "}
             {data.verifiedTrips + data.unverifiedTrips > 0 &&
               `This month: ${data.verifiedTrips} verified and ${data.unverifiedTrips} unverified resale trips. Verified earnings: ${signed(data.verifiedEarnings)}.`}
           </p>
@@ -391,6 +396,27 @@ function SummaryPanel({ version }: { version: number }) {
       )}
     </article>
   );
+}
+
+/**
+ * What the month's hourly figure covers: only trips with work time this
+ * month, and how much realised money from other trips was left out.
+ */
+function hourlyNote(data: Summary) {
+  const h = data.hourly;
+  if (!h)
+    return data.realisedMinutes ? "Per hour over " + hours(data.realisedMinutes) + " of recorded work this month." : "No work time recorded this month.";
+  const left =
+    h.leftOutTrips > 0
+      ? " " +
+        (h.leftOutEarnings < 0 ? "A net loss of " + money(-h.leftOutEarnings) : money(h.leftOutEarnings)) +
+        " from " + plural(h.leftOutTrips, "trip") + " without work time is not included."
+      : "";
+  if (data.realisedHourly !== null) return "Per hour over " + hours(h.minutes) + " on " + plural(h.trips, "trip") + "." + left;
+  if (h.trips > 0)
+    return "Not known: the " + hours(h.minutes) + " of work this month is on trips with no money in or out this month." + left;
+  if (h.leftOutTrips > 0) return "Not known: no trip with money this month has work time recorded." + left;
+  return "No work time recorded this month.";
 }
 
 /** Names the open trips left out of potential proceeds, if any. */
@@ -637,7 +663,7 @@ function TripDetail({ id, version, onChanged }: { id: number; version: number; o
         <span className="badge">{trip.kind === "household" ? "Household" : "Resale"}</span>
         <PredictionBadge basis={trip.predictionBasis} />
         <span className="badge">
-          {trip.status === "open" ? "Open" : "Closed " + (trip.closed_at || "").slice(0, 10)}
+          {trip.status === "open" ? "Open" : "Closed " + ukDay(trip.closed_at)}
         </span>
         <VerifiedBadge verified={r.verified} kind={trip.kind} legacy={trip.legacy} />
         {trip.reference && <span className="muted">Reference: {trip.reference}</span>}
@@ -772,6 +798,10 @@ const CHECK_LABEL: [keyof Reconciliation["checklist"], string][] = [
 
 function Checklist({ r }: { r: Reconciliation }) {
   const c = r.checklist;
+  const missing = c.required.filter((key) => c[key as keyof Reconciliation["checklist"]] !== "present");
+  // Work time is needed for earnings per hour, not to prove a trade, so a
+  // trip missing only its work time does not say "Records missing".
+  const recordsMissing = missing.some((key) => key !== "work");
   return (
     <div>
       <b>
@@ -779,7 +809,9 @@ function Checklist({ r }: { r: Reconciliation }) {
         {c.reconciled ? (
           <span className="badge ok">Complete</span>
         ) : (
-          <span className="badge warn">{c.complete ? "Check discrepancies" : "Records missing"}</span>
+          <span className="badge warn">
+            {recordsMissing ? "Records missing" : r.discrepancies.length > 0 ? "Check discrepancies" : "Work time missing"}
+          </span>
         )}
       </b>
       <ul className="checks">
@@ -809,17 +841,27 @@ function Checklist({ r }: { r: Reconciliation }) {
 }
 
 function Verification({ r }: { r: Reconciliation }) {
+  const noWork = r.checklist.work !== "present";
   return (
     <div>
       <b>
         Verification{" "}
         {r.verified ? <span className="badge ok">Verified</span> : <span className="badge warn">Unverified</span>}
       </b>
+      {r.verified && (
+        <p>
+          Verified: the purchase receipt and payout proofs are attached and the amounts, units and
+          dates agree.
+          {noWork && " Work time is not recorded, so earnings per hour for this trip are not known."}
+        </p>
+      )}
       <p className="muted">
         A trade is verified only when every purchase receipt and every payout has its own proof
-        attached to that entry, a sold listing is recorded and the records reconcile with nothing
-        left to check. Whole-trip proofs do not count. Unverified figures still count in your
-        totals, but the summary and measures say how much is verified.
+        attached to that entry, a sold listing is recorded, and the amounts, units and dates agree
+        with each other. One document proves one purchase or one payout: a file that is already the
+        proof for another entry, on this trip or any other, does not count again. Whole-trip proofs
+        do not count. Work time is not needed to verify a trade. Unverified figures still count in
+        your totals, but the summary and measures say how much is verified.
       </p>
       {!r.verified && (
         <>
@@ -1118,6 +1160,8 @@ function Proofs({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // Errors from moving or removing a stored proof, shown next to the list.
+  const [listError, setListError] = useState("");
   const [notice, setNotice] = useState("");
   // null until the member picks an entry themselves; the suggestion follows
   // new entries until then.
@@ -1151,6 +1195,7 @@ function Proofs({
     if (file.size > MAX_PROOF_BYTES) return setError("Proof files must be 5 MB or smaller.");
     setBusy(true);
     setError("");
+    setListError("");
     setNotice("");
     try {
       await api("ledger/trips/" + trip.id + "/proofs", {
@@ -1171,13 +1216,14 @@ function Proofs({
 
   async function relink(proof: Proof, value: string) {
     setError("");
+    setListError("");
     setNotice("");
     try {
       await api("ledger/trips/" + trip.id + "/proofs/" + proof.id, { entryId: value ? Number(value) : null }, "PATCH");
       setNotice('"' + proof.label + '" now supports ' + (value ? entryName.get(Number(value)) : "the whole trip") + ".");
       onSaved();
     } catch (err) {
-      setError((err as Error).message);
+      setListError('"' + proof.label + '" was not moved. ' + (err as Error).message);
     }
   }
 
@@ -1185,6 +1231,7 @@ function Proofs({
     if (!window.confirm('Remove the proof "' + proof.label + '"? The stored file is deleted unless another proof uses the same file.'))
       return;
     setError("");
+    setListError("");
     setNotice("");
     try {
       const result = await api<{ removed: { file: string } }>("ledger/trips/" + trip.id + "/proofs/" + proof.id, {}, "DELETE");
@@ -1199,7 +1246,7 @@ function Proofs({
       );
       onSaved();
     } catch (err) {
-      setError((err as Error).message);
+      setListError((err as Error).message);
     }
   }
 
@@ -1213,7 +1260,7 @@ function Proofs({
     return proofed.includes(p.entry_id) ? (
       <span className="ok">Counts towards verification</span>
     ) : (
-      <span className="warn">Does not count: the same file is attached to another receipt or payout</span>
+      <span className="warn">Does not count: the same file is also attached to another receipt or payout, on this trip or another</span>
     );
   };
 
@@ -1258,6 +1305,7 @@ function Proofs({
           ))}
         </ul>
       )}
+      {listError && <p role="alert">{listError}</p>}
       {notice && <p role="status">{notice}</p>}
       <form className="ledger-form" onSubmit={submit}>
         <label>
@@ -1282,7 +1330,7 @@ function Proofs({
         {resale && (
           <p className={"ledger-form-wide " + (supports === "" ? "warn" : "muted")}>
             {supports !== ""
-              ? "Attach each document to the entry it records. Only proofs on the purchase receipt and payout entries count towards verification, one file per entry. Whole-trip proofs do not count."
+              ? "Attach each document to the entry it records. Only proofs on the purchase receipt and payout entries count towards verification, one file per entry. A file that is already the proof for another entry, on any trip, is refused. Whole-trip proofs do not count."
               : entries.length
                 ? "A whole-trip proof is kept with the trip but does not count towards verification. Choose the purchase receipt or payout entry this document records."
                 : "A whole-trip proof is kept with the trip but does not count towards verification. Add the purchase receipt or payout entry first, then attach its document to that entry."}

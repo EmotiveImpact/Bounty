@@ -12,7 +12,9 @@ import {
   deleteTarget,
   getGoals,
   goalTargets,
+  lastSaleDays,
   payoutDate,
+  readGoals,
   readTarget,
   saveGoals,
   schema,
@@ -229,15 +231,19 @@ test("baskets show the downside if nothing sells and if half sells", () => {
   }
 });
 
-test("a basket that loses money is never recommended", () => {
-  // A £300 fare is more than ten units can earn, so every basket loses money.
+test("a basket that loses money is never shown or recommended", () => {
+  // A £300 fare is more than ten units can earn: every item's share of the
+  // journey takes it under £5 a unit, so no basket is shown and each item is
+  // listed as rejected with the reason.
   const p = profile({ transport: "Public transport", fare: 30000, budget: 100000 });
   const r = basketOptions([A, B], p, goals(), { now: NOW });
-  assert.ok(r.baskets.length > 0);
-  assert.ok(r.baskets.every((b) => b.economics.contribution <= 0));
+  assert.deepEqual(r.baskets, []);
+  assert.equal(r.bestSingle, null);
   assert.equal(r.recommended, null);
-  assert.ok(r.baskets.every((b) => !b.recommended && b.reasons.includes("Loses money")));
-  assert.equal(r.bestSingle.recommended, false);
+  const rejected = r.excluded.filter((e) => e.rejected);
+  assert.deepEqual(rejected.map((e) => e.sku).sort(), ["a", "b"]);
+  for (const e of rejected)
+    assert.match(e.reason, /^Profit per unit of at most -?£[\d.]+ is below £5\.00.*\(with its share of the journey, in every basket that fits\)$/);
 });
 
 test("the sample basket recommends the trial batch of jackets and stays sample data", () => {
@@ -264,17 +270,61 @@ test("the sample basket recommends the trial batch of jackets and stays sample d
   for (const it of pick.items) assert.equal(it.opportunity.meetsThresholds, false);
 });
 
-test("offers that fail a hard filter never enter a basket", () => {
+test("offers that fail any buying threshold never enter a basket", () => {
   const r = basketOptions(offers, { ...defaults, budget: 100000 }, goals(), { now: NOW });
   const rejected = Object.fromEntries(r.excluded.filter((e) => e.rejected).map((e) => [e.sku, e.reason]));
-  assert.deepEqual(Object.keys(rejected).sort(), ["baby", "pot"]);
+  assert.deepEqual(Object.keys(rejected).sort(), ["baby", "knit", "pot"]);
   assert.equal(rejected.baby, "Purchase price outside £5 to £50 per unit");
   assert.equal(rejected.pot, "Unit weighs 2 kg or more");
+  // The jumper nets £2.42 a unit before any travel, so no basket can lift it to £5.
+  assert.equal(rejected.knit, "Profit per unit of £2.42 is below £5.00");
   for (const b of [...r.baskets, r.bestSingle])
-    assert.ok(b.items.every((it) => it.sku !== "baby" && it.sku !== "pot"), b.id);
-  // A member's stricter price floor leaves the jumper out as well.
+    assert.ok(b.items.every((it) => !["baby", "pot", "knit"].includes(it.sku)), b.id);
+  // By car the reason says the journey would only lower it further.
+  const car = basketOptions(offers, { ...defaults, transport: "Car" }, goals(), { now: NOW });
+  assert.equal(
+    car.excluded.find((e) => e.sku === "knit").reason,
+    "Profit per unit of £2.42 is below £5.00 (even before its share of the journey)",
+  );
+  // A member's stricter price floor leaves the jumper out for its price too.
   const strict = basketOptions(offers, { ...defaults, rules: { minUnitPrice: 700 } }, goals(), { now: NOW });
-  assert.ok(strict.excluded.some((e) => e.sku === "knit" && e.rejected));
+  assert.match(strict.excluded.find((e) => e.sku === "knit" && e.rejected).reason, /Purchase price outside £7 to £50/);
+  // Stricter profit or return rules leave out the jacket as well, so nothing is shown.
+  for (const rules of [{ minUnitProfit: 800 }, { minReturn: 0.75 }]) {
+    const tight = basketOptions(offers, { ...defaults, rules }, goals(), { now: NOW });
+    assert.deepEqual(tight.baskets, [], JSON.stringify(rules));
+    assert.equal(tight.recommended, null);
+    assert.ok(tight.excluded.some((e) => e.sku === "jacket" && e.rejected), JSON.stringify(rules));
+  }
+});
+
+test("every item in every basket shown clears the thresholds with its share of the journey", () => {
+  // F's shop is 20 miles away by car: one unit carries an £18 journey and
+  // loses money, three units carry £6 each and keep £8.20 a unit.
+  const F = item({ sku: "f", name: "Item F", shop: "Far shop", miles: 20 });
+  const p = profile({ transport: "Car", perMile: 45, budget: 100000 });
+  const r = basketOptions([A, F], p, goals(), { now: NOW });
+  assert.ok(r.baskets.length > 0);
+  for (const b of [...r.baskets, r.bestSingle])
+    for (const it of b.items) {
+      assert.equal(it.thresholds.ok, true, b.id + " " + it.sku + " " + it.thresholds.failures.join("; "));
+      assert.ok(it.unitProfit >= 500, b.id);
+    }
+  assert.ok(!r.baskets.some((b) => b.id === "f:1"), "a lone far unit is never shown");
+  // A shop so far that every basket leaves the item under £5 a unit is rejected with the reason.
+  const G = item({ sku: "g", name: "Item G", shop: "Very far shop", miles: 40 });
+  const far = basketOptions([G], p, goals(), { now: NOW });
+  assert.deepEqual(far.baskets, []);
+  assert.deepEqual(far.excluded, [
+    {
+      sku: "g",
+      name: "Item G",
+      shop: "Very far shop",
+      reason:
+        "Profit per unit of at most £2.20 is below £5.00; Return of at most 22% is below 35% of the purchase price (with its share of the journey, in every basket that fits)",
+      rejected: true,
+    },
+  ]);
 });
 
 test("basket items respect the sales rate after competing listings", () => {
@@ -307,16 +357,24 @@ test("a basket below the hourly target is never recommended, even when it ranks 
   assert.deepEqual(pick.reasons, []);
 });
 
-test("a basket holding an item under the buying thresholds is never recommended", () => {
-  // Item C nets £4.36 a unit: positive, so it adds contribution, but under £5.
+test("an item under the buying thresholds is never in any basket, only in the rejected list", () => {
+  // Item C nets £4.36 a unit: positive, so it would add contribution, but under £5.
   const C = item({ sku: "c", name: "Item C", shop: "Shop A", sales: [1800] });
   const r = basketOptions([A, C], profile({ budget: 100000 }), goals(), { now: NOW });
-  const first = r.baskets[0];
-  assert.ok(first.items.some((it) => it.sku === "c"), "the top basket includes C");
-  assert.equal(first.recommended, false);
-  assert.ok(first.reasons.some((x) => x.startsWith("Item C: Profit per unit of £4.36 is below £5.00")));
+  for (const b of [...r.baskets, r.bestSingle]) assert.ok(b.items.every((it) => it.sku !== "c"), b.id);
+  assert.deepEqual(r.excluded, [
+    { sku: "c", name: "Item C", shop: "Shop A", reason: "Profit per unit of £4.36 is below £5.00", rejected: true },
+  ]);
   assert.equal(r.recommended, "a:3");
-  assert.ok(r.baskets.filter((b) => b.recommended).every((b) => b.items.every((it) => it.sku === "a")));
+  // A return under 35% is rejected the same way: £30 a unit making £8.14 is 27.1%.
+  const D = item({ sku: "d", name: "Item D", buy: 3000, sales: [4700] });
+  const thin = basketOptions([D], profile({ budget: 100000 }), goals(), { now: NOW });
+  assert.deepEqual(thin.baskets, []);
+  assert.equal(thin.excluded[0].reason, "Return of 27.1% is below 35% of the purchase price");
+  // A blank cost is never zero: the item is rejected until it is entered.
+  const blank = basketOptions([item({ pack: undefined })], profile({ budget: 100000 }), goals(), { now: NOW });
+  assert.deepEqual(blank.baskets, []);
+  assert.equal(blank.excluded[0].reason, "Profit per unit cannot be checked until these are entered: packaging cost");
 });
 
 test("ranking counts the journey: a far shop loses to a near one with a smaller margin", () => {
@@ -395,6 +453,8 @@ test("the recommended basket is positive, meets the targets and pays out on time
   assert.equal(late.timing.cash.status, "late");
   assert.equal(late.recommended, null);
   assert.ok(late.baskets.every((b) => b.reasons.some((r) => r.includes("after you need the cash"))));
+  // Reasons are plain words with no raw dates.
+  for (const b of late.baskets) for (const r of b.reasons) assert.doesNotMatch(r, /\d{4}-\d{2}-\d{2}/, r);
   // With a cash date but no dispatch days the payout is unknown, so nothing is recommended.
   const unknown = basketOptions([A, B], p, goals({ cashNeededBy: "2026-12-31", dispatchDays: [] }), { now: NOW });
   assert.equal(unknown.timing.payout.date, null);
@@ -427,6 +487,24 @@ test("plan, goals and baskets routes validate their input", async () => {
     assert.ok(plan.body.trips.every((t) => t.timing && "payoutDays" in t.timing), "payout timing from the goals");
     assert.ok(plan.body.trips.every((t) => t.compare.heading === "What changes if I drive?"));
     assert.deepEqual(plan.body.rules.ignored.map((i) => i.key), ["minUnitPrice"]);
+    // Only offers inside every buying threshold are shortlisted; the jumper
+    // (£2.42 a unit) is listed as rejected with its reason.
+    assert.deepEqual(plan.body.trips.map((t) => t.sku), ["jacket"]);
+    assert.deepEqual(plan.body.rejected.find((r) => r.sku === "knit").reasons, ["Profit per unit of £2.42 is below £5.00"]);
+    // Each trip's payout allows for selling the units it buys.
+    const jacketTrip = plan.body.trips[0];
+    assert.equal(jacketTrip.timing.units, jacketTrip.units);
+    assert.equal(jacketTrip.timing.daysToSellOneUnit, 7);
+    // A fare left blank (null) is "not entered", for walkers and bus users alike.
+    for (const transport of ["Walk", "Public transport"]) {
+      const blank = await api.call("POST", "/api/plan", { ...defaults, transport, fare: null });
+      assert.equal(blank.status, 200, transport);
+      assert.equal(blank.body.trips.length, 1, transport);
+    }
+    const bus = await api.call("POST", "/api/baskets", { profile: { ...defaults, transport: "Public transport", fare: null } });
+    assert.equal(bus.status, 200);
+    assert.ok(bus.body.baskets.length > 0, "baskets still shown, none recommended");
+    assert.equal(bus.body.recommended, null);
     for (const bad of [
       { ...defaults, transport: "Rocket" },
       { ...defaults, quantity: 0 },
@@ -484,6 +562,106 @@ test("plan, goals and baskets routes validate their input", async () => {
     );
   } finally {
     await api.close();
+  }
+});
+
+test("basket payouts wait for the last unit to sell at each item's sales rate", () => {
+  // Item S sells 1.5 a week: three units take 14 days, one unit the Goals' 7.
+  const S = item({ sku: "s", name: "Item S", salesPerWeek: 1.5, competingListings: 0 });
+  assert.equal(lastSaleDays(goals(), [{ units: 3, salesPerWeek: 1.5 }]), 14);
+  assert.equal(lastSaleDays(goals(), [{ units: 1, salesPerWeek: 1.5 }, { units: 2, salesPerWeek: 10 }]), 7);
+  assert.equal(lastSaleDays(goals(), [{ units: 2, salesPerWeek: null }]), null);
+  const p = profile({ budget: 100000 });
+  const r = basketOptions([S], p, goals(), { now: NOW });
+  const three = r.baskets.find((b) => b.id === "s:3");
+  const one = r.baskets.find((b) => b.id === "s:1");
+  assert.equal(three.timing.daysToSell, 14);
+  assert.equal(three.timing.payout.date, "2026-11-20");
+  assert.equal(one.timing.payout.date, "2026-11-13");
+  assert.equal(r.timing.payout.date, "2026-11-13", "the top-level payout is for one unit");
+  // Needing the cash on 16 November: three units are late, so a smaller basket is recommended.
+  const tight = basketOptions([S], p, goals({ cashNeededBy: "2026-11-16" }), { now: NOW });
+  const late = tight.baskets.find((b) => b.id === "s:3");
+  assert.equal(late.recommended, false);
+  assert.ok(late.reasons.includes("Payout expected 4 days after you need the cash"));
+  assert.notEqual(tight.recommended, null);
+  assert.notEqual(tight.recommended, "s:3");
+  const pick = tight.baskets.find((b) => b.recommended) || tight.bestSingle;
+  assert.equal(pick.timing.cash.status, "on time");
+});
+
+test("today is the London date for payouts, cash dates and goal deadlines", () => {
+  // 00:30 on Saturday 4 July 2026 in London is 23:30 on Friday 3 July UTC.
+  const lateNight = "2026-07-03T23:30:00Z";
+  const g = goals({ cashNeededBy: "2026-07-16" });
+  const t = tripTiming(g, { now: lateNight });
+  assert.equal(t.start, "2026-07-04");
+  // Sold Saturday 11 July, posted Monday 13, paid out Friday 17: a day late.
+  assert.equal(t.payout.date, "2026-07-17");
+  assert.equal(t.cash.status, "late");
+  assert.equal(t.cashNeededDays, 12);
+  // An hour earlier it is still Friday 3 July in London, and the payout is on time.
+  const evening = tripTiming(g, { now: "2026-07-03T22:30:00Z" });
+  assert.equal(evening.start, "2026-07-03");
+  assert.equal(evening.cash.status, "on time");
+  // Yesterday in London cannot be saved as the cash date, though it is still today in UTC.
+  const db = ledgerDb();
+  assert.throws(
+    () => saveGoals(db, { ...validGoals, cashNeededBy: "2026-07-03" }, { now: lateNight }),
+    (e) => e instanceof HttpError && e.message === "The date you need the cash back must be today or later.",
+  );
+  assert.equal(saveGoals(db, { ...validGoals, cashNeededBy: "2026-07-04" }, { now: lateNight }).cashNeededBy, "2026-07-04");
+  // Named goals: the deadline and the days left count from the London date.
+  assert.throws(() => addTarget(db, { name: "Fuel", amount: 100, deadline: "2026-07-03" }, { now: lateNight }), HttpError);
+  addTarget(db, { name: "Fuel", amount: 100, deadline: "2026-07-10" }, { now: lateNight });
+  const [goal] = goalTargets(db, { now: lateNight }).targets;
+  assert.equal(goal.start, "2026-07-04");
+  assert.equal(goal.daysLeft, 6);
+});
+
+test("goal errors are plain sentences with no raw field names", () => {
+  const today = "2026-10-31";
+  const message = (fn) => {
+    try {
+      fn();
+    } catch (e) {
+      assert.ok(e instanceof HttpError);
+      return e.message;
+    }
+    assert.fail("accepted");
+  };
+  const raw = /cashNeededBy|dispatchDays|targetType|monthlyTarget|storageUnits|daysToSell|deliveryDays|payoutDelayDays|\(pence\)|YYYY/;
+  assert.equal(
+    message(() => readGoals({ ...validGoals, cashNeededBy: "2026-10-30" }, { today })),
+    "The date you need the cash back must be today or later.",
+  );
+  for (const [field, value] of [
+    ["targetType", "profit"],
+    ["monthlyTarget", -1],
+    ["dispatchDays", [7]],
+    ["dispatchDays", [1, 1]],
+    ["dispatchDays", "1,2"],
+    ["storageUnits", 1.5],
+    ["cashNeededBy", "2026-02-30"],
+    ["daysToSell", -1],
+    ["deliveryDays", "2"],
+    ["payoutDelayDays", undefined],
+  ]) {
+    const text = message(() => readGoals({ ...validGoals, [field]: value }, { today }));
+    assert.doesNotMatch(text, raw, text);
+    assert.match(text, /^[A-Z].*\.$/, text);
+  }
+  for (const bad of [
+    { amount: 100 },
+    { name: "Fuel", amount: 0 },
+    { name: "Fuel", amount: 100, deadline: "2026-10-30" },
+    { name: "Fuel", amount: 100, deadline: "2026-02-30" },
+    { name: "Fuel", amount: 100, start: "2026-11-01" },
+    { name: "Fuel", amount: 100, start: "1999-12-31" },
+  ]) {
+    const text = message(() => readTarget(bad, { today }));
+    assert.doesNotMatch(text, /^(name|amount|deadline|start)\b|\(pence\)|YYYY|whole number between/, text);
+    assert.match(text, /^[A-Z].*\.$/, text);
   }
 });
 

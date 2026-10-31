@@ -22,6 +22,9 @@ export function ageDays(date, now) {
 //  match               "exact" | "research" | "none"
 //  contribution        trip contribution in pence (all units)
 //  hourly, hourlyFloor pence per active hour
+//  missingInputs       names of required inputs left blank (for example
+//                      "packaging", "handling time"); must be an empty
+//                      array. A blank cost or time is never zero
 //  journeyKnown        true when the return journey cost and time were
 //                      entered (0 counts only when entered, for example
 //                      walking); a blank journey is never free and instant
@@ -49,6 +52,9 @@ export function ageDays(date, now) {
 //  displayPermitted    licence or programme permits showing this offer
 //  meetsThresholds     classifyOpportunity(...).meetsThresholds
 //  units, trialUnits   units planned and the trial batch size (default 3)
+//  demandUnits         units the evidence supports selling within the sell
+//                      window (opportunity.demandUnits); null when unknown
+//  sellWindowWeeks     the window demandUnits was worked out for
 //  provenItem          true when a verified trade exists for the item
 export function evaluateAlert(input = {}, rules = ALERT_RULES) {
   const checks = [];
@@ -85,6 +91,14 @@ export function evaluateAlert(input = {}, rules = ALERT_RULES) {
       input.hourly >= input.hourlyFloor,
     "Meets the hourly floor",
     "Below the hourly floor or working time unknown",
+  );
+  add(
+    "inputs-entered",
+    Array.isArray(input.missingInputs) && input.missingInputs.length === 0,
+    "Every cost and time entered",
+    Array.isArray(input.missingInputs)
+      ? "Not entered: " + input.missingInputs.join(", ") + ". A blank is never counted as zero"
+      : "Required costs and times were not checked",
   );
   add(
     "journey",
@@ -184,6 +198,19 @@ export function evaluateAlert(input = {}, rules = ALERT_RULES) {
       (input.units <= trialUnits || input.provenItem === true),
     "Within the trial batch size",
     "More than a trial batch of " + trialUnits + " units for an unproven item",
+  );
+  // Alerts are rationed by demand: a trip may not buy more units than the
+  // evidence supports selling within the sell window.
+  const weeks = Number.isFinite(input.sellWindowWeeks) ? input.sellWindowWeeks : 2;
+  const demandKnown = Number.isInteger(input.demandUnits) && input.demandUnits >= 0;
+  add(
+    "demand",
+    demandKnown && Number.isInteger(input.units) && input.units <= input.demandUnits,
+    "Sales rate supports these units within " + weeks + " weeks",
+    !demandKnown
+      ? "Sales rate or competing listings unknown, so demand for these units is not shown"
+      : "Sales support about " + input.demandUnits + " unit" + (input.demandUnits === 1 ? "" : "s") +
+          " within " + weeks + " weeks after competing listings, fewer than the " + input.units + " planned",
   );
   return {
     eligible: checks.every((c) => c.ok),

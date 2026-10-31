@@ -4,6 +4,7 @@ import "./style.css";
 import Planner from "./Planner";
 import Goals from "./Goals";
 import Research from "./Research";
+import { clearResearchDraft } from "./ResearchCalculator";
 import Bounties from "./Bounties";
 import Ledger from "./Ledger";
 import Sources from "./Sources";
@@ -55,14 +56,19 @@ function tabFromHash(): Tab | null {
   return Object.hasOwn(TABS, hash) ? (hash as Tab) : null;
 }
 
-// Keeps a failure in one tab from blanking the whole page.
+// Keeps a failure in one tab from blanking the whole page. onError lets a
+// tab forget state it saved for the session (the Research draft), so a
+// reload starts it afresh instead of failing the same way again.
 class TabBoundary extends React.Component<
-  { children: React.ReactNode },
+  { children: React.ReactNode; onError?: () => void },
   { error: string | null }
 > {
   state = { error: null as string | null };
   static getDerivedStateFromError(error: unknown) {
     return { error: error instanceof Error ? error.message : String(error) };
+  }
+  componentDidCatch() {
+    this.props.onError?.();
   }
   render() {
     if (this.state.error)
@@ -74,6 +80,9 @@ class TabBoundary extends React.Component<
     return this.props.children;
   }
 }
+
+// Tabs that keep a session draft to forget when they fail.
+const ON_ERROR: Partial<Record<string, () => void>> = { Research: clearResearchDraft };
 
 function App() {
   const [tab, setTab] = useState<Tab>(() => tabFromHash() ?? "Planner");
@@ -111,7 +120,7 @@ function App() {
             </button>
           ))}
         </nav>
-        <TabBoundary key={tab}>
+        <TabBoundary key={tab} onError={ON_ERROR[tab]}>
           <View />
         </TabBoundary>
       </main>

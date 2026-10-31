@@ -24,12 +24,13 @@ const hostHeader = (value) => {
   const match = /^(\[[0-9a-f:.]+\]|[^:[\]]+)(?::\d{1,5})?$/.exec(String(value).trim().toLowerCase());
   return match ? match[1] : "";
 };
-const hostname = (value) => {
-  try {
-    return new URL("http://" + value).hostname;
-  } catch {
-    return "";
-  }
+// The host of an Origin header (scheme://host[:port], nothing else), parsed
+// the same strict way, so "null" and lookalikes are never local.
+const originHost = (value) => {
+  const match = /^[a-z][a-z0-9+.-]*:\/\/(\[[0-9a-f:.]+\]|[^:/[\]]+)(?::\d{1,5})?$/.exec(
+    String(value).trim().toLowerCase(),
+  );
+  return match ? match[1] : "";
 };
 
 export function createApi(db, { modules = routeModules } = {}) {
@@ -81,7 +82,7 @@ export function createApi(db, { modules = routeModules } = {}) {
       const method = req.method || "GET";
       if (method !== "GET" && method !== "HEAD") {
         const origin = req.headers.origin;
-        if (origin && !LOCAL_HOSTS.has(hostname(origin.replace(/^\w+:\/\//, ""))))
+        if (origin && !LOCAL_HOSTS.has(originHost(origin)))
           return send(403, { error: "Local access only" });
         // Browsers mark requests from another site; refuse those writes even
         // when an Origin header is missing.

@@ -1,26 +1,35 @@
 // Personal goals, payout timing and baskets. Money is integer pence, time is
-// minutes, calendar dates are YYYY-MM-DD in UTC.
+// minutes, calendar dates are YYYY-MM-DD. "Today" is always the London
+// calendar date (http.londonDate), never the UTC date, so a count does not
+// change at midnight UTC during British Summer Time.
 //
 // A basket is one shopping trip with one cash limit: every item bought on the
 // trip shares one journey, and the whole basket's cash required before payout
 // must fit the profile's budget. Figures are estimates from sample data and
 // never a buy alert.
 import { addMissingColumns } from "./contract.mjs";
-import { fail, int, isoDate, oneOf, text } from "./http.mjs";
+import { fail, isCalendarDate, londonDate } from "./http.mjs";
 import { SAMPLE_ASSUMPTIONS, lowerMedian, tripEconomics } from "./trip.mjs";
-import { effectiveRules, hardFilters } from "./opportunity.mjs";
 import {
-  QUANTITY_RULES,
+  OPPORTUNITY_RULES,
+  daysToSellAll,
+  effectiveRules,
+  hardFilters,
+  meetsReturn,
+} from "./opportunity.mjs";
+import {
   accessNeeds,
   assessSample,
+  blankInputs,
   categoryTerms,
   checkedAndUncertainty,
-  demandUnits,
   describeRules,
   fareMissing,
   journeyFor,
   loadLimit,
+  offerDemand,
   sameArea,
+  unitThresholdFailures,
 } from "./catalog.mjs";
 import { getTrip, listTrips } from "./ledger.mjs";
 
@@ -124,36 +133,52 @@ export function getGoals(db) {
   };
 }
 
+// Validators whose messages are plain sentences naming the field as the
+// Goals tab labels it, never a raw field name.
+const whole = (value, min, max, message) =>
+  Number.isSafeInteger(value) && value >= min && value <= max ? value : fail(message);
+const optionalDate = (value, message) =>
+  value === undefined || value === null || value === ""
+    ? null
+    : isCalendarDate(value)
+      ? value
+      : fail(message);
+
 /**
  * Validates goals. Every field is required (cashNeededBy may be null).
- * The date cash is needed must be a real date, today or later.
+ * The date cash is needed must be a real date, today (in London) or later.
  */
 export function readGoals(input, { today }) {
   if (!input || typeof input !== "object" || Array.isArray(input))
-    fail("Send the goals as a JSON object");
+    fail("Send the goals as a JSON object.");
   const raw = input.dispatchDays;
-  if (!Array.isArray(raw) || raw.length > 7)
-    fail("dispatchDays must be a list of weekday numbers from 0 (Sunday) to 6 (Saturday)");
-  const days = raw.map((d, i) => int(d, `dispatchDays[${i}]`, 0, 6));
-  if (new Set(days).size !== days.length) fail("dispatchDays must not repeat a day");
-  const cashNeededBy = isoDate(input.cashNeededBy, "cashNeededBy", { optional: true });
+  const daysMessage = "Dispatch days must be a list of weekdays, from 0 (Sunday) to 6 (Saturday).";
+  if (!Array.isArray(raw) || raw.length > 7) fail(daysMessage);
+  const days = raw.map((d) => whole(d, 0, 6, daysMessage));
+  if (new Set(days).size !== days.length) fail("Each dispatch day can be chosen only once.");
+  const cashNeededBy = optionalDate(
+    input.cashNeededBy,
+    "The date you need the cash back must be a real calendar date.",
+  );
   if (cashNeededBy && cashNeededBy < today)
-    fail("cashNeededBy must be today or later");
+    fail("The date you need the cash back must be today or later.");
+  if (!["income", "savings"].includes(input.targetType))
+    fail("Goal type must be income from resale or household savings.");
   return {
-    targetType: oneOf(input.targetType, "targetType", ["income", "savings"]),
-    monthlyTarget: int(input.monthlyTarget, "monthlyTarget (pence)", 0, 10_000_000),
+    targetType: input.targetType,
+    monthlyTarget: whole(input.monthlyTarget, 0, 10_000_000, "The monthly target must be between £0 and £100,000."),
     dispatchDays: days.sort((a, b) => a - b),
-    storageUnits: int(input.storageUnits, "storageUnits", 0, 100_000),
+    storageUnits: whole(input.storageUnits, 0, 100_000, "Storage at home must be a whole number of units from 0 to 100,000."),
     cashNeededBy,
-    daysToSell: int(input.daysToSell, "daysToSell", 0, 365),
-    deliveryDays: int(input.deliveryDays, "deliveryDays", 0, 60),
-    payoutDelayDays: int(input.payoutDelayDays, "payoutDelayDays", 0, 60),
+    daysToSell: whole(input.daysToSell, 0, 365, "Days to sell must be a whole number from 0 to 365."),
+    deliveryDays: whole(input.deliveryDays, 0, 60, "Delivery days must be a whole number from 0 to 60."),
+    payoutDelayDays: whole(input.payoutDelayDays, 0, 60, "Payout delay must be a whole number of days from 0 to 60."),
   };
 }
 
 /** Validates and saves the single goals row, returning what was stored. */
 export function saveGoals(db, input, { now = new Date().toISOString() } = {}) {
-  const g = readGoals(input, { today: now.slice(0, 10) });
+  const g = readGoals(input, { today: londonDate(now) });
   db.prepare(
     `INSERT INTO goals (id, target_type, monthly_target, dispatch_days, storage_units,
        cash_needed_by, days_to_sell, delivery_days, payout_delay_days, updated)
@@ -183,6 +208,14 @@ const time = (date) => Date.parse(date + "T00:00:00Z");
 export const addDays = (date, days) => new Date(time(date) + days * DAY).toISOString().slice(0, 10);
 const weekday = (date) => new Date(time(date)).getUTCDay();
 const daysBetween = (from, to) => Math.round((time(to) - time(from)) / DAY);
+
+// "8 Nov 2026" for a YYYY-MM-DD date, for notes a person reads.
+const ukDay = (iso) =>
+  typeof iso === "string" && /^\d{4}-\d{2}-\d{2}$/.test(iso)
+    ? new Intl.DateTimeFormat("en-GB", { timeZone: "UTC", day: "numeric", month: "short", year: "numeric" }).format(
+        new Date(iso + "T12:00:00Z"),
+      )
+    : String(iso);
 
 /**
  * When the cash comes back. The item is assumed to sell daysToSell calendar
@@ -214,7 +247,7 @@ export function payoutDate({ start, daysToSell, dispatchDays, deliveryDays, payo
     dispatch,
     delivered,
     date,
-    note: `Assumes a sale by ${sold}, posting on ${dispatch}, delivery by ${delivered} and payout on ${date}.`,
+    note: `Assumes a sale by ${ukDay(sold)}, posting on ${ukDay(dispatch)}, delivery by ${ukDay(delivered)} and payout on ${ukDay(date)}.`,
   };
 }
 
@@ -230,41 +263,75 @@ export function cashTiming({ payoutDate: payout, cashNeededBy }) {
     return {
       status: "unknown",
       daysLate: null,
-      note: `The payout date is unknown, so it cannot be checked against ${cashNeededBy}.`,
+      note: `The payout date is unknown, so it cannot be checked against ${ukDay(cashNeededBy)}.`,
     };
   const late = daysBetween(cashNeededBy, payout);
   if (late > 0)
     return {
       status: "late",
       daysLate: late,
-      note: `Payout expected ${payout}, ${late} day${late === 1 ? "" : "s"} after you need the cash (${cashNeededBy}).`,
+      note: `Payout expected ${ukDay(payout)}, ${late} day${late === 1 ? "" : "s"} after you need the cash (${ukDay(cashNeededBy)}).`,
     };
   return {
     status: "on time",
     daysLate: 0,
-    note: `Payout expected ${payout}, on or before ${cashNeededBy}.`,
+    note: `Payout expected ${ukDay(payout)}, on or before ${ukDay(cashNeededBy)}.`,
   };
 }
 
 /**
- * Payout timing for a trip decided at `now` under the saved goals: the
- * payoutDate() result, the cashTiming() check against the cash date, days
- * from today to the payout (payoutDays, null when it cannot be scheduled)
- * and to the cash date (cashNeededDays, null without one), and the days to
- * sell assumed. evaluateAlert reads payoutDays and cashNeededDays.
+ * Days until the last unit of every item sells: the largest
+ * opportunity.daysToSellAll over the items, with the goals' days to sell as
+ * the time for one unit. Null when an item has more than one unit and an
+ * unknown sales rate. With no items it is the goals' figure for one unit.
  */
-export function tripTiming(goals, { now = new Date().toISOString() } = {}) {
-  const start = now.slice(0, 10);
-  const payout = payoutDate({
-    start,
-    daysToSell: goals.daysToSell,
-    dispatchDays: goals.dispatchDays,
-    deliveryDays: goals.deliveryDays,
-    payoutDelayDays: goals.payoutDelayDays,
-  });
+export function lastSaleDays(goals, items = []) {
+  if (!items.length) return goals.daysToSell;
+  const days = items.map((it) =>
+    daysToSellAll({ units: it.units, daysToSell: goals.daysToSell, salesPerWeek: it.salesPerWeek }),
+  );
+  return days.some((d) => d === null) ? null : Math.max(...days);
+}
+
+/**
+ * Payout timing for a trip decided at `now` under the saved goals. start is
+ * today in London. items is the units bought, [{ units, salesPerWeek }]; the
+ * payout waits for the last unit to sell (lastSaleDays), so several units
+ * are never assumed to sell as fast as one. Without items it is the payout
+ * for one unit.
+ *
+ * Returns { start, daysToSell (until the last unit sells, null when the
+ * sales rate is unknown), daysToSellOneUnit (the goals' assumption), units,
+ * payout (payoutDate()), payoutDays (days from today to the payout, null when
+ * it cannot be scheduled), cashNeededBy, cashNeededDays (days from today to
+ * the cash date, null without one), cash (cashTiming()) }. evaluateAlert
+ * reads payoutDays and cashNeededDays.
+ */
+export function tripTiming(goals, { now = new Date().toISOString(), items = [] } = {}) {
+  const start = londonDate(now);
+  const daysToSell = lastSaleDays(goals, items);
+  const units = items.reduce((total, it) => total + (Number.isInteger(it.units) ? it.units : 0), 0);
+  const payout =
+    daysToSell === null
+      ? {
+          sold: null,
+          dispatch: null,
+          delivered: null,
+          date: null,
+          note: "The sales rate is unknown, so the time to sell every unit cannot be worked out and a payout date cannot be scheduled.",
+        }
+      : payoutDate({
+          start,
+          daysToSell,
+          dispatchDays: goals.dispatchDays,
+          deliveryDays: goals.deliveryDays,
+          payoutDelayDays: goals.payoutDelayDays,
+        });
   return {
     start,
-    daysToSell: goals.daysToSell,
+    daysToSell,
+    daysToSellOneUnit: goals.daysToSell,
+    units: items.length ? units : 1,
     payout,
     payoutDays: payout.date ? daysBetween(start, payout.date) : null,
     cashNeededBy: goals.cashNeededBy || null,
@@ -278,23 +345,27 @@ export function tripTiming(goals, { now = new Date().toISOString() } = {}) {
 
 const EARLIEST = "2000-01-01";
 
-/** Validates a named goal. The deadline, when set, is today or later. */
+/**
+ * Validates a named goal. The deadline, when set, is today (in London) or
+ * later; the date cash counts from is not in the future.
+ */
 export function readTarget(input, { today }) {
   if (!input || typeof input !== "object" || Array.isArray(input))
-    fail("Send the goal as a JSON object");
-  const name = text(input.name, "name (what the money is for)", 80);
-  const amount = int(input.amount, "amount (pence)", 1, 10_000_000);
-  const deadline = isoDate(input.deadline, "deadline", { optional: true });
-  const start = isoDate(input.start, "start", { optional: true }) || today;
-  if (start < EARLIEST) fail(`start must be on or after ${EARLIEST}`);
-  if (start > today) fail("start cannot be in the future");
-  if (deadline && deadline < today) fail("deadline must be today or later");
+    fail("Send the goal as a JSON object.");
+  const name = typeof input.name === "string" ? input.name.trim() : "";
+  if (!name || input.name.length > 80) fail("Say what the money is for, in up to 80 characters.");
+  const amount = whole(input.amount, 1, 10_000_000, "The amount must be between £0.01 and £100,000.");
+  const deadline = optionalDate(input.deadline, "The deadline must be a real calendar date.");
+  const start = optionalDate(input.start, "The date to count cash from must be a real calendar date.") || today;
+  if (start < EARLIEST) fail("The date to count cash from must be in 2000 or later.");
+  if (start > today) fail("The date to count cash from cannot be in the future.");
+  if (deadline && deadline < today) fail("The deadline must be today or later.");
   return { name, amount, deadline, start };
 }
 
 /** Saves a new named goal and returns its id. */
 export function addTarget(db, input, { now = new Date().toISOString() } = {}) {
-  const t = readTarget(input, { today: now.slice(0, 10) });
+  const t = readTarget(input, { today: londonDate(now) });
   const result = db
     .prepare("INSERT INTO goal_targets (name, amount, deadline, start, created) VALUES (?, ?, ?, ?, ?)")
     .run(t.name, t.amount, t.deadline, t.start, now);
@@ -341,7 +412,7 @@ export const TARGET_BASIS =
  * Returns { targets, basis }.
  */
 export function goalTargets(db, { now = new Date().toISOString() } = {}) {
-  const today = now.slice(0, 10);
+  const today = londonDate(now);
   const rows = db.prepare("SELECT * FROM goal_targets").all();
   const moves = rows.length ? cashMovements(db) : [];
   const order = (r) => [r.deadline || "9999-12-31", Number(r.id)];
@@ -435,12 +506,18 @@ const better = (a, b) => b.contribution - a.contribution || (b.hourly ?? -Infini
  * Compares baskets under one cash constraint.
  *
  * Searches unit allocations across the offers in the profile's area (at most
- * eight offers, at most BASKET_SEARCH.maxBaskets allocations). Offers that
- * fail a hard filter (price band or weight) never enter a basket: they are
- * listed under `excluded` with the reason. Each item is bounded by its stock,
- * the load limit, storage, the profile's maximum units, the trial batch for
- * a first purchase and the units its sales rate supports in the sell window
- * after competing listings; the whole basket must also fit: cash required
+ * eight offers, at most BASKET_SEARCH.maxBaskets allocations). An offer
+ * failing any buying threshold (price band, weight, profit per unit or
+ * return, with the member's stricter values) never enters a basket: it is
+ * listed under `excluded` with rejected: true and the reason. Profit per
+ * unit is checked first with no travel (the best any basket can give it),
+ * then in every basket with the item's share of the one journey; a basket in
+ * which any item falls below the thresholds is never shown, and an offer
+ * that falls below them in every basket that fits is listed as rejected too.
+ * Each item is bounded by its stock, the load limit, storage, the profile's
+ * maximum units, the trial batch for a first purchase and the units its
+ * sales rate supports in the sell window after competing listings
+ * (opportunity.demandUnits); the whole basket must also fit: cash required
  * before payout (including the one shared journey) within the budget, total
  * weight within the load limit, and total units within storage and the
  * maximum units per trip. The load limit is loadLimit() for the transport,
@@ -450,13 +527,14 @@ const better = (a, b) => b.contribution - a.contribution || (b.hourly ?? -Infini
  *
  * Returns the top five baskets and the best single-item trip (plus the
  * thresholds applied and any looser override ignored), each with
- * economics, the downside if nothing sells and if half sells, cash timing,
- * and the reasons it falls short. At most one basket is marked recommended:
- * the best-ranked one with positive contribution, the hourly target met,
- * every item inside the buying thresholds and the trial batch, a public
- * transport fare entered when travelling by public transport and, when a
- * cash date is set, the payout on time. A basket with contribution of zero
- * or below is never recommended.
+ * economics, the downside if nothing sells and if half sells, cash timing
+ * (the payout waits for the last unit to sell at the item's sales rate), and
+ * the reasons it falls short. At most one basket is marked recommended: the
+ * best-ranked one with positive contribution, the hourly target met, every
+ * item inside the buying thresholds and the trial batch, a public transport
+ * fare entered when travelling by public transport and, when a cash date is
+ * set, the payout on time. A basket with contribution of zero or below is
+ * never recommended. `timing` at the top level is the payout for one unit.
  */
 export function basketOptions(offers, profile, goals, { now = new Date().toISOString() } = {}) {
   const rules = effectiveRules(profile.rules || {});
@@ -477,13 +555,23 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
       excluded.push({ ...brief, reason: hard.join("; "), rejected: true });
       continue;
     }
+    const blank = blankInputs(offer);
+    if (blank.length) {
+      excluded.push({
+        ...brief,
+        reason: `Profit per unit cannot be checked until these are entered: ${blank.join(", ")}`,
+        rejected: true,
+      });
+      continue;
+    }
     const grams = Math.round(offer.weight * 1000);
+    const demand = offerDemand(offer);
     const caps = {
       stock: offer.stock,
       carry: grams > 0 ? Math.floor(carryGrams / grams) : 0,
       units: unitCap,
       trial: offer.provenItem === true ? unitCap : rules.trialUnits,
-      demand: demandUnits(offer),
+      demand: demand ?? 0, // unknown demand fails closed at 0 units
     };
     const max = Math.min(...Object.values(caps));
     if (!(max >= 1)) {
@@ -492,7 +580,10 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
         carry: "your load limit",
         units: "your storage or maximum units",
         trial: "the trial batch",
-        demand: `expected demand in ${QUANTITY_RULES.sellWindowWeeks} weeks after competing listings`,
+        demand:
+          demand === null
+            ? "the sales rate or competing listings are unknown"
+            : `expected demand in ${OPPORTUNITY_RULES.sellWindowWeeks} weeks after competing listings`,
       };
       excluded.push({
         ...brief,
@@ -515,8 +606,20 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
       handlingMinutes: offer.handlingMinutes,
     };
     // Contribution and cash are linear in units once the journey is fixed,
-    // so one unit with no journey gives the per-unit figures.
+    // so one unit with no journey gives the per-unit figures. Its profit per
+    // unit is the most any basket can give the item, so failing the
+    // thresholds here means failing them in every basket.
     const one = tripEconomics({ ...base, units: 1, journeyCost: 0 });
+    const best = unitThresholdFailures(one.contribution, offer.buy, rules);
+    if (best.length) {
+      const travels = journeyFor(profile, offer.miles).cost > 0;
+      excluded.push({
+        ...brief,
+        reason: best.join("; ") + (travels ? " (even before its share of the journey)" : ""),
+        rejected: true,
+      });
+      continue;
+    }
     pool.push({ offer, base, terms, grams, max, net: one.contribution, cash: one.cashRequired });
   }
   pool.sort((a, b) => b.net - a.net);
@@ -538,6 +641,11 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
     return journeys.get(mask);
   };
 
+  // For each offer: whether it cleared the thresholds itself in any basket
+  // that fits the budget, and otherwise its best profit per unit there.
+  const cleared = pool.map(() => false);
+  const bestFailing = pool.map(() => null);
+
   const alloc = new Array(pool.length).fill(0);
   const top = [];
   let bestSingle = null;
@@ -555,6 +663,21 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
     });
     cash += route.cost;
     if (cash > profile.budget) return;
+    // Every item must stay inside the buying thresholds with its share of
+    // the one journey (shared as describeBasket shares it).
+    const chosen = [];
+    pool.forEach((_, i) => alloc[i] > 0 && chosen.push(i));
+    if (route.cost > 0) {
+      const shares = shareTravel(route.cost, chosen.map((i) => alloc[i]));
+      const failing = chosen.filter((i, k) => {
+        const unitProfit = Math.floor((alloc[i] * pool[i].net - shares[k]) / alloc[i]);
+        const ok = unitProfit >= rules.minUnitProfit && meetsReturn(unitProfit, pool[i].offer.buy, rules.minReturn);
+        if (ok) cleared[i] = true;
+        else if (bestFailing[i] === null || unitProfit > bestFailing[i]) bestFailing[i] = unitProfit;
+        return !ok;
+      });
+      if (failing.length) return;
+    } else for (const i of chosen) cleared[i] = true;
     const contribution = net - route.cost;
     const candidate = {
       alloc: [...alloc],
@@ -565,8 +688,7 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
     top.push(candidate);
     top.sort(better);
     if (top.length > BASKET_SEARCH.top) top.pop();
-    const items = alloc.filter((u) => u > 0).length;
-    if (items === 1 && (!bestSingle || better(candidate, bestSingle) < 0)) bestSingle = candidate;
+    if (chosen.length === 1 && (!bestSingle || better(candidate, bestSingle) < 0)) bestSingle = candidate;
   };
   const visit = (i, cash, grams, units, mask) => {
     if (truncated) return;
@@ -593,6 +715,18 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
     alloc[i] = 0;
   };
   visit(0, 0, 0, 0, 0);
+  pool.forEach((p, i) => {
+    if (cleared[i] || bestFailing[i] === null) return;
+    excluded.push({
+      sku: p.offer.sku,
+      name: p.offer.name,
+      shop: p.offer.shop,
+      reason:
+        unitThresholdFailures(bestFailing[i], p.offer.buy, rules, { atMost: true }).join("; ") +
+        ` (with its share of the journey, in every basket ${truncated ? "searched" : "that fits"})`,
+      rejected: true,
+    });
+  });
 
   const describe = (candidate) =>
     describeBasket(candidate, {
@@ -602,7 +736,6 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
       rules,
       now,
       route: journeyOf(candidate.mask),
-      timing,
       storage,
     });
   const baskets = top.map(describe);
@@ -622,7 +755,7 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
       quantity: profile.quantity,
       unitCap,
       trialUnits: rules.trialUnits,
-      sellWindowWeeks: QUANTITY_RULES.sellWindowWeeks,
+      sellWindowWeeks: OPPORTUNITY_RULES.sellWindowWeeks,
       hourlyTarget: profile.target,
       transport: profile.transport,
       fareMissing: fareMissing(profile),
@@ -635,17 +768,45 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
     excluded,
     searched,
     truncated,
-    timing: { payout: timing.payout, cash: timing.cash, payoutDays: timing.payoutDays },
+    timing: basketTiming(timing),
     rules: describeRules(profile.rules || {}),
   };
 }
 
+// The timing fields a basket carries.
+const basketTiming = (t) => ({
+  payout: t.payout,
+  cash: t.cash,
+  payoutDays: t.payoutDays,
+  daysToSell: t.daysToSell,
+  daysToSellOneUnit: t.daysToSellOneUnit,
+  units: t.units,
+  cashNeededBy: t.cashNeededBy,
+});
+
+/**
+ * Why a payout misses the cash date, in plain words with no raw dates: late
+ * by a number of days, or not schedulable (with the reason).
+ */
+export function cashDateReason(timing) {
+  if (timing.cash.status === "late") {
+    const n = timing.cash.daysLate;
+    return `Payout expected ${n} day${n === 1 ? "" : "s"} after you need the cash`;
+  }
+  return timing.payout.date
+    ? "The payout cannot be checked against the date you need the cash"
+    : `No payout date can be scheduled, so the date you need the cash cannot be met. ${timing.payout.note}`;
+}
+
 /** Full figures for one allocation, built only for the baskets returned. */
-function describeBasket(candidate, { pool, profile, goals, rules, now, route, timing, storage }) {
+function describeBasket(candidate, { pool, profile, goals, rules, now, route, storage }) {
   const chosen = pool
     .map((p, i) => ({ p, units: candidate.alloc[i] }))
     .filter((x) => x.units > 0);
   const shares = shareTravel(route.cost, chosen.map((x) => x.units));
+  // The basket's cash is back once the last unit of every item has sold.
+  const sale = ({ p, units }) => ({ units, salesPerWeek: p.offer.salesPerWeek ?? null });
+  const timing = tripTiming(goals, { now, items: chosen.map(sale) });
   const perItem = chosen.map(({ p, units }, k) => {
     const inputs = { ...p.base, units, journeyCost: shares[k] };
     return { full: tripEconomics(inputs), half: tripEconomics({ ...inputs, sellThrough: 0.5 }) };
@@ -658,7 +819,7 @@ function describeBasket(candidate, { pool, profile, goals, rules, now, route, ti
       hourlyFloor: profile.target,
       rules,
       now,
-      timing,
+      timing: tripTiming(goals, { now, items: [sale({ p, units })] }),
       categoryFailures: p.terms.failures,
       journeyKnown: !fareMissing(profile),
     });
@@ -709,7 +870,7 @@ function describeBasket(candidate, { pool, profile, goals, rules, now, route, ti
   }
   if (fareMissing(profile))
     reasons.push("Public transport fare not entered, so the journey is costed as free");
-  if (goals.cashNeededBy && timing.cash.status !== "on time") reasons.push(timing.cash.note);
+  if (goals.cashNeededBy && timing.cash.status !== "on time") reasons.push(cashDateReason(timing));
 
   return {
     id: items.map((it) => `${it.sku}:${it.units}`).join(","),
@@ -733,7 +894,7 @@ function describeBasket(candidate, { pool, profile, goals, rules, now, route, ti
       unsoldLoss,
     },
     downside: { nothingSells: unsoldLoss, halfSells },
-    timing: { payout: timing.payout, cash: timing.cash, payoutDays: timing.payoutDays },
+    timing: basketTiming(timing),
     reasons,
     recommended: false,
   };
