@@ -144,7 +144,7 @@ export function evaluateAlert(input = {}, rules = ALERT_RULES) {
     "buying-thresholds",
     input.meetsThresholds === true,
     "Meets the buying thresholds (Priority 1 or 2)",
-    "Does not meet the buying thresholds for price, weight, profit per unit and return",
+    "Not a Priority 1 or 2 opportunity under the buying thresholds",
   );
   // A first purchase of an item is a small trial batch until a verified
   // trade (receipt and payout) proves it.
