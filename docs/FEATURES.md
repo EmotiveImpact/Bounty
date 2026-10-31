@@ -103,6 +103,66 @@ There is no open source equivalent of these tools. Useful open source pieces are
 - **No pressure framing** (Now). No countdowns or "don't miss out" copy until forecasts are calibrated. Show expected and worst cases together.
 - **Excluded tactics** (Now). No repeat sign-ups to reuse new-customer offers, no price-error exploitation that breaches retailer terms, no automated buying.
 
+## 10. More sourcing channels
+
+The pilot looks at high street and supermarket shelves. Each new channel needs its own evidence rules.
+
+- **Trade-in quotes as a guaranteed floor** (Now). CeX, Ziffit, musicMagpie, WeBuyBooks and similar publish instant buy prices for media, phones and tech. A quote is a real buyer at a known price, so it can act as a floor under an estimate and as a fallback exit. Record the quote, its date and its condition grade.
+- **Charity shop and car boot mode** (Next). No barcodes on many items, so matching is by model number, ISBN or exact title and edition. Allow a lower confidence tier labelled clearly as research, never a buy alert.
+- **Clearance outlet and liquidation pallets** (Later). Cost per unit across a mixed lot, with a worked example of how many units must sell to recover cash.
+- **Online clearance with local collection** (Later). Argos, Currys and others let you reserve online and collect in branch. That is a stock confirmation the shelf cannot give. Only where the retailer's terms allow.
+- **Free and nearly free** (Later). Freecycle, Olio and local giveaway groups for items with strong sold evidence. Zero cost does not mean zero time.
+- **Product recall check** (Now). Before any buy alert, check the item against the UK product recalls register from the Office for Product Safety and Standards. Recalled items are never alertable.
+
+## 11. Exits beyond eBay
+
+- **Exit ranking** (Next). For each item, rank the ways to sell it: eBay posted, eBay local collection, Vinted, Facebook Marketplace collection, Gumtree, trade-in, local auction house. Show expected price, fees, time to cash and effort for each.
+- **Collection first for heavy items** (Next). Anything over a set weight or size defaults to local collection options, where postage would eat the margin.
+- **Payout holds** (Next). New eBay sellers have funds held; Vinted pays on buyer confirmation. Put the real payout date in the cash flow timeline, by platform and seller age.
+- **Postage label purchase** (Later). Royal Mail Click and Drop and Evri have APIs. Buy the label from the trip record, so postage cost is actual rather than estimated.
+- **Dispute and return templates** (Later). Pre-written, polite responses for not-as-described claims and return requests.
+
+## 12. Practice and learning
+
+- **Paper trips** (Now). Plan a trip, record what you would have bought, and let the app track what those items actually sold for over the next month. No money spent, forecasts get calibrated, and new members learn without risk.
+- **Scan without buying** (Now). Every scan builds evidence even when you walk away. "You passed on this at £6 and it sold for £14" is a lesson; "you passed on this and it never sold" is a better one.
+- **First ten trips programme** (Next). Small, guided trips with checklists for photos, packing and listing. Unlock larger budgets as accuracy and outcomes build.
+- **Micro-lessons in context** (Later). Short notes shown at the point of decision: why asking prices are not sold prices, what buyer protection fees do to demand, how eBay's new-seller holds work.
+
+## 13. Money matters for occasional earners
+
+Shown as information with links to GOV.UK, never as advice.
+
+- **Benefits earnings note** (Next). Universal Credit and some other benefits count self-employed earnings. A plain note that reselling income may need reporting, with a link to the official guidance.
+- **Private seller or trader** (Next). HMRC's badges of trade in plain English, so members understand when occasional selling becomes trading. Ties to the £1,000 trading allowance counter.
+- **Platform reporting** (Next). From 2024 platforms report sellers above 30 sales or about £1,700 a year to HMRC. Show progress against both.
+- **Cashback and loyalty** (Later). For online purchases, show legitimate cashback through Bounty's own affiliate links and the cash value of loyalty points, kept separate from profit until paid out.
+- **Gift card discounts** (Later). Discounted retailer gift cards from reputable resellers lower the buy price. Flag the risk of unredeemable cards.
+
+## 14. Members and the market
+
+- **Saturation warning** (Next). "Eleven members bought this in the last week; expected price has dropped £2.10." Alerts switch off automatically when the market fills.
+- **Member stock exchange** (Later). Sell leftover stock to other members at cost, so cash comes back and someone with a better patch takes the item.
+- **Group buys** (Later). Pool orders to reach bulk or multi-buy discounts, with the split agreed before purchase.
+- **Local pickup hubs** (Later). A member with a car collects for walkers on the same patch, for a share agreed in the app.
+- **Anonymised reality stats** (Next). Public, aggregated figures on realised earnings per hour, unsold rates and time to payout, so nobody joins with false expectations.
+- **Referrals gated on accuracy** (Later). Referral rewards only when the referred member completes verified trips, not on sign-up.
+
+## 15. Interface and accessibility
+
+- **Hands-free in store** (Next). Voice entry for shelf price and quantity, large tap targets, and a high contrast mode for bright shop lighting.
+- **WhatsApp or Telegram bot** (Later). Send a barcode photo, get the verdict back. Useful where installing an app is a barrier.
+- **Weather and daylight** (Later). Walking trips flag heavy rain or darkness for members without a car.
+- **Smartwatch glance** (Later). A yes, no or maybe on the wrist while your hands hold the item.
+
+## 16. Data and partnerships
+
+- **Contribute back to Open Prices** (Now). Every shelf price members capture can be uploaded under the ODbL with their consent, improving the public dataset and Bounty's own coverage.
+- **ONS price quotes** (Later). The Office for National Statistics publishes the item-level price quotes behind inflation figures each month. They are not shop-specific, but they give a regional baseline for everyday goods.
+- **Retailer clearance partnerships** (Later). Approach retailers to supply official clearance feeds in exchange for faster stock clearance and labelled placement. This replaces scraping with permission.
+- **Charity shop pricing tool** (Later). A separate mode that helps charity shops price donations from sold evidence. A different customer, but the same engine, and a public good.
+- **Research API for members** (Later). Export your own evidence and outcomes to a spreadsheet or your own tools.
+
 ## Suggested build order
 
 1. Break-even price, deal rating and evidence confidence score in Research and the planner.
