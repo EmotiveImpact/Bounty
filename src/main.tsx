@@ -11,6 +11,7 @@ import Bounties from "./Bounties";
 import Ledger from "./Ledger";
 import Sources from "./Sources";
 import ProtoApp, { type View } from "./proto/App";
+import SignIn, { type Member } from "./SignIn";
 
 // The older screens, shown inside the new shell until each is ported.
 const LEGACY: Partial<Record<View, React.ComponentType>> = {
@@ -64,6 +65,56 @@ function legacy(view: View) {
   );
 }
 
-createRoot(document.getElementById("root")!).render(
-  <ProtoApp legacy={legacy} />,
-);
+// Hosted pilots with member accounts open on the sign-in page until a
+// session is found; on your own computer the app opens straight away.
+type Gate =
+  | { state: "checking" }
+  | { state: "signin"; inviteOpen: boolean }
+  | { state: "open"; member: Member | null }
+  | { state: "error"; message: string };
+
+function Root() {
+  const [gate, setGate] = React.useState<Gate>({ state: "checking" });
+  React.useEffect(() => {
+    fetch("/api/auth/me")
+      .then(async (res) => {
+        const data = await res.json().catch(() => null);
+        if (res.ok) setGate({ state: "open", member: data?.user ?? null });
+        else if (data?.signIn) setGate({ state: "signin", inviteOpen: Boolean(data.inviteOpen) });
+        else setGate({ state: "error", message: data?.error || "HTTP " + res.status });
+      })
+      .catch((error) => setGate({ state: "error", message: String(error) }));
+  }, []);
+  if (gate.state === "checking") return null;
+  if (gate.state === "error")
+    return (
+      <p role="alert" style={{ padding: 24 }}>
+        Bounty could not start ({gate.message}). Reload the page to try again.
+      </p>
+    );
+  if (gate.state === "signin")
+    return <SignIn inviteOpen={gate.inviteOpen} onSignedIn={(member) => setGate({ state: "open", member })} />;
+  const member = gate.member;
+  return (
+    <ProtoApp
+      legacy={legacy}
+      account={
+        member
+          ? {
+              email: member.email,
+              signOut: async () => {
+                await fetch("/api/auth/signout", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: "{}",
+                }).catch(() => undefined);
+                window.location.reload();
+              },
+            }
+          : undefined
+      }
+    />
+  );
+}
+
+createRoot(document.getElementById("root")!).render(<Root />);

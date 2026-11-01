@@ -122,8 +122,11 @@ type Report = { at: number; kind: "saw" | "gone" };
 
 export default function ProtoApp({
   legacy,
+  account,
 }: {
   legacy: (view: View) => React.ReactNode;
+  // The signed-in member on a hosted pilot; absent on your own computer.
+  account?: { email: string; signOut: () => void };
 }) {
   const first = fromHash();
   const [view, setView] = useState<View>(first.view);
@@ -896,6 +899,11 @@ export default function ProtoApp({
                   <button type="button" onClick={() => go("watching")}>
                     Saved finds
                   </button>
+                  {account && (
+                    <button type="button" onClick={account.signOut}>
+                      Sign out ({account.email})
+                    </button>
+                  )}
                 </div>
               </div>
             )}

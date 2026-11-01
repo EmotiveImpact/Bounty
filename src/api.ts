@@ -22,6 +22,12 @@ export async function api<T>(
   } catch {
     throw Error("The API returned an unreadable response");
   }
+  // The session ended (signed out elsewhere or expired): reloading shows
+  // the sign-in page.
+  if (res.status === 401 && (data as { signIn?: boolean } | null)?.signIn) {
+    window.location.reload();
+    throw Error("Sign in to Bounty");
+  }
   if (!res.ok)
     throw Error(
       (data as { error?: string } | null)?.error ||
