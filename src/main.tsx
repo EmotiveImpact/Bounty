@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
+import Deals from "./Deals";
 import Planner from "./Planner";
 import Goals from "./Goals";
 import Research from "./Research";
@@ -10,14 +11,19 @@ import Ledger from "./Ledger";
 import Sources from "./Sources";
 
 const TABS = {
+  Deals: {
+    title: "Deals near you",
+    lead: "Cheap in the shop, sells for more online. The biggest profit a unit comes first, and nothing needs setting up.",
+    view: Deals,
+  },
   Planner: {
-    title: "Bounty planner",
-    lead: "Find the trips that fit your cash, time and carrying capacity.",
+    title: "Trip planner",
+    lead: "Optional. Add your travel, cash and carrying limit to see which trips fit you.",
     view: Planner,
   },
   Goals: {
     title: "Goals and baskets",
-    lead: "Plan against your dispatch days, storage, cash date and monthly target.",
+    lead: "Optional. Plan against your dispatch days, storage, cash date and monthly target.",
     view: Goals,
   },
   Research: {
@@ -85,7 +91,7 @@ class TabBoundary extends React.Component<
 const ON_ERROR: Partial<Record<string, () => void>> = { Research: clearResearchDraft };
 
 function App() {
-  const [tab, setTab] = useState<Tab>(() => tabFromHash() ?? "Planner");
+  const [tab, setTab] = useState<Tab>(() => tabFromHash() ?? "Deals");
   // Follow in-page links such as the Planner's "Open the basket plan in Goals".
   useEffect(() => {
     const follow = () => {
@@ -120,17 +126,17 @@ function App() {
     history.replaceState(null, "", "#" + t);
   };
   const navButton = (t: Tab, cls?: string) => (
-    <button key={t} className={cls} aria-pressed={t === tab} title={t} onClick={() => go(t)}>
+    <button key={t} className={cls} aria-pressed={t === tab} title={LABEL[t]} onClick={() => go(t)}>
       <Icon name={t} />
-      <span className="rail-label">{t}</span>
+      <span className="rail-label">{LABEL[t]}</span>
     </button>
   );
-  const toolActive = TOOLS.includes(tab);
+  const moreActive = MORE.includes(tab);
   return (
     <div className={"shell" + (railOpen ? " rail-open" : "")}>
       <div className="rail">
         <div className="rail-top">
-          <a className="logo" href="#Planner" aria-label="Bounty, back to the planner">
+          <a className="logo" href="#Deals" aria-label="Bounty, back to the deals">
             <span className="logo-mark" aria-hidden="true">
               B
             </span>
@@ -148,6 +154,8 @@ function App() {
         </div>
         <nav className="rail-nav" aria-label="Sections">
           {MEMBER.map((t) => navButton(t))}
+          <span className="rail-group">Extras</span>
+          {EXTRAS.map((t) => navButton(t))}
           <span className="rail-group">Tools</span>
           {TOOLS.map((t) => navButton(t))}
         </nav>
@@ -166,7 +174,7 @@ function App() {
         </div>
         <main>
           <div className="page-head">
-            <span className="crumbs">Bounty › {tab}</span>
+            <span className="crumbs">Bounty › {LABEL[tab]}</span>
             <h1>{TABS[tab].title}</h1>
             <p>{TABS[tab].lead}</p>
           </div>
@@ -185,14 +193,14 @@ function App() {
       </div>
       <nav className="bottombar" aria-label="Sections">
         {MEMBER.map((t) => navButton(t))}
-        <button aria-pressed={toolActive} aria-expanded={toolsOpen} onClick={() => setToolsOpen(!toolsOpen)}>
+        <button aria-pressed={moreActive} aria-expanded={toolsOpen} onClick={() => setToolsOpen(!toolsOpen)}>
           <Icon name="tools" />
-          <span className="rail-label">Tools</span>
+          <span className="rail-label">More</span>
         </button>
       </nav>
       {toolsOpen && (
-        <div className="tools-sheet" role="menu" aria-label="Tools">
-          {TOOLS.map((t) => (
+        <div className="tools-sheet" role="menu" aria-label="More">
+          {MORE.map((t) => (
             <button key={t} role="menuitem" aria-pressed={t === tab} onClick={() => go(t)}>
               <Icon name={t} />
               {TABS[t].title}
@@ -204,12 +212,27 @@ function App() {
   );
 }
 
-// Members' sections first; the research desk and source admin are tools.
-const MEMBER: Tab[] = ["Planner", "Bounties", "Goals", "Ledger"];
+// Deals first, so anyone can open the app and see finds with no setup. The
+// trip planner and goals are optional extras for sharper numbers; the
+// research desk and source admin are tools. On phones the extras and tools
+// share the More menu.
+const MEMBER: Tab[] = ["Deals", "Bounties", "Ledger"];
+const EXTRAS: Tab[] = ["Planner", "Goals"];
 const TOOLS: Tab[] = ["Research", "Sources"];
+const MORE: Tab[] = [...EXTRAS, ...TOOLS];
+const LABEL: Record<Tab, string> = {
+  Deals: "Deals",
+  Planner: "Trip planner",
+  Goals: "Goals",
+  Research: "Research",
+  Bounties: "Bounties",
+  Ledger: "Ledger",
+  Sources: "Sources",
+};
 
 // Line icons for the menu, drawn on a 24-unit grid.
 const ICON_PATHS: Record<string, string[]> = {
+  Deals: ["M19 5 5 19", "M7 9.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z", "M17 19.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z"],
   Planner: ["M12 21s-6-5.3-6-10a6 6 0 0 1 12 0c0 4.7-6 10-6 10z", "M12 13.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4z"],
   Goals: ["M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16z", "M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M12 12.5v-1"],
   Research: ["M11 17.5a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13z", "M20 20l-4.2-4.2"],

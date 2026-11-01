@@ -7,6 +7,7 @@ import { authorised } from "./access.mjs";
 import * as evidenceRoutes from "./routes-evidence.mjs";
 import * as researchRoutes from "./routes-research.mjs";
 import * as planRoutes from "./routes-plan.mjs";
+import * as dealRoutes from "./routes-deals.mjs";
 import * as bountyRoutes from "./routes-bounties.mjs";
 import * as ledgerRoutes from "./routes-ledger.mjs";
 
@@ -14,6 +15,7 @@ export const routeModules = [
   evidenceRoutes,
   researchRoutes,
   planRoutes,
+  dealRoutes,
   bountyRoutes,
   ledgerRoutes,
 ];

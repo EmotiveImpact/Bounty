@@ -24,6 +24,7 @@ An affiliate feed or online catalogue never establishes branch stock. Local stoc
 | Shared foundations                | `contract.mjs`, `http.mjs`, `app.mjs`, `api.mjs`, `db.mjs`, `trip.mjs`, `alerts.mjs`, `opportunity.mjs`, `metadata.mjs`, `test-support.mjs` | `main.tsx`, `api.ts`, `style.css`           |
 | Sources and ingestion             | `sources.mjs`, `evidence.mjs`, `worker.mjs`, `research.mjs`, `loop.mjs`, `routes-evidence.mjs`        | `Sources.tsx`                               |
 | Matching, estimate, validation    | `matching.mjs`, `estimate.mjs`, `audit.mjs`, `routes-research.mjs`                                    | `Research.tsx`, `ResearchCalculator.tsx`, `Audit.tsx` |
+| Deals (first screen)              | `deals.mjs`, `routes-deals.mjs`                                                                       | `Deals.tsx`                                 |
 | Planner, goals and baskets        | `catalog.mjs`, `goals.mjs`, `routes-plan.mjs`                                                         | `Planner.tsx`, `Goals.tsx`                  |
 | Bounties and membership           | `bounties.mjs`, `routes-bounties.mjs`                                                                 | `Bounties.tsx`                              |
 | Ledger and private proofs         | `ledger.mjs`, `proofs.mjs`, `routes-ledger.mjs`                                                       | `Ledger.tsx`                                |
@@ -232,6 +233,10 @@ Claimed price (`prices.claimed`): the Awin previous price (`was_price`, kind `pr
   - an "Every check" list
 - Progress reads "N of 30 items checked against stored evidence in X" with the passed and failed counts, the items that do not count grouped by reason, and one of four states: not validated yet; complete but below the pass bar (the refusal, a note that the bar is still to be agreed, and no form); complete and ready (a tick box, an optional note, "Sign off the audit" and the exact line members will see); or signed off on a date with that line. Each item reads "Counts towards the 30." or "Does not count towards the 30: ...". A lapsed sign-off says why. Items and the handover show "Not entered in Research: ..." when a required cost or time is blank.
 - Checked at 390 and 1280 px: no horizontal overflow and no console errors.
+
+### Deals (`deals.mjs`, `routes-deals.mjs`)
+
+The first screen. `GET /api/deals` lists every offer with no profile; `POST /api/deals` takes optional extras checked by `readDealOptions` (transport, fare in pence or null, fareFree, perMile, extra, feeRate, feeFixed, returnsRate). `dealFor(offer, options)` costs one unit with `tripEconomics` and no journey: `salePrice` is the lower median of completed sales, `unitProfit` is that less the shop price, fees, the returns allowance (clothing floor applies), postage and packaging, and is null (never zero) with no completed sales or a blank cost. `notes` gives the agreed thresholds a deal misses in plain words; `meetsThresholds` is true only when there are none. Nothing is filtered out. `travel` is `{ added: false }` without a transport; otherwise one return trip from `journeyFor`, with `cost: null` for public transport without a fare. Deals are sorted by `unitProfit`, unknown last, and travel never changes the order or the profit. Never a buy alert.
 
 ### Planner, goals and baskets (`catalog.mjs`, `goals.mjs`, `routes-plan.mjs`)
 
