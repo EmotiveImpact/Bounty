@@ -70,6 +70,40 @@ type Claim = {
   journeyCost?: number | null;
   journeyMinutes?: number | null;
   figures?: OwnFigures | null;
+  // For units bought: what is recorded as sold, returned or reconciled, and
+  // what still counts against the demand for the item (null otherwise).
+  released?: Released | null;
+  outstanding?: number | null;
+  releases?: { kind: "sold" | "returned" | "reconciled"; units: number; reason: string | null; recordedBy: string; at: string }[];
+};
+type Released = { sold: number; returned: number; reconciled: number };
+// Units earlier bounties for the item still have against its resale demand
+// (server/bounties.mjs earlierAllocation): bought and not recorded as sold or
+// returned, or held in a live claim. claims are the purchases with units
+// outstanding: all of them for the operator, only their own for a member.
+type EarlierClaim = {
+  id: number;
+  bountyId: number;
+  memberId: number;
+  memberName: string | null;
+  mine: boolean;
+  units: number;
+  released: Released;
+  outstanding: number;
+  endedAt: string | null;
+};
+type Earlier = {
+  units: number;
+  outstanding: number;
+  held: number;
+  bought: number;
+  released: Released;
+  bounties: number[];
+  note: string | null;
+  release: string | null;
+  binding: boolean;
+  capWithout: number | null;
+  claims: EarlierClaim[];
 };
 type OwnFigures = {
   units: number;
@@ -93,6 +127,8 @@ type SharedDemand = {
   committed: number;
   mine: number;
   others: number;
+  // Units from earlier bounties for the item still counted against demand.
+  earlier?: number;
   salesPerWeek: number | null;
   sellWindowWeeks: number | null;
   competingListings: number | null;
@@ -242,6 +278,7 @@ type Bounty = {
   claimedUnits: number;
   completedUnits: number;
   remaining: number;
+  earlier?: Earlier | null;
   alert: {
     eligible: boolean;
     reasons: string[];
@@ -1517,7 +1554,8 @@ function ClaimPanel({
           <small className="muted">
             The card's figures use the operator's journey. Your claim is checked again at the units you claim with your own
             journey and thresholds, the stricter of your hourly floor and the operator's, and your cash date if you give one,
-            counting the units other members have already claimed. It is refused if it fails.
+            counting the units other members have already claimed and units bought through earlier bounties for this item that
+            are not yet recorded as sold or returned. It is refused if it fails.
           </small>
           {v.promotion && !confirmed && (
             <div className="promotion">
@@ -1627,6 +1665,165 @@ function unitsOnShelf(s: Bounty["pressure"]["sourcing"]) {
     : `${plural(s.availableUnits, "unit")} on the shelf (${basis}${bought})`;
 }
 
+/** "2 recorded as sold and 1 as returned to the shop", or "" when nothing is recorded. */
+function releasedText(r: Released | null | undefined) {
+  if (!r) return "";
+  const parts = [
+    r.sold ? `${r.sold} recorded as sold` : "",
+    r.returned ? `${r.returned} as returned to the shop` : "",
+    r.reconciled ? `${r.reconciled} reconciled by the operator` : "",
+  ].filter(Boolean);
+  return parts.length > 1 ? parts.slice(0, -1).join(", ") + " and " + parts[parts.length - 1] : parts.join("");
+}
+
+type Releasable = {
+  id: number;
+  memberId: number;
+  memberName: string | null | undefined;
+  units: number;
+  outstanding: number;
+  released?: Released | null;
+  endedAt: string | null;
+};
+
+/**
+ * One purchase whose units still count against the demand for the item:
+ * the member who bought them records units sold or returned, and the
+ * operator records a reconciliation with a reason. Neither form accepts
+ * more than is outstanding; the server checks it again.
+ */
+function PurchaseRelease({
+  claim,
+  where,
+  acting,
+  onDone,
+}: {
+  claim: Releasable;
+  where: string;
+  acting: "operator" | "public" | number;
+  onDone: (m: string, err?: boolean) => void;
+}) {
+  const [sold, setSold] = useState("");
+  const [returned, setReturned] = useState("");
+  const [units, setUnits] = useState("");
+  const [reason, setReason] = useState("");
+  const mine = typeof acting === "number" && claim.memberId === acting;
+  const run = async (fn: () => Promise<{ message: string }>) => {
+    try {
+      const { message } = await fn();
+      // Recorded: empty the boxes so the same units are not sent twice.
+      setSold("");
+      setReturned("");
+      setUnits("");
+      setReason("");
+      onDone(message);
+    } catch (err) {
+      onDone((err as Error).message, true);
+    }
+  };
+  // A blank box means none of that kind; anything else must be a whole number.
+  const count = (value: string) => (value.trim() === "" ? undefined : Number(value));
+  const who = mine ? "You" : (claim.memberName ?? "A member");
+  const recorded = releasedText(claim.released);
+  const left =
+    claim.outstanding === 0
+      ? "every unit is recorded as sold, returned or reconciled"
+      : `${plural(claim.outstanding, "unit")} not yet recorded as sold or returned`;
+  const outstanding = Math.max(1, claim.outstanding);
+  return (
+    <div className="purchase-release">
+      <p>
+        {sentences([`${who} bought ${plural(claim.units, "unit")} ${where} on ${when(claim.endedAt)}: ${left}`, recorded ? `So far ${recorded}` : null])}
+      </p>
+      {mine && claim.outstanding > 0 && (
+        <form
+          className="release-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            run(() => api(`claims/${claim.id}/resale`, { memberId: acting, sold: count(sold), returned: count(returned) }));
+          }}
+        >
+          <label>
+            Units sold
+            <input type="number" min={0} max={outstanding} step={1} inputMode="numeric" value={sold} onChange={(e) => setSold(e.target.value)} />
+          </label>
+          <label>
+            Units returned to the shop
+            <input
+              type="number"
+              min={0}
+              max={outstanding}
+              step={1}
+              inputMode="numeric"
+              value={returned}
+              onChange={(e) => setReturned(e.target.value)}
+            />
+          </label>
+          <button type="submit">Record sold or returned</button>
+        </form>
+      )}
+      {acting === "operator" && claim.outstanding > 0 && (
+        <form
+          className="release-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            run(() => api(`claims/${claim.id}/reconcile`, { viewer: "operator", units: count(units), reason }));
+          }}
+        >
+          <label>
+            Units to release
+            <input
+              type="number"
+              min={1}
+              max={outstanding}
+              step={1}
+              inputMode="numeric"
+              value={units}
+              onChange={(e) => setUnits(e.target.value)}
+              required
+            />
+          </label>
+          <label className="wide">
+            Reason (kept with the time)
+            <input type="text" maxLength={300} value={reason} onChange={(e) => setReason(e.target.value)} required />
+          </label>
+          <button type="submit">Record reconciliation</button>
+        </form>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Units earlier bounties for the item still have against its resale demand,
+ * on the card of the bounty that replaced them: what they are, what the cap
+ * would be without them, how they stop counting, and the purchases this
+ * viewer can release.
+ */
+function EarlierUnits({
+  earlier,
+  acting,
+  onDone,
+}: {
+  earlier: Earlier;
+  acting: "operator" | "public" | number;
+  onDone: (m: string, err?: boolean) => void;
+}) {
+  return (
+    <section className="earlier" aria-label="Units from earlier bounties for this item">
+      <b>Units from earlier bounties for this item</b>
+      {earlier.note && <p>{sentence(earlier.note)}</p>}
+      {earlier.binding && earlier.capWithout !== null && (
+        <p className="muted">Without them the distribution cap would be {plural(earlier.capWithout, "unit")}.</p>
+      )}
+      {earlier.release && <p className="muted">{sentence(earlier.release)}</p>}
+      {earlier.claims.map((c) => (
+        <PurchaseRelease key={c.id} claim={c} where={`through bounty ${c.bountyId}`} acting={acting} onDone={onDone} />
+      ))}
+    </section>
+  );
+}
+
 function BountyCard({
   bounty,
   acting,
@@ -1661,6 +1858,12 @@ function BountyCard({
   // for this viewer only while they hold a claim.
   const go = tripGo(trip, Boolean(bounty.viewer?.activeClaim));
   const validation = bounty.validation;
+  // Purchases on this bounty whose units still count against the demand for
+  // the item (the operator sees every one, a member their own).
+  const bought = bounty.sample ? [] : bounty.claims.filter((c) => c.status === "completed" && (c.outstanding ?? 0) > 0);
+  // The earlier bounties' units have their own box, so their cap note is not repeated.
+  const showEarlier = Boolean(bounty.earlier) && bounty.status === "open" && !bounty.sample;
+  const capNotes = (bounty.capBasis?.notes ?? []).filter((n) => !(showEarlier && n === bounty.earlier?.note));
   return (
     <article className={"bounty" + (bounty.status === "open" ? "" : " closed")}>
       <div className="bounty-head">
@@ -1729,13 +1932,33 @@ function BountyCard({
           </Fact>
         ) : null}
       </dl>
-      {bounty.capBasis?.notes?.length ? (
+      {capNotes.length ? (
         <ul className="muted cap-notes">
-          {bounty.capBasis.notes.map((n) => (
+          {capNotes.map((n) => (
             <li key={n}>{n}</li>
           ))}
         </ul>
       ) : null}
+      {showEarlier && bounty.earlier && (
+        <EarlierUnits earlier={bounty.earlier} acting={acting} onDone={done} />
+      )}
+      {bought.length > 0 && (
+        <section className="earlier" aria-label="Units bought through this bounty">
+          <b>Units bought through this bounty</b>
+          <p className="muted">
+            Until they are recorded as sold or returned, they count against the demand for this item on any later bounty for it.
+          </p>
+          {bought.map((c) => (
+            <PurchaseRelease
+              key={c.id}
+              claim={{ ...c, outstanding: c.outstanding ?? 0 }}
+              where="through this bounty"
+              acting={acting}
+              onDone={done}
+            />
+          ))}
+        </section>
+      )}
 
       <div className="pressure">
         <div>

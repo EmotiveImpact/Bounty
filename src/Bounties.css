@@ -382,3 +382,54 @@ label.inline {
 .alert-list li.declined > b {
   font-weight: 600;
 }
+/* Round five: units from earlier bounties for the item, and purchases whose
+   units still count against its demand, with the forms that release them. */
+.earlier {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #c7d0c4;
+  border-left: 4px solid #8a6d10;
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 8px 0;
+  font-size: 14px;
+}
+.earlier p {
+  margin: 0;
+}
+.purchase-release {
+  display: grid;
+  gap: 4px;
+  border-top: 1px solid #dce0d6;
+  padding-top: 6px;
+}
+.release-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 4px 12px;
+}
+.release-form label {
+  flex: 0 1 200px;
+  margin: 0;
+}
+.release-form label.wide {
+  flex: 1 1 240px;
+}
+.release-form input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.release-form button {
+  padding: 4px 10px;
+}
+@media (max-width: 640px) {
+  .release-form label,
+  .release-form label.wide {
+    flex: 1 1 100%;
+  }
+  .release-form button {
+    min-height: 40px;
+    padding: 6px 14px;
+  }
+}

@@ -62,6 +62,10 @@ import {
 // A member's own trip check: their hourly floor and cash date, the units
 // already claimed on the bounty, and trip blockers ahead of the figures.
 import { blockedTripCheck, claimTerms, memberTermsInput, sharedDemand } from "./bounties.mjs";
+// Units bought through a claim that stop counting against the resale demand
+// for the item: recorded as sold or returned by the member, or reconciled by
+// the operator (round 5).
+import { reconcileClaim, recordResale } from "./bounties.mjs";
 
 // A 5 MB photo is about 6.7 million base64 characters.
 const REPORT_BODY_LIMIT = 7_200_000;
@@ -151,7 +155,7 @@ function rechecker(db, { estimate, askingLookup }) {
       result = await estimate(db, request, { now });
       // The figures must be for the units one member can claim: when the
       // estimate was for more, work it out again for that many.
-      const plan = planForBounty(bounty, result, { lookup, db });
+      const plan = planForBounty(bounty, result, { lookup, db, now });
       if (plan.rerun) result = await estimate(db, { ...request, units: plan.figures }, { now });
     } catch (error) {
       result = { error: error.message };
@@ -336,6 +340,29 @@ export function routes(db, options = {}) {
 
   const viewerOf = (url) => resolveViewer(db, url.searchParams.get("viewer"));
 
+  const isCount = (v) => Number.isSafeInteger(v) && v >= 0;
+  const units = (n) => `${n} unit${n === 1 ? "" : "s"}`;
+  /** What still counts against the demand after a release (round 5). */
+  const outstandingWords = (n) =>
+    n === 0
+      ? "None of the units bought through this claim count against the demand for the item now."
+      : `${units(n)} bought through this claim still ${n === 1 ? "counts" : "count"} against the demand for the item until recorded as sold or returned.`;
+  /**
+   * After units are released, the open bounties for the item are worked out
+   * again, so their cap and figures use the demand left now. A failure is
+   * reported, never thrown: the release is already stored.
+   */
+  async function refreshItem(bountyId, now) {
+    try {
+      const barcode = requireBounty(db, bountyId).barcode;
+      if (!barcode) return { rechecked: [], failed: [] };
+      const done = await refreshOpenBounties(db, { barcode, now, estimate, askingLookup });
+      return { rechecked: done.rechecked, failed: done.failed };
+    } catch (error) {
+      return { rechecked: [], failed: [], error: error.message };
+    }
+  }
+
   return [
     [
       "GET",
@@ -421,11 +448,14 @@ export function routes(db, options = {}) {
           lookup = await lookupFor(result?.offer?.gtin, now);
           // Work the figures out for the units one member can claim (the
           // smallest of the estimate's units, the cap and the trial batch).
-          const plan = planForInput(input, result, { lookup, now });
-          if (plan.rerun) {
-            request = { ...request, units: plan.figures };
-            result = await estimate(db, request, { now });
-          }
+          // Units earlier bounties for the item still have against its
+          // demand come off the cap first (round 5).
+          const plan = planForInput(input, result, { lookup, now, db });
+          // The operator's units stay in the stored request, so a re-check
+          // works the figures out again for more units once the cap allows
+          // them (for example after units from an earlier bounty are
+          // recorded as sold), as it does for fewer.
+          if (plan.rerun) result = await estimate(db, { ...request, units: plan.figures }, { now });
         }
         const bounty = createBounty(db, input, { estimate: result, request, lookup, now });
         const view = bountyView(db, bounty, { viewer: { kind: "operator" }, now });
@@ -546,10 +576,13 @@ export function routes(db, options = {}) {
         const blockers = [...view.claimBlockers];
         let headline = blockers.length ? view.trip.headline : null;
         if (!blockers.length && view.remaining <= 0) {
+          // Units earlier bounties for the item still have against its
+          // demand are named when they are why (round 5).
+          const owed = view.earlier?.binding ? view.earlier.note : null;
           headline =
             view.cap === 0
-              ? "Nothing is left to claim: the distribution cap is 0, so the evidence leaves no units to share"
-              : "Nothing is left to claim: the distribution cap for this bounty is fully claimed";
+              ? `Nothing is left to claim: the distribution cap is 0, ${owed ? "because " + owed : "so the evidence leaves no units to share"}`
+              : `Nothing is left to claim: the distribution cap for this bounty is fully claimed${owed ? `. ${owed.charAt(0).toUpperCase()}${owed.slice(1)}` : ""}`;
           blockers.push(headline);
         }
         const check = blockers.length ? blockedTripCheck(own, { blockers, headline }) : own;
@@ -616,7 +649,59 @@ export function routes(db, options = {}) {
           : "";
         return {
           claim: done,
-          message: `Marked as bought: ${done.units} unit${done.units === 1 ? "" : "s"}. You own this stock and carry the risk.${used} ${TERMS.verified}`,
+          message: `Marked as bought: ${done.units} unit${done.units === 1 ? "" : "s"}. You own this stock and carry the risk.${used} ${TERMS.verified} Until you record them as sold or returned, the units you bought count against the demand for this item on any later bounty for it.`,
+        };
+      },
+    ],
+    [
+      "POST",
+      "/api/claims/:id/resale",
+      async ({ params, body }) => {
+        // The member who bought units through a claim records how many they
+        // sold or returned to the shop (round 5), so those units stop
+        // counting against the resale demand for the item.
+        const now = clock();
+        const input = body0(body);
+        const recorded = recordResale(db, {
+          claimId: pathId(params.id, "Claim"),
+          memberId: input.memberId,
+          sold: input.sold,
+          returned: input.returned,
+          now,
+        });
+        const sold = isCount(input.sold) ? input.sold : 0;
+        const returned = isCount(input.returned) ? input.returned : 0;
+        const what = [sold ? `${units(sold)} sold` : "", returned ? `${units(returned)} returned to the shop` : ""].filter(Boolean).join(" and ");
+        return {
+          claim: recorded.claim,
+          bought: recorded.bought,
+          released: recorded.released,
+          outstanding: recorded.outstanding,
+          bounties: await refreshItem(recorded.claim.bounty_id, now),
+          message: `Recorded: ${what}. ${outstandingWords(recorded.outstanding)}`,
+        };
+      },
+    ],
+    [
+      "POST",
+      "/api/claims/:id/reconcile",
+      async ({ params, body }) => {
+        // The operator releases units bought through a claim that the
+        // evidence shows are no longer heading to the resale market, with a
+        // reason (round 5). Accounts are not authenticated yet, so "operator"
+        // is whoever uses the operator view (TERMS.privacy).
+        const now = clock();
+        const input = body0(body);
+        if (input.viewer !== "operator")
+          fail('Only the operator can record a reconciliation: send viewer "operator" from the operator view', 403);
+        const recorded = reconcileClaim(db, { claimId: pathId(params.id, "Claim"), units: input.units, reason: input.reason, now });
+        return {
+          claim: recorded.claim,
+          bought: recorded.bought,
+          released: recorded.released,
+          outstanding: recorded.outstanding,
+          bounties: await refreshItem(recorded.claim.bounty_id, now),
+          message: `Reconciliation recorded: ${units(input.units)} released, with the reason given. ${outstandingWords(recorded.outstanding)}`,
         };
       },
     ],

@@ -73,13 +73,21 @@ const CHECKS_TABLE = `CREATE TABLE IF NOT EXISTS availability_checks (
  in_stock INTEGER NOT NULL,
  units_seen INTEGER,
  note TEXT,
- created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+ created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ branch TEXT,
+ price_pence INTEGER
 )`;
+// branch is the shop as the person identified it (name and street or
+// postcode, or an OpenStreetMap id); price_pence the shelf price for one
+// unit seen on that check. Both are optional: older checks have neither.
 const CHECK_COLUMNS = [
   "id", "barcode", "retailer", "locality", "checked_at", "method", "in_stock",
-  "units_seen", "note", "created",
+  "units_seen", "note", "created", "branch", "price_pence",
 ];
-const CHECK_TYPES = { in_stock: "INTEGER", units_seen: "INTEGER", created: "TEXT" };
+const CHECK_TYPES = { in_stock: "INTEGER", units_seen: "INTEGER", created: "TEXT", price_pence: "INTEGER" };
+// The highest shelf price a check accepts, in pence (£100,000, the most an
+// estimate accepts for any amount).
+export const MAX_SHELF_PRICE_PENCE = 10_000_000;
 
 // sales is a JSON array of { provider, sourceId }: the completed sales the
 // operator confirmed as the exact variant. estimate_inputs is a JSON object
@@ -296,11 +304,84 @@ export function newestShelfEvidence(db, { barcode, retailer, locality, exceptId 
   return newest;
 }
 
+// ---------------------------------------------------------------------------
+// Which branch a check covers. A locality is a town or borough, which can
+// hold several branches of one retailer, so a check may also name the
+// branch: the shop's name and street or postcode, or its OpenStreetMap id
+// (the id Open Prices records for the shop where a price was seen).
+
+// "node/123", "way:456", or an openstreetmap.org link to one.
+const OSM_ID = /(?:^|[^a-z])(node|way|relation)\s*[/:]\s*(\d{1,15})(?!\d)/i;
+// A full UK postcode: an outward code and an inward code ("NW1 7AA").
+const POSTCODE = /(?:^|[^a-z0-9])([a-z]{1,2}\d[a-z\d]?)\s*(\d[a-z]{2})(?![a-z0-9])/i;
+const spaced = (value) => (typeof value === "string" ? value.trim().replace(/\s+/g, " ").toLowerCase() : "");
+
+/** An OpenStreetMap id in the form Open Prices stores ("node/123"), or null. */
+export function osmIdOf(value) {
+  const m = typeof value === "string" ? OSM_ID.exec(value) : null;
+  return m ? `${m[1].toLowerCase()}/${m[2]}` : null;
+}
+
+/** A full UK postcode in value, upper case with one space ("NW1 7AA"), or null. */
+export function postcodeOf(value) {
+  const m = typeof value === "string" ? POSTCODE.exec(value) : null;
+  return m ? `${m[1].toUpperCase()} ${m[2].toUpperCase()}` : null;
+}
+
+/**
+ * The branch a check names, from its branch text: { text, osmId, postcode,
+ * named }. named is false for a check that names no branch. A borough or
+ * town name gives neither an OpenStreetMap id nor a postcode, so it can
+ * never be matched to a shop.
+ */
+export function branchIdentity(value) {
+  const text = typeof value === "string" && value.trim() ? value.trim().replace(/\s+/g, " ") : null;
+  return { text, osmId: osmIdOf(text), postcode: postcodeOf(text), named: text !== null };
+}
+
+/**
+ * Whether two checks name the same branch: both name one, and they have the
+ * same OpenStreetMap id, or (without ids on both) the same postcode, or
+ * (with neither) the same words. Anything else is not shown to be the same.
+ */
+export function sameBranch(a, b) {
+  const x = branchIdentity(typeof a === "string" || a === null || a === undefined ? a : a.branch);
+  const y = branchIdentity(typeof b === "string" || b === null || b === undefined ? b : b.branch);
+  if (!x.named || !y.named) return false;
+  if (x.osmId && y.osmId) return x.osmId === y.osmId;
+  if (x.postcode && y.postcode) return x.postcode === y.postcode;
+  if (x.osmId || y.osmId || x.postcode || y.postcode) return false;
+  return spaced(x.text) === spaced(y.text);
+}
+
+/**
+ * Whether an Open Prices shop ({ osm_id, store, place }) is the branch a
+ * check names: the same OpenStreetMap id, or the same retailer and the same
+ * full postcode. A check that names no branch, or names it only by a town
+ * or borough, never matches.
+ */
+export function shopIsBranch(shop, check) {
+  if (!shop || !check) return false;
+  const named = branchIdentity(check.branch);
+  if (!named.named) return false;
+  const osm = osmIdOf(String(shop.osm_id ?? ""));
+  if (named.osmId && osm) return named.osmId === osm;
+  const postcode = postcodeOf(String(shop.place ?? ""));
+  return Boolean(
+    named.postcode && postcode && named.postcode === postcode && spaced(shop.store) !== "" && spaced(shop.store) === spaced(check.retailer),
+  );
+}
+
 /**
  * Records a branch availability check.
  * input: { barcode, retailer, locality, checkedAt?, method, inStock,
- *          unitsSeen?, note? }. A blank or missing checkedAt is stamped with
- * the server's time now; a given one cannot be in the future.
+ *          unitsSeen?, note?, branch?, pricePence? }. A blank or missing
+ * checkedAt is stamped with the server's time now; a given one cannot be in
+ * the future. branch is the shop as identified (name and street or
+ * postcode, or an OpenStreetMap id such as node/123). pricePence is the
+ * shelf price for one unit seen on this check, in whole pence, the price a
+ * shopper pays without a loyalty card, membership or multibuy; the estimate
+ * costs a trip to this branch at it (estimate.mjs priceAtBranch).
  *
  * Returns the stored row plus:
  *  checkedAtStamped  true when checkedAt was blank and the server time was
@@ -322,15 +403,25 @@ export function recordCheck(db, input = {}, { now = new Date().toISOString() } =
     in_stock: bool(input.inStock, "inStock") ? 1 : 0,
     units_seen: optionalInt(input.unitsSeen, "unitsSeen", 0, 10000),
     note: text(input.note, "note", 500, { optional: true }),
+    branch: text(input.branch, "branch", 200, { optional: true }),
+    price_pence:
+      isBlank(input.pricePence)
+        ? null
+        : Number.isSafeInteger(input.pricePence) && input.pricePence >= 1 && input.pricePence <= MAX_SHELF_PRICE_PENCE
+          ? input.pricePence
+          : fail(`pricePence must be the shelf price for one unit in whole pence, from 1 to ${MAX_SHELF_PRICE_PENCE}`),
   };
   if (!row.in_stock && row.units_seen) fail("unitsSeen must be 0 when no stock was found");
   if (row.in_stock && row.units_seen === 0) fail("unitsSeen must be at least 1 when stock was found");
   const result = db
     .prepare(
-      `INSERT INTO availability_checks(barcode, retailer, locality, checked_at, method, in_stock, units_seen, note)
- VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO availability_checks(barcode, retailer, locality, checked_at, method, in_stock, units_seen, note, branch, price_pence)
+ VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(row.barcode, row.retailer, row.locality, row.checked_at, row.method, row.in_stock, row.units_seen, row.note);
+    .run(
+      row.barcode, row.retailer, row.locality, row.checked_at, row.method, row.in_stock, row.units_seen, row.note,
+      row.branch, row.price_pence,
+    );
   const stored = getCheck(db, Number(result.lastInsertRowid));
   const newest = newestShelfEvidence(db, { ...stored, exceptId: stored.id });
   const newer = newest && Date.parse(newest.at) > Date.parse(stored.checked_at) ? newest : null;
@@ -353,9 +444,16 @@ export const getCheck = (db, id) =>
  * and locality compare without case. When options.locality is given the check
  * must be in that locality; without it any locality matches, so callers that
  * confirm stock for a trip use stockStatus, which requires one. Returns null
- * when the audit tables are absent.
+ * when the audit tables are absent. options.priced true reads only checks
+ * that recorded a shelf price (price_pence).
  */
-export function latestCheck(db, barcode, retailer, sinceIso, { locality = null, until = new Date().toISOString() } = {}) {
+export function latestCheck(
+  db,
+  barcode,
+  retailer,
+  sinceIso,
+  { locality = null, until = new Date().toISOString(), priced = false } = {},
+) {
   const gtin = normaliseBarcode(barcode);
   const shop = trimmed(retailer);
   if (!gtin || !shop || !tableExists(db, "availability_checks")) return null;
@@ -372,8 +470,33 @@ export function latestCheck(db, barcode, retailer, sinceIso, { locality = null, 
     sql += " AND locality = ?";
     params.push(place);
   }
+  if (priced) sql += " AND price_pence IS NOT NULL";
   sql += " ORDER BY checked_at DESC, id DESC LIMIT 1";
   return plain(db.prepare(sql).get(...params));
+}
+
+/**
+ * Every check for a barcode at a retailer in a locality made between
+ * sinceIso and untilIso, newest first (at most limit). Retailer and
+ * locality compare without case. [] when the audit tables are absent or a
+ * value is missing.
+ */
+export function shelfChecks(db, { barcode, retailer, locality, since, until, limit = 200 }) {
+  const gtin = normaliseBarcode(barcode);
+  const shop = trimmed(retailer);
+  const place = trimmed(locality);
+  const from = Date.parse(since);
+  const to = Date.parse(until);
+  if (!gtin || !shop || !place || !Number.isFinite(from) || !Number.isFinite(to) || !tableExists(db, "availability_checks"))
+    return [];
+  return db
+    .prepare(
+      `SELECT * FROM availability_checks
+ WHERE barcode = ? AND retailer = ? AND locality = ? AND checked_at >= ? AND checked_at <= ?
+ ORDER BY checked_at DESC, id DESC LIMIT ?`,
+    )
+    .all(gtin, shop, place, new Date(from).toISOString(), new Date(to).toISOString(), limit)
+    .map(plain);
 }
 
 /**
@@ -772,8 +895,12 @@ const checkOk = (estimate, id) => estimate.alert?.checks?.find((c) => c.id === i
  * The stored evidence for an audit item, read from the database as it stood
  * at the audit time:
  * { evaluatedAt, stock, error, offer, sales, match, permission, tier,
- *   tierReasons, live, offerFresh, alert, missingInputs, warnings,
- *   offerCopy, offerChange }.
+ *   tierReasons, live, offerFresh, alert, missingInputs, priceAtBranch,
+ *   warnings, offerCopy, offerChange }.
+ * priceAtBranch is the estimate's priceAtBranch ({ confirmed, basis, price,
+ * at, check, seen, reason }): whether the price applies at the branch the
+ * stock check covers. When a branch check recorded the shelf price, offer
+ * carries that price and check time (the price the trip pays).
  * missingInputs lists the required costs and times the stored estimate
  * inputs left blank (estimate.mjs), which keep the tier at Review.
  * stock is stockStatus for the item's barcode, retailer and locality. The
@@ -816,6 +943,7 @@ export function auditEvidence(db, item) {
     offerFresh: null,
     alert: null,
     missingInputs: null,
+    priceAtBranch: null,
     warnings: [],
     offerCopy: copy,
     offerChange: null,
@@ -899,6 +1027,18 @@ export function auditEvidence(db, item) {
       failing: e.alert.checks.filter((c) => !c.ok).map((c) => c.id),
     },
     missingInputs: Array.isArray(e.missingInputs) ? e.missingInputs : null,
+    // Whether the price applies at the branch the stock check covers.
+    priceAtBranch: isObject(e.priceAtBranch)
+      ? {
+          confirmed: e.priceAtBranch.confirmed === true,
+          basis: e.priceAtBranch.basis ?? null,
+          price: e.priceAtBranch.price ?? null,
+          at: e.priceAtBranch.at ?? null,
+          check: e.priceAtBranch.check ?? null,
+          seen: e.priceAtBranch.seen ?? null,
+          reason: e.priceAtBranch.reason ?? null,
+        }
+      : null,
     warnings: e.warnings,
     offerChange,
   };
@@ -943,6 +1083,8 @@ export const AUDIT_FAILURES = Object.freeze({
   noStock: "Availability check found no stock",
   staleCheck: `Availability check more than ${CHECK_VALID_DAYS} days from the audit`,
   laterNoStock: "A later availability check in this locality found no stock",
+  priceAtBranch:
+    "Price not confirmed at the branch checked: record the shelf price on the branch check, or use an Open Prices price from the shop the check names",
   promotion: "Promotion eligibility not confirmed",
   shipping: "Parcel cost unknown",
   daysToSell: "Days to sell unknown from the confirmed sales",
@@ -999,7 +1141,9 @@ export function auditOutcome(item = {}) {
   add(
     "offer-fresh",
     read && ev.offerFresh === true,
-    `Offer price observed within ${ALERT_RULES.maxOfferAgeDays} days of the audit`,
+    read && ev.priceAtBranch?.basis === "check"
+      ? `Shelf price recorded on the branch check within ${ALERT_RULES.maxOfferAgeDays} days of the audit`
+      : `Offer price observed within ${ALERT_RULES.maxOfferAgeDays} days of the audit`,
     evidenceFailure(read && ev.offer.freshness === "future" ? F.offerAfterAudit : F.offerStale),
     { evidence: read ? { observed: ev.offer.observed, ageDays: ev.offer.ageDays } : null },
   );
@@ -1024,6 +1168,18 @@ export function auditOutcome(item = {}) {
   add("availability", availability === null, "Branch stock seen in a dated check in this locality", availability, {
     evidence: ev?.stock ?? null,
   });
+  // The price must apply at the branch the stock check covers: a price seen
+  // at another shop or online fails (estimate.mjs priceAtBranch).
+  const branchPrice = read && isObject(ev.priceAtBranch) ? ev.priceAtBranch : null;
+  add(
+    "price-at-branch",
+    branchPrice?.confirmed === true,
+    branchPrice?.basis === "same-shop"
+      ? "Price seen at the same shop the branch check names"
+      : "Shelf price recorded on the branch check",
+    evidenceFailure(F.priceAtBranch),
+    { evidence: branchPrice, reason: branchPrice?.reason ?? null },
+  );
   const offerPromotion = read ? ev.offer.promotion : null;
   add(
     "promotion",

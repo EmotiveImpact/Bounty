@@ -83,6 +83,20 @@ export type Offer = {
   // Set when a newer Open Prices price at the same shop replaced the
   // observation you chose (server/estimate.mjs currentOffer).
   chosenOffer?: { sourceId: string; price: number; observed: string | null };
+  // Set when the branch check recorded the shelf price, which the figures
+  // use (server/estimate.mjs priceAtBranch): the check, and the price as
+  // the source listed it.
+  shelfPrice?: ShelfPriceCheck;
+  seenOffer?: {
+    sourceId: string;
+    price: number;
+    regularPrice: number | null;
+    promotion: string | null;
+    observed: string | null;
+    where: string;
+    online: boolean;
+    ageDays: number | null;
+  };
   // Present once operator-confirmed attributes were applied by the server.
   attributeSource?: Record<AttrKey, AttrSource>;
   operatorConfirmed?: AttrKey[];
@@ -210,6 +224,24 @@ export type StockCheck = {
   in_stock: number;
   units_seen: number | null;
   note: string | null;
+  // The branch as identified and the shelf price for one unit, in pence
+  // (round 5). Older checks have neither.
+  branch?: string | null;
+  price_pence?: number | null;
+};
+// A branch check that recorded the shelf price.
+type ShelfPriceCheck = { id: number; checkedAt: string; branch: string | null; locality: string; price: number };
+// Whether the price applies at the branch the stock check covers
+// (server/estimate.mjs priceAtBranch).
+type PriceAtBranch = {
+  confirmed: boolean;
+  basis: "check" | "same-shop" | null;
+  price: number | null;
+  at: string | null;
+  check: ShelfPriceCheck | null;
+  stockCheck: { id: number; checkedAt: string; branch: string | null; locality: string } | null;
+  seen: { price: number; observed: string | null; where: string; online: boolean };
+  reason: string | null;
 };
 type PricePoint = {
   evidenceClass: string;
@@ -358,6 +390,8 @@ type Estimate = {
   offerAttributes?: AttributeResult;
   // A newer Open Prices price at the same shop that the figures use.
   shopPrice?: { chosen: PricePick; used: PricePick; change: "rose" | "fell" | "same" } | null;
+  // Whether the price applies at the branch checked, and why not.
+  priceAtBranch?: PriceAtBranch;
   inputs?: { defaulted: string[]; costs: Record<string, number> };
   assumptions: string[];
   warnings: string[];
@@ -2127,7 +2161,14 @@ function OfferSummary({ offer }: { offer: Offer }) {
         {offer.sample && <span className="badge sample">Sample</span>}
         <span className="badge warn">Branch stock not established</span>
       </span>
-      {offer.chosenOffer && (
+      {offer.chosenOffer && offer.seenOffer && (
+        <p className="notice" role="status">
+          {"A newer price at the shop where it was seen is " + money(offer.seenOffer.price) + " (" +
+            day(offer.seenOffer.observed) + "), not the " + money(offer.chosenOffer.price) + " you chose (" +
+            day(offer.chosenOffer.observed) + "). The figures use the shelf price at the branch you checked instead."}
+        </p>
+      )}
+      {offer.chosenOffer && !offer.seenOffer && (
         <p className={"notice" + (offer.price > offer.chosenOffer.price ? " warn" : "")} role="status">
           {offer.price === offer.chosenOffer.price
             ? "A newer price at this shop (" + day(offer.observed) + ") gives the same " + money(offer.price) + ", so the figures use its date."
@@ -2137,11 +2178,31 @@ function OfferSummary({ offer }: { offer: Offer }) {
         </p>
       )}
       <dl>
-        <dt>Offer price</dt>
-        <dd>
-          {money(offer.price)}
-          {offer.regularPrice ? " (regular " + money(offer.regularPrice) + ")" : ""}
-        </dd>
+        {offer.shelfPrice && offer.seenOffer ? (
+          <>
+            <dt>Shelf price at the branch</dt>
+            <dd>
+              {money(offer.price)} on the branch check in {offer.shelfPrice.locality}
+              {offer.shelfPrice.branch ? " (" + offer.shelfPrice.branch + ")" : ""} at{" "}
+              {dateTime(offer.shelfPrice.checkedAt)}. The figures use this price.
+            </dd>
+            <dt>Price as listed</dt>
+            <dd>
+              {money(offer.seenOffer.price)}
+              {offer.seenOffer.regularPrice ? " (regular " + money(offer.seenOffer.regularPrice) + ")" : ""}
+              {offer.seenOffer.online ? " online, from " : " at "}
+              {offer.seenOffer.where}, observed {dateTime(offer.seenOffer.observed)}
+            </dd>
+          </>
+        ) : (
+          <>
+            <dt>Offer price</dt>
+            <dd>
+              {money(offer.price)}
+              {offer.regularPrice ? " (regular " + money(offer.regularPrice) + ")" : ""}
+            </dd>
+          </>
+        )}
         <dt>Source</dt>
         <dd>
           {offer.url ? (
@@ -2159,7 +2220,7 @@ function OfferSummary({ offer }: { offer: Offer }) {
           {offer.retailer || "unknown"}
           {offer.location ? " · " + offer.location : ""}
         </dd>
-        <dt>Observed</dt>
+        <dt>{offer.shelfPrice ? "Shelf price seen" : "Observed"}</dt>
         <dd>
           {dateTime(offer.observed)}
           {offer.ageDays !== null && offer.ageDays >= 0 ? " (" + daysAgo(offer.ageDays) + ")" : ""}
@@ -2352,6 +2413,34 @@ function CheckedLine({ estimate }: { estimate: Estimate }) {
   );
 }
 
+/**
+ * Whether the price the figures use applies at the branch checked (server
+ * estimate.mjs priceAtBranch): a shelf price recorded on the branch check,
+ * or an Open Prices price from the shop the check names. A price seen at
+ * another shop, or online, is not confirmed there.
+ */
+function BranchPriceLine({ estimate }: { estimate: Estimate }) {
+  const p = estimate.priceAtBranch;
+  if (!p) return null;
+  const seen =
+    (p.seen.online ? "the " + money(p.seen.price) + " online price from " : "the " + money(p.seen.price) + " seen at ") +
+    p.seen.where;
+  const text =
+    p.confirmed && p.basis === "check" && p.check
+      ? money(p.check.price) + " shelf price recorded on the branch check in " + p.check.locality +
+        (p.check.branch ? " (" + p.check.branch + ")" : "") + " at " + dateTime(p.check.checkedAt) + ". " +
+        (p.check.price === p.seen.price ? "It is the same as " + seen + "." : "The figures use it, not " + seen + ".")
+      : p.confirmed
+        ? (seen.charAt(0).toUpperCase() + seen.slice(1)) + ", the shop the branch check names."
+        : (p.reason ?? "The price is not shown to apply at the branch checked") + ".";
+  return (
+    <p className={"checked-line branch-price" + (p.confirmed ? "" : " warn")} data-confirmed={p.confirmed ? "yes" : "no"}>
+      <b className="inline">{p.confirmed ? "Price confirmed at the branch:" : "Price not confirmed at the branch:"}</b>{" "}
+      {text}
+    </p>
+  );
+}
+
 function Result({ estimate, stale }: { estimate: Estimate; stale: boolean }) {
   const e = estimate.economics;
   const s = estimate.sample;
@@ -2383,6 +2472,7 @@ function Result({ estimate, stale }: { estimate: Estimate; stale: boolean }) {
       )}
       {estimate.access && <AccessLabels needs={estimate.access.needs} />}
       <CheckedLine estimate={estimate} />
+      <BranchPriceLine estimate={estimate} />
       {missing.length > 0 && (
         <p className="notice warn">
           Not entered: {listText(missing)}. A blank is never counted as zero, so profit and
@@ -2563,7 +2653,15 @@ type SavedCheck = StockCheck & { checkedAtStamped?: boolean; olderWarning?: stri
  * when it is older than the newest check or member's stock report for the
  * same branch the form says so before saving, because the newer one still
  * decides what the bounty and the estimate show. After each save the time,
- * units and note are cleared again.
+ * units, shelf price and note are cleared again; the branch is kept for the
+ * next check there.
+ *
+ * Branch and shelf price (round 5): the branch is the shop as identified
+ * (name and street or postcode, or its OpenStreetMap id) and the shelf
+ * price what one unit costs there without a loyalty card or multibuy. A
+ * trip is costed at a shelf price recorded here; without one the price is
+ * confirmed at this branch only when the offer is an Open Prices price from
+ * the shop the check names.
  */
 function StockCheckForm({
   offer,
@@ -2593,6 +2691,8 @@ function StockCheckForm({
   const [unitsSeen, setUnitsSeen] = useState("");
   const [checkedAt, setCheckedAt] = useState("");
   const [note, setNote] = useState("");
+  const [shop, setShop] = useState("");
+  const [shelfPrice, setShelfPrice] = useState("");
   const branch = place ?? locality;
   useEffect(() => {
     let active = true;
@@ -2627,7 +2727,8 @@ function StockCheckForm({
         Branch stock is confirmed only by a check you record here from the last
         two days, at this retailer and in the locality of the estimate
         {locality.trim() ? " (" + locality.trim() + ")" : ", which is not entered yet"}.
-        Feeds, catalogues and past observations never confirm it.
+        Feeds, catalogues and past observations never confirm it. Record the shelf price too:
+        a price seen at another shop or online does not apply at this branch.
         {latest
           ? " Latest usable check: " +
             (latest.in_stock ? "in stock" : "none found") +
@@ -2645,6 +2746,12 @@ function StockCheckForm({
         onSubmit={async (ev) => {
           ev.preventDefault();
           const units = unitsSeen.trim();
+          const priceText = shelfPrice.trim();
+          const pence = priceText ? toPence(priceText) : null;
+          if (pence !== null && !(Number.isSafeInteger(pence) && pence >= 1)) {
+            setMessage({ text: "Enter the shelf price in pounds, for example 12.50, or leave it blank.", warn: true });
+            return;
+          }
           setBusy(true);
           setMessage(null);
           try {
@@ -2655,10 +2762,16 @@ function StockCheckForm({
               method,
               inStock: inStock === "yes",
               ...(units ? { unitsSeen: Math.round(Number(units)) } : {}),
+              ...(shop.trim() ? { branch: shop.trim() } : {}),
+              ...(pence !== null ? { pricePence: pence } : {}),
               // Blank: the server records the time it saves the check.
               ...(checkedAt ? { checkedAt: new Date(checkedAt).toISOString() } : {}),
               ...(note.trim() ? { note: note.trim() } : {}),
             });
+            const priced =
+              typeof saved?.price_pence === "number"
+                ? " Shelf price " + money(saved.price_pence) + " recorded."
+                : " No shelf price recorded, so the price is confirmed at this branch only if the offer is an Open Prices price from the shop this check names.";
             setMessage(
               saved?.olderWarning
                 ? { text: "Check saved. " + saved.olderWarning, warn: true }
@@ -2666,12 +2779,14 @@ function StockCheckForm({
                     text:
                       "Check saved for " +
                       dateTime(saved?.checked_at) +
-                      (checkedAt ? "." : ", the time you saved it."),
+                      (checkedAt ? "." : ", the time you saved it.") +
+                      priced,
                     warn: false,
                   },
             );
             setCheckedAt("");
             setUnitsSeen("");
+            setShelfPrice("");
             setNote("");
             setVersion((n) => n + 1);
             onSaved();
@@ -2702,6 +2817,36 @@ function StockCheckForm({
               maxLength={120}
               onChange={(ev) => setPlace(ev.target.value)}
             />
+          </label>
+          <label>
+            Branch (optional)
+            <input
+              name="branch"
+              value={shop}
+              maxLength={200}
+              aria-describedby="branch-hint"
+              onChange={(ev) => setShop(ev.target.value)}
+            />
+            <span className="muted" id="branch-hint">
+              The shop's name and street or postcode, or its OpenStreetMap id (for example node/123456).
+              A town or borough alone does not say which branch.
+            </span>
+          </label>
+          <label>
+            Shelf price for one unit, £ (optional)
+            <input
+              name="shelfPrice"
+              type="number"
+              inputMode="decimal"
+              min={0.01}
+              step={0.01}
+              value={shelfPrice}
+              aria-describedby="shelf-price-hint"
+              onChange={(ev) => setShelfPrice(ev.target.value)}
+            />
+            <span className="muted" id="shelf-price-hint">
+              What one unit costs on the shelf without a loyalty card or multibuy. The trip is costed at this price.
+            </span>
           </label>
           <label>
             How you checked
@@ -2769,6 +2914,8 @@ function StockCheckForm({
                 <th>Checked</th>
                 <th>Retailer</th>
                 <th>Locality</th>
+                <th>Branch</th>
+                <th>Shelf price</th>
                 <th>Method</th>
                 <th>Result</th>
               </tr>
@@ -2779,6 +2926,8 @@ function StockCheckForm({
                   <td>{dateTime(c.checked_at)}</td>
                   <td>{c.retailer}</td>
                   <td>{c.locality}</td>
+                  <td>{c.branch || "not named"}</td>
+                  <td>{typeof c.price_pence === "number" ? money(c.price_pence) : "not recorded"}</td>
                   <td>{METHODS.find(([v]) => v === c.method)?.[1] || c.method}</td>
                   <td>
                     {c.in_stock ? "In stock" : "None found"}

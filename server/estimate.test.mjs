@@ -127,8 +127,13 @@ const SALES = Array.from({ length: 21 }, (_, i) => "s" + (i + 1));
 const salePrice = (i) => (i < 3 ? 2800 + i * 200 : 3000);
 const salesOf = (ids, provider = "manual") => ids.map((sourceId) => ({ provider, sourceId }));
 
-/** Builds a database where every alert check can pass. */
-function fixture({ now = NOW, sales = SALES, permission = true, check = true, lookup = true } = {}) {
+/**
+ * Builds a database where every alert check can pass. The branch check
+ * records the shelf price (shelfPrice, the same £12.00 the feed lists), so
+ * the price applies at the branch checked; shelfPrice null records a
+ * stock-only check, which leaves the feed's online price unconfirmed there.
+ */
+function fixture({ now = NOW, sales = SALES, permission = true, check = true, lookup = true, shelfPrice = 1200 } = {}) {
   const db = memoryDb(evidenceTables, auditSchema);
   insert(db, offerRow({ observed: daysBefore(1, now) }));
   sales.forEach((id, i) => insert(db, saleRow(id, { price: salePrice(i) }, now)));
@@ -146,11 +151,19 @@ function fixture({ now = NOW, sales = SALES, permission = true, check = true, lo
         inStock: true,
         unitsSeen: 6,
         checkedAt: new Date(Date.parse(now) - 3600000).toISOString(),
+        ...(shelfPrice === null ? {} : { pricePence: shelfPrice }),
       },
       { now },
     );
   return db;
 }
+
+// The offer's price and the shelf price on the fixture's branch check, set
+// together: the figures use the price that applies at the branch.
+const priceAll = (db, pence) => {
+  db.prepare("UPDATE research SET price = ? WHERE source_id = 'offer-1'").run(pence);
+  db.prepare("UPDATE availability_checks SET price_pence = ?").run(pence);
+};
 
 const request = (extra = {}) => ({
   offer: { provider: "awin", sourceId: "offer-1" },
@@ -276,13 +289,15 @@ test("unconfirmed or inexact sales leave the match in research", () => {
 });
 
 test("a stale offer blocks the alert", () => {
-  const db = fixture();
+  // A stock-only check: the feed's own (stale) price is the one judged, and
+  // it is not shown to apply at the branch either (round 5).
+  const db = fixture({ shelfPrice: null });
   db.prepare("UPDATE research SET observed = ? WHERE source_id = 'offer-1'").run(daysBefore(8));
   const r = estimateFromEvidence(db, request());
   assert.equal(r.offer.expired, true);
   // An evidence gap sends the opportunity to Review, which also fails the
   // buying thresholds.
-  assert.deepEqual(failing(r), ["offer-fresh", "buying-thresholds"]);
+  assert.deepEqual(failing(r), ["offer-fresh", "price-at-branch", "buying-thresholds"]);
   assert.equal(r.opportunity.tier, "Review");
   assert.equal(r.alert.eligible, false);
 });
@@ -291,10 +306,11 @@ test("branch stock needs a recent positive check, not the request flag", () => {
   const db = fixture({ check: false });
   const r = estimateFromEvidence(db, request({ localStockConfirmed: true }));
   assert.equal(r.stock.confirmed, false);
-  // Unconfirmed stock caps the tier at Priority 2 but blocks the alert.
-  assert.deepEqual(failing(r), ["local-stock", "availability"]);
-  assert.equal(r.opportunity.tier, "Priority 2");
-  assert.ok(r.opportunity.reasons.includes("Branch stock not confirmed"));
+  // Unconfirmed stock blocks the alert, and with no branch check the feed's
+  // price is not shown to apply at any branch either (round 5): Review.
+  assert.deepEqual(failing(r), ["local-stock", "availability", "price-at-branch", "buying-thresholds"]);
+  assert.equal(r.opportunity.tier, "Review");
+  assert.ok(r.opportunity.reasons.some((x) => /no branch check in Leeds/.test(x)));
 
   // A check older than two days does not count.
   recordCheck(
@@ -315,7 +331,7 @@ test("branch stock needs a recent positive check, not the request flag", () => {
   // A matching recent check passes; a later check that found none overrides it.
   recordCheck(
     db,
-    { barcode: "0" + BARCODE, retailer: "argos", locality: "leeds", method: "retailer_branch_page", inStock: true, checkedAt: daysBefore(0) + "T09:00:00Z" },
+    { barcode: "0" + BARCODE, retailer: "argos", locality: "leeds", method: "retailer_branch_page", inStock: true, checkedAt: daysBefore(0) + "T09:00:00Z", pricePence: 1200 },
     { now: NOW },
   );
   assert.equal(estimateFromEvidence(db, request()).alert.eligible, true);
@@ -534,7 +550,9 @@ test("routes serve candidates and estimates on the server clock", async () => {
     assert.equal(estimate.body.alert.eligible, true);
     assert.equal(estimate.body.match, "exact");
 
-    // A client-supplied clock cannot make an expired offer fresh.
+    // A client-supplied clock cannot make an expired offer fresh. Without
+    // the shelf price on the check, the offer's own date is the price's date.
+    db.prepare("UPDATE availability_checks SET price_pence = NULL").run();
     db.prepare("UPDATE research SET observed = ? WHERE source_id = 'offer-1'").run(daysBefore(20, now));
     const rewound = await api.call("POST", "/api/research/estimate", {
       ...body,
@@ -646,18 +664,18 @@ test("unknown or heavy unit weight rejects the opportunity and blocks the alert"
 
 test("a purchase price outside £5 to £50 is rejected", () => {
   const db = fixture();
-  db.prepare("UPDATE research SET price = 450 WHERE source_id = 'offer-1'").run();
+  priceAll(db, 450);
   const cheap = estimateFromEvidence(db, request());
   assert.equal(tierOf(cheap), "Reject");
   assert.match(cheap.opportunity.reasons[0], /Purchase price outside £5 to £50/);
   assert.ok(!checkOk(cheap, "buying-thresholds"));
-  db.prepare("UPDATE research SET price = 5100 WHERE source_id = 'offer-1'").run();
+  priceAll(db, 5100);
   assert.equal(tierOf(estimateFromEvidence(db, request())), "Reject");
 });
 
 test("short profit or return gives Watch with the target purchase price", () => {
   const db = fixture();
-  db.prepare("UPDATE research SET price = 1500 WHERE source_id = 'offer-1'").run();
+  priceAll(db, 1500);
   const r = estimateFromEvidence(db, request({ hourlyFloor: 0 }));
   // 3000 - 1500 - 40 - 300 - 430 - 150 - 150 = 430 per unit; 430 / 1500 is
   // 28.67%, rounded down to 28.6% so a return never reads higher than it is.
@@ -985,7 +1003,10 @@ test("saved goals move the payout; no dispatch days leave it unknown and fail th
 
 test("an unconfirmed promotion with no regular price goes to Review, not Priority 2", () => {
   const db = fixture();
-  db.prepare("UPDATE research SET promotion = 'Clubcard price', price = 1000 WHERE source_id = 'offer-1'").run();
+  db.prepare("UPDATE research SET promotion = 'Clubcard price' WHERE source_id = 'offer-1'").run();
+  // The shelf price seen at the branch is the promotion price, so its
+  // condition still applies (round 5).
+  priceAll(db, 1000);
   const r = estimateFromEvidence(db, request());
   assert.equal(r.unitCost, 1000);
   assert.equal(tierOf(r), "Review");
@@ -1007,10 +1028,11 @@ test("a recent check that found none on the shelf gives Review, never Priority 2
   assert.equal(r.stock.availability, "out_of_stock");
   assert.equal(tierOf(r), "Review");
   assert.ok(r.opportunity.reasons.includes("Latest check found none on the shelf"));
-  // With no check at all the stock is unknown, which still allows Priority 2.
+  // With no check at all the stock is unknown, and the feed's price is not
+  // shown to apply at any branch, so it is Review too (round 5).
   const unknown = estimateFromEvidence(fixture({ check: false }), request());
   assert.equal(unknown.stock.availability, "unknown");
-  assert.equal(tierOf(unknown), "Priority 2");
+  assert.equal(tierOf(unknown), "Review");
 });
 
 test("without a locality no branch check can count, and the estimate says so", () => {
@@ -1155,9 +1177,12 @@ function importedFixture({ asShipped = false } = {}) {
     { now: NOW },
   );
   db.prepare("INSERT INTO permissions(provider, programme, display) VALUES('awin', ?, 1)").run(retailer);
+  // The check records the shelf price, the price the feed lists, so the
+  // price applies at the branch checked (round 5).
+  const listed = db.prepare("SELECT price FROM research WHERE provider = 'awin' AND source_id = '1001'").get().price;
   recordCheck(
     db,
-    { barcode: "5012345678900", retailer, locality: "Leeds", method: "in_store", inStock: true, checkedAt: daysBefore(0) + "T09:00:00Z" },
+    { barcode: "5012345678900", retailer, locality: "Leeds", method: "in_store", inStock: true, checkedAt: daysBefore(0) + "T09:00:00Z", pricePence: listed },
     { now: NOW },
   );
   lookedUp(db);
@@ -1788,7 +1813,8 @@ test("results carry access needs, when the price and stock were checked and the 
   const r = estimateFromEvidence(db, request());
   assert.deepEqual(r.access.needs.map((n) => n.label), ["Widely accessible"]);
   assert.equal(r.access.carrySource, "default");
-  assert.equal(r.checked.price, daysBefore(1));
+  // The shelf price on the branch check dates the price (round 5).
+  assert.equal(r.checked.price, new Date(Date.parse(NOW) - 3600000).toISOString());
   assert.equal(r.checked.stock, new Date(Date.parse(NOW) - 3600000).toISOString());
   assert.match(r.mainUncertainty, /^Whether buyers still pay about £30\.00/);
 

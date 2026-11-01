@@ -55,6 +55,9 @@ type Entry = {
   minutes: number | null;
   note: string | null;
   created: string;
+  // Refunds only: true when the buyer sent the item back (units back in
+  // stock), false when the buyer kept it; null on other entries.
+  itemReturned?: boolean | null;
 };
 type Proof = {
   id: number;
@@ -108,6 +111,9 @@ type Reconciliation = {
   verificationMissing: string[];
   // Receipt and payout entries whose own proof counts towards verification.
   proofedEntries: number[];
+  // The date the trip was completed (closed, or open with everything bought
+  // sold and paid out), dated by its last entry; null while not completed.
+  completedOn?: string | null;
   forecast: {
     basis: Basis;
     counted: boolean;
@@ -140,10 +146,22 @@ type Summary = {
   cashTiedUp: number;
   unsoldUnits: number;
   realisedMinutes: number;
-  // Earnings per hour on the trips with work time this month only; null
-  // when none of them has money in or out this month.
+  // Earnings per hour on the trips completed this month, each with all its
+  // payouts, costs and work time whatever their month; null when no trip
+  // with work time was completed this month.
   realisedHourly: number | null;
-  hourly?: { trips: number; minutes: number; earnings: number; leftOutTrips: number; leftOutEarnings: number };
+  hourly?: {
+    trips: number;
+    minutes: number;
+    earnings: number;
+    // Completed this month with money but no work time.
+    leftOutTrips: number;
+    leftOutEarnings: number;
+    // Trips with entries this month that are still open, or that were
+    // completed in a later month (and count there).
+    stillOpen?: number;
+    completedLater?: number;
+  };
   payouts: number;
   verifiedPayouts: number;
   verifiedEarnings: number;
@@ -193,7 +211,7 @@ const TYPE_HINT: Record<EntryType, string> = {
   sale: "What the buyer paid, including the postage they paid. Reference: the sold listing or order number.",
   payout: "Money the marketplace actually paid into your account. Give the units it covers so fees can be told apart from payouts still to come.",
   expense: "Travel, parking, postage labels, packaging or fees charged separately from the payout.",
-  refund: "Money you paid back to a buyer for a return, and how many units came back. Only record it if the money left you or was taken from a payout you have already recorded.",
+  refund: "Money you paid back to a buyer. Say whether the item came back to you: a returned item goes back into stock and can be sold again, while an item the buyer kept brings no stock back. Only record it if the money left you or was taken from a payout you have already recorded.",
   work: "Time spent on this trip: travelling, in store, listing, packing and posting.",
   saving: "The saving against the usual price of what you bought. Your own estimate: it is never earnings.",
 };
@@ -375,8 +393,8 @@ function SummaryPanel({ version }: { version: number }) {
               note="Bought on open trips and not yet sold. You carry the risk if they do not sell."
             />
             <Stat
-              label="Realised hourly"
-              value={data.realisedHourly === null ? BLANK : money(data.realisedHourly)}
+              label={hourlyLabel(data)}
+              value={data.realisedHourly === null ? BLANK : money(data.realisedHourly) + " an hour"}
               note={hourlyNote(data)}
             />
           </div>
@@ -387,8 +405,11 @@ function SummaryPanel({ version }: { version: number }) {
             payouts, potential proceeds, cash tied up and unsold units describe open trips as they
             stand today, whatever the month. Potential proceeds count a prediction only when it came
             from live evidence and stock has been bought, scaled to the units bought. Household
-            savings are net of those trips&apos; own costs. Realised hourly counts only the trips with
-            work time recorded this month, so money is never divided by another trip&apos;s hours.{" "}
+            savings are net of those trips&apos; own costs. Earnings per hour are not cash in the
+            month: they cover the trips completed this month (closed, or open with everything bought
+            sold and paid out), each with all its payouts, costs and work time, whatever month they
+            fell in. A trip bought in one month and paid out in the next shows one figure, in the
+            month it was completed. Trips still open are left out until they are completed.{" "}
             {data.verifiedTrips + data.unverifiedTrips > 0 &&
               `This month: ${data.verifiedTrips} verified and ${data.unverifiedTrips} unverified resale trips. Verified earnings: ${signed(data.verifiedEarnings)}.`}
           </p>
@@ -398,25 +419,49 @@ function SummaryPanel({ version }: { version: number }) {
   );
 }
 
+/** "November 2026" for "2026-11". */
+const monthName = (month: string) =>
+  new Date(month + "-01T12:00:00Z").toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
+
+/** Says which trips the month's earnings per hour cover. */
+function hourlyLabel(data: Summary) {
+  const n = data.hourly?.trips ?? 0;
+  return "Earnings per hour on " + (n > 0 ? "the " + plural(n, "trip") : "trips") + " completed in " + monthName(data.month);
+}
+
 /**
- * What the month's hourly figure covers: only trips with work time this
- * month, and how much realised money from other trips was left out.
+ * What the month's hourly figure covers: whole trips completed this month,
+ * and which trips with entries this month were left out and why.
  */
 function hourlyNote(data: Summary) {
   const h = data.hourly;
-  if (!h)
-    return data.realisedMinutes ? "Per hour over " + hours(data.realisedMinutes) + " of recorded work this month." : "No work time recorded this month.";
-  const left =
-    h.leftOutTrips > 0
-      ? " " +
-        (h.leftOutEarnings < 0 ? "A net loss of " + money(-h.leftOutEarnings) : money(h.leftOutEarnings)) +
-        " from " + plural(h.leftOutTrips, "trip") + " without work time is not included."
-      : "";
-  if (data.realisedHourly !== null) return "Per hour over " + hours(h.minutes) + " on " + plural(h.trips, "trip") + "." + left;
-  if (h.trips > 0)
-    return "Not known: the " + hours(h.minutes) + " of work this month is on trips with no money in or out this month." + left;
-  if (h.leftOutTrips > 0) return "Not known: no trip with money this month has work time recorded." + left;
-  return "No work time recorded this month.";
+  if (!h) return data.realisedHourly === null ? "No trip with work time was completed this month." : "";
+  const month = monthName(data.month);
+  const parts = [
+    h.trips > 0
+      ? signed(h.earnings) + " over " + hours(h.minutes) + ", counting all of " +
+        (h.trips === 1 ? "the trip's" : "those trips'") +
+        " payouts, costs and work time, whatever month they fell in."
+      : "Not known: no trip with work time was completed in " + month + ".",
+  ];
+  const open = h.stillOpen ?? 0;
+  if (open > 0)
+    parts.push(
+      "Left out: " + plural(open, "trip") + " with entries this month " + (open === 1 ? "is" : "are") +
+        " still open, and will count once closed or once everything bought is sold and paid out.",
+    );
+  const later = h.completedLater ?? 0;
+  if (later > 0)
+    parts.push(
+      plural(later, "trip") + " with entries this month " + (later === 1 ? "was" : "were") +
+        " completed in a later month and " + (later === 1 ? "counts" : "count") + " there.",
+    );
+  if (h.leftOutTrips > 0)
+    parts.push(
+      (h.leftOutEarnings < 0 ? "A net loss of " + money(-h.leftOutEarnings) : money(h.leftOutEarnings)) +
+        " from " + plural(h.leftOutTrips, "completed trip") + " without work time is not included.",
+    );
+  return parts.join(" ");
 }
 
 /** Names the open trips left out of potential proceeds, if any. */
@@ -722,8 +767,17 @@ function ResaleFigures({ r }: { r: Reconciliation }) {
       </dd>
       <dt>Work time</dt>
       <dd>{minutesText(r.minutes || null)}</dd>
-      <dt>Realised earnings per hour</dt>
-      <dd>{perHour(r.realisedHourly)}</dd>
+      <dt>Realised earnings per hour (the whole trip: all its payouts, costs and work time)</dt>
+      <dd>
+        {perHour(r.realisedHourly)}
+        {r.realisedHourly !== null && r.completedOn !== undefined && (
+          <span className="muted ledger-sub">
+            {r.completedOn
+              ? "Completed " + longDate(r.completedOn) + ", so it counts in " + monthName(r.completedOn.slice(0, 7)) + "'s earnings per hour."
+              : "So far: the trip is not completed yet, so no month's earnings per hour include it."}
+          </span>
+        )}
+      </dd>
       {r.status !== "closed" && (
         <>
           <dt>Pending payout (not realised)</dt>
@@ -996,6 +1050,11 @@ function EntriesTable({
               <td>{longDate(e.occurred)}</td>
               <td>
                 {TYPE_LABEL[e.type]}
+                {e.type === "refund" && (
+                  <span className="muted ledger-sub">
+                    {(e.itemReturned ?? e.units !== null) ? "Item came back into stock" : "Buyer kept the item"}
+                  </span>
+                )}
                 <span className="ledger-sub">{proofBadge(e)}</span>
               </td>
               <td className="num">{e.type === "work" ? hours(e.minutes || 0) : money(e.amount)}</td>
@@ -1022,9 +1081,13 @@ function EntriesTable({
 function EntryForm({ trip, onSaved }: { trip: Trip; onSaved: () => void }) {
   const types = ENTRY_TYPES[trip.kind];
   const [type, setType] = useState<EntryType>(types[0]);
+  // Refunds: whether the buyer sent the item back. Nothing is chosen for the
+  // operator: the form asks every time.
+  const [refundKind, setRefundKind] = useState<"" | "returned" | "kept">("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const unitsRequired = trip.kind === "resale" && ["receipt", "sale", "refund"].includes(type);
+  const unitsRequired =
+    trip.kind === "resale" && (["receipt", "sale"].includes(type) || (type === "refund" && refundKind === "returned"));
   const unitsOptional =
     (trip.kind === "resale" && type === "payout") ||
     (trip.kind === "household" && ["receipt", "saving"].includes(type));
@@ -1046,6 +1109,10 @@ function EntryForm({ trip, onSaved }: { trip: Trip; onSaved: () => void }) {
       if (!Number.isFinite(pounds) || pounds <= 0) return setError("Enter an amount in pounds above zero.");
       body.amount = toPence(pounds);
     }
+    if (type === "refund") {
+      if (!refundKind) return setError("Say whether the buyer sent the item back.");
+      body.itemReturned = refundKind === "returned";
+    }
     if ((unitsRequired || unitsOptional) && value("units")) body.units = Math.round(Number(value("units")));
     setBusy(true);
     setError("");
@@ -1053,6 +1120,7 @@ function EntryForm({ trip, onSaved }: { trip: Trip; onSaved: () => void }) {
       await api("ledger/trips/" + trip.id + "/entries", body);
       form.reset();
       setType(types[0]);
+      setRefundKind("");
       onSaved();
     } catch (err) {
       setError((err as Error).message);
@@ -1067,7 +1135,13 @@ function EntryForm({ trip, onSaved }: { trip: Trip; onSaved: () => void }) {
       <form className="ledger-form" onSubmit={submit}>
         <label>
           Entry
-          <select value={type} onChange={(e) => setType(e.target.value as EntryType)}>
+          <select
+            value={type}
+            onChange={(e) => {
+              setType(e.target.value as EntryType);
+              setRefundKind("");
+            }}
+          >
             {types.map((t) => (
               <option key={t} value={t}>
                 {TYPE_LABEL[t]}
@@ -1086,9 +1160,42 @@ function EntryForm({ trip, onSaved }: { trip: Trip; onSaved: () => void }) {
             <input name="amount" type="number" min={0.01} step={0.01} required inputMode="decimal" />
           </label>
         )}
+        {type === "refund" && (
+          <fieldset className="ledger-choice ledger-form-wide">
+            <legend>Did the buyer send the item back?</legend>
+            <label>
+              <input
+                type="radio"
+                name="refundKind"
+                value="returned"
+                required
+                checked={refundKind === "returned"}
+                onChange={() => setRefundKind("returned")}
+              />
+              <span>Yes, it came back to me. It is back in stock and can be sold again.</span>
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="refundKind"
+                value="kept"
+                required
+                checked={refundKind === "kept"}
+                onChange={() => setRefundKind("kept")}
+              />
+              <span>No, the buyer kept it. I paid the money back and no stock comes back.</span>
+            </label>
+          </fieldset>
+        )}
         {(unitsRequired || unitsOptional) && (
           <label>
-            {type === "payout" ? "Units this payout covers (optional)" : unitsRequired ? "Units" : "Units (optional)"}
+            {type === "payout"
+              ? "Units this payout covers (optional)"
+              : type === "refund"
+                ? "Units that came back"
+                : unitsRequired
+                  ? "Units"
+                  : "Units (optional)"}
             <input name="units" type="number" min={1} max={10000} step={1} required={unitsRequired} />
           </label>
         )}
@@ -1413,9 +1520,9 @@ function MetricsPanel({ version }: { version: number }) {
           </dd>
           <dt>Units left unsold at close</dt>
           <dd>{data.unsoldUnits}</dd>
-          <dt>Realised per hour</dt>
+          <dt>Realised per hour (whole trips: all their payouts, costs and work time)</dt>
           <dd>
-            {data.hourly.realised === null ? BLANK : money(data.hourly.realised)} over {plural(data.hourly.trips, "trip")} with work time
+            {data.hourly.realised === null ? BLANK : money(data.hourly.realised)} over {plural(data.hourly.trips, "closed trip")} with work time
           </dd>
           <dt>Realised against predicted per hour</dt>
           <dd>

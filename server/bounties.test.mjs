@@ -1008,12 +1008,15 @@ test("one member's units of an unproven item stay within one trial batch", () =>
     dispatchAlerts(db, next.id, at(31)).notAlerted.find((x) => x.name === "M").reason,
     /Already holds or bought a trial batch/,
   );
-  // Partial: 2 bought leaves 1.
+  // Partial: 2 bought leaves 1. N's own figures use the same 90 sales as
+  // the bounty: M's 3 units from the earlier bounty still count against the
+  // demand for the item (round 5), and with 26 sales they would take it all.
   const n = diamond(db, "N");
-  const part = claim(db, { bountyId: next.id, memberId: n.id, units: 2, now: at(32) });
+  const roomyCheck = (units) => fakeEstimate({ sample: { count: 90 }, units, journeyCost: JOURNEY.cost, journeyMinutes: JOURNEY.minutes });
+  const part = claim(db, { bountyId: next.id, memberId: n.id, units: 2, now: at(32), check: roomyCheck(2) });
   completeClaim(db, { claimId: part.id, memberId: n.id, now: at(33) });
-  assert.match(status(() => claim(db, { bountyId: next.id, memberId: n.id, units: 2, now: at(34) })).message, /at most 1 more unit/);
-  assert.equal(claim(db, { bountyId: next.id, memberId: n.id, units: 1, now: at(34) }).units, 1);
+  assert.match(status(() => claim(db, { bountyId: next.id, memberId: n.id, units: 2, now: at(34), check: roomyCheck(2) })).message, /at most 1 more unit/);
+  assert.equal(claim(db, { bountyId: next.id, memberId: n.id, units: 1, now: at(34), check: roomyCheck(1) }).units, 1);
 });
 
 test("before the locality's 30-item validation is complete, cards and alerts say so", () => {

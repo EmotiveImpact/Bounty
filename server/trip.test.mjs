@@ -93,6 +93,8 @@ const passing = {
   now: "2026-10-31T12:00:00Z",
   localStockConfirmed: true,
   availability: "in_stock",
+  // The price applies at the branch checked (round 5).
+  priceAtBranch: true,
   promotion: null,
   shippingKnown: true,
   recentIndependentSales: 3,

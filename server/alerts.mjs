@@ -43,6 +43,15 @@ export function ageDays(date, now) {
 //  availability        availability from the latest branch check (in-store,
 //                      phone or retailer branch page); must be "in_stock".
 //                      A feed's own in-stock flag never sets it
+//  priceAtBranch       true only when the acquisition price is shown to apply
+//                      at the branch the stock check covers: that check (or
+//                      an earlier one at the same branch) recorded the shelf
+//                      price, or the offer is from that same identified shop
+//                      (estimate.mjs priceAtBranch). A price seen at another
+//                      shop, or online, never sets it
+//  priceAtBranchBasis  "check" | "same-shop" when it is set
+//  priceAtBranchReason why it is not, in words naming where the price was
+//                      seen and where stock was checked
 //  promotion           promotion or loyalty condition on the price, or null
 //  promotionEligible   true when the user confirmed they qualify
 //  costedAtRegularPrice true when the stock is costed at the known regular
@@ -141,6 +150,19 @@ export function evaluateAlert(input = {}, rules = ALERT_RULES) {
     input.availability === "out_of_stock"
       ? "Latest branch check found none on the shelf"
       : "No branch check has found stock",
+  );
+  // The price must apply where the stock is: a price seen at a shop in one
+  // town, or online, says nothing about the shelf the trip goes to. Without
+  // a stated reason it still fails closed.
+  add(
+    "price-at-branch",
+    input.priceAtBranch === true,
+    input.priceAtBranchBasis === "same-shop"
+      ? "Price seen at the same shop the branch check covers"
+      : "Shelf price recorded on the branch check",
+    typeof input.priceAtBranchReason === "string" && input.priceAtBranchReason.trim()
+      ? input.priceAtBranchReason.trim()
+      : "The price is not shown to apply at the branch checked: record the shelf price on a branch check there",
   );
   // A branch check that counted the shelf caps the units a trip can buy.
   // Planning more than are likely left (the count less units already bought

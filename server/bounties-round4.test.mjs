@@ -179,7 +179,9 @@ async function world({ unitsSeen = 6, retailer = "Argos", promotion = null, item
     it.sales = Array.from({ length: 26 }, (_, i) => ({ source_id: it.barcode + "s" + i, seller: "seller" + i, observed: ago(1 + Math.floor((i * 80) / 26)), listed: ago(5 + i) }));
     upsertResearch(db, "sales", it.sales.map((s) => ({ ...base, ...s, kind: "Reported completed sale", price: 2800, retailer: "eBay UK", licence: "Self-reported" })), { now: NOW });
     storeLookup(db, "ebay", it.barcode, [], { now: NOW });
-    recordCheck(db, { barcode: it.barcode, retailer, locality: "Camden", checkedAt: NOW, method: "in_store", inStock: true, unitsSeen }, { now: NOW });
+    // The check records the shelf price (the £12.00 the feed lists), so the
+    // price applies at the branch checked (round 5).
+    recordCheck(db, { barcode: it.barcode, retailer, locality: "Camden", checkedAt: NOW, method: "in_store", inStock: true, unitsSeen, pricePence: 1200 }, { now: NOW });
   }
   setPermission(db, { provider: "awin", display: true }, { now: NOW });
   const api = await serve(db, [{ routes: (x) => bountyRoutes(x, { clock: () => clock.now, photoDir: "/nonexistent-photos" }) }]);

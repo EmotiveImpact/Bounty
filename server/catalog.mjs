@@ -484,6 +484,7 @@ export function buyingThresholds(offer, economics, rules = OPPORTUNITY_RULES, { 
 // and a payout date from the member's own assumptions.
 const SAMPLE_DETAILS = Object.freeze({
   shipping: () => "Parcel cost is an illustrative sample figure, not a quote",
+  "price-at-branch": () => "Illustrative sample price, not a shelf price seen at a branch",
   "days-to-sell": (detail) =>
     detail === "Days to sell unknown"
       ? "No sold evidence for days to sell; the payout date uses your Goals assumption"
@@ -548,6 +549,7 @@ export function assessSample({
     now,
     localStockConfirmed: false,
     availability: "unknown", // no branch check has been made
+    priceAtBranch: false, // a sample price was never seen at a branch
     promotion: null,
     promotionEligible: false,
     shippingKnown: false, // parcel costs are illustrative, not quotes

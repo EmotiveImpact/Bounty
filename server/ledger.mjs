@@ -28,7 +28,10 @@ export const ENTRY_TYPES = Object.freeze([
 //   sale     sold listing: what the buyer paid, including buyer-paid postage
 //   payout   money the marketplace actually paid you
 //   expense  travel, postage labels, packaging or fees charged separately
-//   refund   money you paid back to a buyer for a return (units returned)
+//   refund   money you paid back to a buyer. units: how many units the buyer
+//            sent back, which go back into stock and can be sold again; none
+//            (null) when the buyer kept the item, so no stock comes back.
+//            addEntry takes itemReturned (true or false) to say which.
 //   work     elapsed working time in minutes (no money)
 //   saving   household only: the saving against the usual price
 export const ENTRY_TYPES_BY_KIND = Object.freeze({
@@ -322,6 +325,9 @@ function entryView(row) {
     minutes: row.minutes === null ? null : Number(row.minutes),
     note: row.note ?? null,
     created: row.created,
+    // Refunds only: true when the buyer sent the item back (units returned
+    // to stock), false when the buyer kept it. Null on other entries.
+    itemReturned: row.type === "refund" ? returnsStock(row) : null,
   };
 }
 /** Proof metadata as the API returns it. Never includes file contents. */
@@ -483,9 +489,69 @@ export function payoutPosition(entries) {
 }
 
 /**
+ * True for a refund whose units came back into stock (the buyer returned the
+ * item). A refund without units is one where the buyer kept the item.
+ */
+export function returnsStock(entry) {
+  return entry.type === "refund" && entry.units !== null && entry.units !== undefined && Number(entry.units) > 0;
+}
+
+const unitsText = (n) => (n === 0 ? "none" : n === 1 ? "1 unit" : n.toLocaleString("en-GB") + " units");
+
+/**
+ * Follows a trip's stock in date order. Receipts add units; a sale takes its
+ * units from the stock on hand at that point; a refund where the buyer sent
+ * the item back puts its units back into stock, so they can be sold again; a
+ * refund where the buyer kept the item moves no stock. Within one day the
+ * receipts come first (entries carry a date, not a time, and a purchase
+ * recorded after a sale on the same day still covers it, as the
+ * sale-before-receipt check allows), then the other movements in the order
+ * they were recorded.
+ *
+ * Returns { onHand, short, shortSales, overReturned }: short is the first
+ * sale that needed more units than were in stock at that point, as
+ * { entry, units, onHand }, and shortSales how many sales did; overReturned
+ * is the first return of more units than had been sold and not already
+ * returned by then, as { entry, units, out }.
+ */
+export function stockWalk(entries) {
+  const receiptFirst = (e) => (e.type === "receipt" ? 0 : 1);
+  const moves = entries
+    .filter((e) => e.type === "receipt" || e.type === "sale" || returnsStock(e))
+    .sort((a, b) =>
+      a.occurred !== b.occurred ? (a.occurred < b.occurred ? -1 : 1) : receiptFirst(a) - receiptFirst(b) || a.id - b.id,
+    );
+  let onHand = 0;
+  let out = 0; // units sold and not yet sent back
+  let short = null;
+  let shortSales = 0;
+  let overReturned = null;
+  for (const e of moves) {
+    const units = Number(e.units ?? 0);
+    if (e.type === "receipt") onHand += units;
+    else if (e.type === "sale") {
+      if (units > onHand) {
+        shortSales += 1;
+        short ??= { entry: e, units, onHand };
+      }
+      onHand = Math.max(0, onHand - units);
+      out += units;
+    } else {
+      if (units > out) overReturned ??= { entry: e, units, out };
+      out = Math.max(0, out - units);
+      onHand += units;
+    }
+  }
+  return { onHand, short, shortSales, overReturned };
+}
+
+/**
  * Checks a resale trip's records against each other. Legacy totals have no
  * receipt or sold listing by construction, which the legacy flag explains, so
- * they are not checked. Returns [{ code, message }].
+ * they are not checked. Stock is followed in date order (stockWalk), so a
+ * unit a buyer sent back can be sold again, while a sale with too few units
+ * in stock at that point, or after a refund where the buyer kept the item,
+ * is flagged. Returns [{ code, message }].
  */
 export function findDiscrepancies(trip, entries) {
   const discrepancies = [];
@@ -494,9 +560,8 @@ export function findDiscrepancies(trip, entries) {
   const has = (type) => entries.some((e) => e.type === type);
   const sales = sumOf(entries, "sale");
   const payouts = sumOf(entries, "payout");
-  const unitsBought = sumOf(entries, "receipt", "units");
   const unitsSold = sumOf(entries, "sale", "units");
-  const unitsReturned = sumOf(entries, "refund", "units");
+  const stock = stockWalk(entries);
   const position = payoutPosition(entries);
   const unitsPaidOut = sumOf(entries, "payout", "units");
   const firstReceipt = earliest(entries, "receipt");
@@ -519,12 +584,29 @@ export function findDiscrepancies(trip, entries) {
     );
   if (has("sale") && !has("receipt"))
     flag("sale-without-receipt", "A sale is recorded without a purchase receipt.");
-  if (unitsSold > unitsBought)
-    flag("sold-above-bought", `More units sold (${unitsSold}) than bought (${unitsBought}).`);
+  if (stock.short) {
+    const { entry, units, onHand } = stock.short;
+    const more = stock.shortSales - 1;
+    flag(
+      "sold-above-bought",
+      `The sale on ${shortDate(entry.occurred)} is for ${unitsText(units)}, but ` +
+        (onHand === 0 ? "none was" : `only ${unitsText(onHand)} ${onHand === 1 ? "was" : "were"}`) +
+        " in stock at that point (units bought, less units sold, plus units buyers sent back)." +
+        (more > 0 ? ` ${more === 1 ? "1 later sale" : more + " later sales"} also had too few in stock.` : "") +
+        " Check the units, or record the purchase or the return the stock came from.",
+    );
+  }
   if (position.basis === "units" && unitsPaidOut > unitsSold)
     flag("paid-above-sold", `Payouts cover more units (${unitsPaidOut}) than were sold (${unitsSold}).`);
-  if (unitsReturned > unitsSold)
-    flag("returned-above-sold", `More units returned (${unitsReturned}) than sold (${unitsSold}).`);
+  if (stock.overReturned) {
+    const { entry, units, out } = stock.overReturned;
+    flag(
+      "returned-above-sold",
+      `The refund on ${shortDate(entry.occurred)} says ${unitsText(units)} came back, but ` +
+        (out === 0 ? "no units had" : `only ${unitsText(out)} had`) +
+        " been sold and not already returned by then.",
+    );
+  }
   if (firstReceipt && firstPayout && firstPayout < firstReceipt)
     flag("payout-before-receipt", "A payout is dated before the first purchase receipt.");
   if (firstReceipt && firstSale && firstSale < firstReceipt)
@@ -716,8 +798,15 @@ export function verification(trip, entries, proofs = [], uses = null) {
  *     is never realised. See payoutPosition() for how fees are told apart
  *     from money still to come. On a closed trip nothing is pending.
  *   impliedFees = the gap between paid sales and payouts (see payoutPosition).
- *   unsoldUnits = units bought - units sold + units returned, floored at 0.
+ *   unsoldUnits = units bought - units sold + units buyers sent back,
+ *     floored at 0. A refund where the buyer kept the item returns no stock.
  *   cashTiedUp = spend not yet recovered by payouts on an open trip.
+ *   realisedHourly = the whole trip's realised contribution over all its
+ *     work time, whatever month each entry falls in (null with no work time).
+ *     On a trip that is not completed yet it is the figure so far.
+ *   completedOn = the date the trip was completed (completedOn()), or null
+ *     while it is still open and not finished. The month summary's earnings
+ *     per hour count a trip in the month it was completed.
  *   forecast.basis / forecast.counted: where the prediction came from (see
  *     predictionBasis) and whether it counts in the prediction accuracy
  *     measures (live evidence, and something recorded on the trip).
@@ -841,7 +930,32 @@ export function reconcile(trip, entries, proofs = [], uses = null) {
     proofedEntries,
     forecast,
     timeToPayoutDays,
+    completedOn: resale
+      ? completedOn(trip, entries, { unitsBought, unsoldUnits, pending: position.pending, payouts })
+      : null,
   };
+}
+
+/**
+ * When a resale trip was completed, as a date, or null while it is not:
+ *   - a closed trip was completed on the date of its last entry (closed trips
+ *     take no new entries, so the date never moves). A closed trip with no
+ *     entries has no date.
+ *   - an open trip is completed once everything bought has been sold and
+ *     every sale paid out: stock was bought, no unit is left unsold, a payout
+ *     is recorded and no sale is waiting for one. It is then completed on the
+ *     date of its last entry. A new entry that leaves something to come (more
+ *     stock, a returned unit, an unpaid sale) makes it open again.
+ * The month summary counts a trip's earnings per hour, over its whole life,
+ * in the month it was completed, and leaves out trips not completed.
+ * figures: { unitsBought, unsoldUnits, pending, payouts } from reconcile().
+ */
+export function completedOn(trip, entries, { unitsBought, unsoldUnits, pending, payouts }) {
+  if (trip.kind !== "resale" || !entries.length) return null;
+  const last = entries.reduce((date, e) => (e.occurred > date ? e.occurred : date), entries[0].occurred);
+  if (trip.status === "closed") return last;
+  const finished = unitsBought > 0 && unsoldUnits === 0 && payouts > 0 && pending === 0;
+  return finished ? last : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -895,12 +1009,23 @@ export function createTrip(db, input, { now = new Date() } = {}) {
 }
 
 /**
- * Units: required on resale receipts (bought), sales (sold) and refunds
- * (returned); optional on payouts (units the payout covers, which lets the
- * ledger tell fees from payouts still to come) and on household receipts and
- * savings. Not used on expenses or work.
+ * Units: required on resale receipts (bought), sales (sold) and refunds where
+ * the buyer sent the item back (units returned to stock); optional on payouts
+ * (units the payout covers, which lets the ledger tell fees from payouts
+ * still to come) and on household receipts and savings. Not used on expenses,
+ * work or refunds where the buyer kept the item.
  */
-function unitsInput(value, type, kind) {
+function unitsInput(value, type, kind, itemReturned = null) {
+  if (type === "refund" && itemReturned === false) {
+    if (!absent(value))
+      fail("Leave units empty when the buyer keeps the item: no stock comes back. Units are for items sent back to you.");
+    return null;
+  }
+  if (type === "refund" && kind === "resale" && absent(value))
+    fail(
+      "units returned must be a whole number between 1 and " + MAX_UNITS +
+        ": say how many units the buyer sent back, or send itemReturned false when the buyer kept the item",
+    );
   const required = kind === "resale" && ["receipt", "sale", "refund"].includes(type);
   const optional =
     (kind === "resale" && type === "payout") ||
@@ -914,7 +1039,11 @@ function unitsInput(value, type, kind) {
 /**
  * Adds a dated entry to an open trip. Amounts are integer pence: at least 1p
  * for money entries and none for work, which records minutes instead. Dates
- * must be real calendar dates, not in the future. Returns the new id.
+ * must be real calendar dates, not in the future. A refund says whether the
+ * buyer sent the item back: itemReturned true (or left out, as before) with
+ * the units that came back, which return to stock and can be sold again, or
+ * itemReturned false with no units when the buyer kept the item. Returns the
+ * new id.
  */
 export function addEntry(db, tripId, input, { now = new Date() } = {}) {
   const trip = requireTrip(db, tripId);
@@ -937,7 +1066,12 @@ export function addEntry(db, tripId, input, { now = new Date() } = {}) {
     amount = int(input.amount, "amount (whole pence)", 1, MAX_PENCE);
     if (!absent(input.minutes)) fail("minutes apply to work entries only");
   }
-  const units = unitsInput(input.units, type, trip.kind);
+  let itemReturned = null;
+  if (!absent(input.itemReturned)) {
+    if (type !== "refund") fail("itemReturned applies to refund entries only");
+    itemReturned = bool(input.itemReturned, "itemReturned");
+  }
+  const units = unitsInput(input.units, type, trip.kind, itemReturned);
   const reference = text(input.reference, "reference", 120, { optional: true });
   const occurred = pastDate(input.occurred, "date", now);
   const note = text(input.note, "note", 500, { optional: true });
@@ -1102,13 +1236,25 @@ export function checkProofTarget(db, { tripId, entryId, sha256 }) {
  *     savings goal counts. householdSavingsGross and householdTripCosts are
  *     its two parts.
  *   realisedMinutes = resale work minutes dated in the month.
- *   realisedHourly = earnings per hour on the trips that logged work time in
- *     the month only: those trips' realised earnings in the month divided by
- *     their work time in the month. Money from trips with no work time in the
- *     month is never divided by someone else's hours; hourly.leftOutTrips and
- *     hourly.leftOutEarnings say how much was left out. Null ("not known")
- *     when no trip with work time in the month has realised money in it.
- *     hourly = { trips, minutes, earnings, leftOutTrips, leftOutEarnings }.
+ * Earnings per hour (a set of whole trips, not the month's cash):
+ *   realisedHourly = earnings per hour on the resale trips completed in the
+ *     month (completedOn() in the month: closed, or open with everything
+ *     bought sold and paid out, dated by the trip's last entry). Each counts
+ *     with all its payouts less all its receipts, expenses and refunds over
+ *     all its work time, whatever month each entry falls in, so stock bought
+ *     and worked on in one month and paid out in the next gives one figure,
+ *     in the month the trip was completed, and none in the month before.
+ *     Money is never divided by another trip's hours, nor one month's payout
+ *     by one month's minutes. Null ("not known") when no trip with work time
+ *     was completed in the month.
+ *     hourly = { trips, minutes, earnings, leftOutTrips, leftOutEarnings,
+ *     stillOpen, completedLater }: trips, minutes and earnings are what was
+ *     measured (whole-trip figures); leftOutTrips and leftOutEarnings are the
+ *     trips completed in the month with money but no work time; stillOpen
+ *     counts trips with entries dated in the month that are not completed
+ *     (left out until they are); completedLater counts trips with entries
+ *     dated in the month that were completed in a later month (counted
+ *     there).
  *   payouts / verifiedPayouts / verifiedEarnings = the same cash figures, in
  *     total and for verified trades only (see verification(): every receipt
  *     and payout has its own proof, a sale is recorded and the records
@@ -1146,7 +1292,15 @@ export function summary(db, month) {
     unverifiedTrips: 0,
   };
   const leftOut = { sample: 0, basisUnknown: 0, nothingBought: 0 };
-  const hourly = { trips: 0, minutes: 0, earnings: 0, withMoney: 0, leftOutTrips: 0, leftOutEarnings: 0 };
+  const hourly = {
+    trips: 0,
+    minutes: 0,
+    earnings: 0,
+    leftOutTrips: 0,
+    leftOutEarnings: 0,
+    stillOpen: 0,
+    completedLater: 0,
+  };
   for (const { trip, entries, proofs, uses } of loadAll(db)) {
     const monthEntries = entries.filter(inMonth);
     if (trip.kind === "household") {
@@ -1162,16 +1316,20 @@ export function summary(db, month) {
     totals.realisedEarnings += payouts - costs;
     totals.payouts += payouts;
     totals.realisedMinutes += minutes;
-    // Realised money: cash in or out this month (a sale is not cash yet).
-    const money = monthEntries.some((e) => CASH_TYPES.includes(e.type));
-    if (minutes > 0) {
-      hourly.trips += 1;
-      hourly.minutes += minutes;
-      hourly.earnings += payouts - costs;
-      if (money) hourly.withMoney += 1;
-    } else if (money) {
-      hourly.leftOutTrips += 1;
-      hourly.leftOutEarnings += payouts - costs;
+    // Earnings per hour: whole trips completed this month, with every entry
+    // they have, whatever its month. A trip completes on its last entry, so
+    // no trip has entries after the month it was completed in.
+    if (r.completedOn && inMonth({ occurred: r.completedOn })) {
+      if (r.minutes > 0) {
+        hourly.trips += 1;
+        hourly.minutes += r.minutes;
+        hourly.earnings += r.realisedContribution;
+      } else if (entries.some((e) => CASH_TYPES.includes(e.type))) {
+        hourly.leftOutTrips += 1;
+        hourly.leftOutEarnings += r.realisedContribution;
+      }
+    } else if (monthEntries.length) {
+      hourly[r.completedOn ? "completedLater" : "stillOpen"] += 1;
     }
     if (monthEntries.length) totals[r.verified ? "verifiedTrips" : "unverifiedTrips"] += 1;
     if (r.verified) {
@@ -1208,15 +1366,8 @@ export function summary(db, month) {
     cashTiedUp: totals.cashTiedUp,
     unsoldUnits: totals.unsoldUnits,
     realisedMinutes: totals.realisedMinutes,
-    realisedHourly:
-      hourly.withMoney > 0 ? Math.round((hourly.earnings * 60) / hourly.minutes) : null,
-    hourly: {
-      trips: hourly.trips,
-      minutes: hourly.minutes,
-      earnings: hourly.earnings,
-      leftOutTrips: hourly.leftOutTrips,
-      leftOutEarnings: hourly.leftOutEarnings,
-    },
+    realisedHourly: hourly.trips > 0 ? Math.round((hourly.earnings * 60) / hourly.minutes) : null,
+    hourly,
     payouts: totals.payouts,
     verifiedPayouts: totals.verifiedPayouts,
     verifiedEarnings: totals.verifiedEarnings,
@@ -1228,7 +1379,9 @@ export function summary(db, month) {
       "Household savings are savings dated in the month less household trip expenses dated in the month. " +
       "Pending payouts, potential proceeds, cash tied up and unsold units are the current position of open resale trips. " +
       "Potential proceeds count only live-evidence predictions on trips with a purchase receipt. " +
-      "Realised hourly divides the earnings of trips with work time in the month by that time; money from trips without work time is left out.",
+      "Realised hourly covers only the trips completed in the month (closed, or open with everything bought sold and paid out), " +
+      "each with all its payouts, costs and work time, whatever month they fall in. " +
+      "Trips still open are left out, and money from trips without work time is left out.",
   };
 }
 
@@ -1256,9 +1409,10 @@ function median(values) {
  *     with the payouts of verified trades.
  *   medianTimeToPayoutDays: first receipt to last payout.
  *   unsoldUnits: units left unsold when the trips were closed.
- *   hourly: realised earnings per hour over trips with work recorded, and a
- *     like-for-like comparison with predicted hourly on the measured trips
- *     that have both.
+ *   hourly: realised earnings per hour over closed trips with work recorded,
+ *     each with all its payouts, costs and work time whatever their dates
+ *     (the same whole-trip basis as the month summary), and a like-for-like
+ *     comparison with predicted hourly on the measured trips that have both.
  */
 export function metrics(db) {
   const all = loadAll(db);
