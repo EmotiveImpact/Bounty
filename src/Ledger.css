@@ -1,0 +1,181 @@
+/* Ledger tab. Shared utilities live in style.css. */
+.ledger {
+  background: none;
+  border: 0;
+  padding: 0;
+}
+.ledger > article:first-child {
+  margin-top: 0;
+}
+.ledger fieldset {
+  min-width: 0;
+}
+.ledger code {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.ledger-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+.ledger-heading h2 {
+  margin-bottom: 8px;
+  overflow-wrap: anywhere;
+}
+.ledger-heading label {
+  margin: 0;
+}
+.ledger-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+.ledger-stat {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  border: 1px solid #c7d0c4;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #fffef9;
+}
+/* Figures that are not realised cash get a dashed frame. */
+.ledger-stat.pending,
+.ledger-stat.estimate {
+  border-style: dashed;
+  background: #fbfaf1;
+}
+.ledger-stat-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+.ledger-stat-value {
+  font: 26px/1.2 Georgia, serif;
+  font-variant-numeric: tabular-nums;
+}
+.ledger-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
+  gap: 0 22px;
+}
+.ledger-trips {
+  max-height: 560px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+/* A chosen trip stays readable (the shared pressed style turns text white). */
+.ledger .card.active {
+  color: inherit;
+}
+.ledger-trip > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ledger-trip > span:last-child {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.ledger-figures {
+  margin: 8px 0;
+  font-size: 14px;
+}
+.ledger-figures dt {
+  text-transform: none;
+}
+.ledger-figures dd {
+  text-align: right;
+}
+.ledger-figures dd.ledger-figures-note {
+  grid-column: 1 / -1;
+  text-align: left;
+  border-bottom: 0;
+}
+.ledger-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr));
+  gap: 0 14px;
+  align-items: end;
+}
+.ledger-form .ledger-form-wide,
+.ledger-form [role="alert"] {
+  grid-column: 1 / -1;
+}
+.ledger-form input,
+.ledger-form select {
+  width: 100%;
+}
+.ledger-layout > article {
+  min-width: 0;
+}
+.ledger-form button {
+  margin: 12px 0;
+  justify-self: start;
+}
+.ledger-form input[type="file"] {
+  padding: 6px 0;
+  border: 0;
+}
+.ledger-tax p {
+  max-width: 72ch;
+}
+@media (max-width: 740px) {
+  .ledger-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ledger-trips {
+    max-height: none;
+  }
+  .ledger-stat-value {
+    font-size: 22px;
+  }
+}
+.ledger-sub {
+  display: block;
+}
+.ledger td.num {
+  white-space: nowrap;
+}
+.ledger-remove {
+  padding: 2px 8px;
+  font-size: 13px;
+}
+/* Stored proofs: one row each, wrapping on narrow screens. */
+.ledger-proofs {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0;
+}
+.ledger-proofs li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) auto;
+  gap: 4px 14px;
+  align-items: start;
+  padding: 8px 0;
+  border-bottom: 1px solid #dce0d6;
+}
+.ledger-proof-file {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ledger-proofs .ledger-proof-link {
+  margin: 0;
+}
+.ledger-proof-link select {
+  width: 100%;
+}
+.ledger-proofs .ledger-remove {
+  margin-top: 18px;
+}
+@media (max-width: 740px) {
+  .ledger-proofs li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ledger-proofs .ledger-remove {
+    margin-top: 0;
+    justify-self: start;
+  }
+}

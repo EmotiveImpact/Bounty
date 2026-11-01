@@ -1,6 +1,8 @@
 # Bounty
 
-A UK resale planning workbench. Vite, React and TypeScript serve the interface. A local Node API calculates ranked trips and stores outcomes in SQLite. A separate worker imports public price observations.
+A UK resale and savings planning workbench. It helps one person decide whether a specific shopping trip can save money, or earn enough from resale to be worth their time, using their own budget, transport, carrying limit, storage, cash date and hourly floor. Vite, React and TypeScript serve the interface. A local Node API calculates trips and stores evidence and outcomes in SQLite. Separate workers import price evidence.
+
+This is a single-user pilot that runs on your own computer. Nothing in it guarantees stock or a sale, and the figures it shows are estimates until a trade is reconciled in the Ledger.
 
 ## Run locally
 
@@ -8,21 +10,56 @@ Requires Node 24 or newer. From the project root:
 
 ```sh
 npm ci
-npm run worker
-npm run dev
+npm run worker   # import public UK observations from Open Prices
+npm run dev      # API on 127.0.0.1:4174 and the app on http://127.0.0.1:5173
 ```
 
-Open the local address printed by Vite (normally http://127.0.0.1:5173). The API listens on 127.0.0.1:4174. Run the worker again to refresh. Run `npm test` and `npm run build` for verification.
+Run `npm test` and `npm run build` to verify. Other commands:
 
-## What the screens mean
+- `npm run worker:loop` repeats the Open Prices import every six hours, with retries.
+- `npm run research -- <source> <query or file>` runs a credentialed lookup or a file import: `awin feed.csv`, `hobnight <barcode or text>`, `keepa <ASIN>`, `ebay <barcode or text>`, `sales sales.json`. Add `--refresh` to bypass the local cache. See [SOURCES.md](docs/SOURCES.md).
 
-- **Planner** models three illustrative Leeds offers. Adjust capital, travel expense, transport, carrying weight, quantity and hourly target. Quantities reserve postage and packaging cash. Each card models an alternative trip, not a combined portfolio. Profit assumes all units sell. Sale prices, handling times, stock limits and fees are examples, not live eBay evidence.
-- **Observations** shows one page of dated GBP observations from the UK imported from [Open Prices](https://prices.openfoodfacts.org/) under the [ODbL](https://opendatacommons.org/licenses/odbl/1-0/). Refreshes upsert by source ID. These records are historical retail evidence, not verified stock or resale recommendations.
-- **Ledger** records user-entered total receipts, total costs and active minutes. It calculates realised contribution and hourly earnings. Entries are self-reported and shared within this single local workspace.
+Copy `.env.example` to `.env` only if you have partner credentials. Credentials stay on the server side and never reach the browser.
 
-The local database is stored in `.data/` (override with BOUNTY_DATA_DIR). Profiles are saved in the browser. This pilot has no multi-user authentication, hosted scheduler or verified paid-provider access. Keep it local. A production release needs authenticated data isolation, licensed sold evidence, freshness and stock checks, and calibrated fees and postage.
+## Where data lives
 
-## Requirements and sources
-[Product requirements](docs/PRD.md) · [Source register, credentials and import commands](docs/SOURCES.md)
+Everything is stored under `.data/` in the project (override with `BOUNTY_DATA_DIR`; keep a custom folder outside the project or name it `.data`). The folder is readable by your user only (mode 0700) and `desk.sqlite` is mode 0600, because it holds private notes, ledger amounts and member details. Ledger proofs are stored in `.data/proofs/` and shelf photos in `.data/report-photos/`, after location and other metadata are removed. No API route serves these files, and the dev server refuses to serve `.data/` or any SQLite file. Only a few per-browser conveniences (the profile, your stricter thresholds, the audit's pilot locality) are kept in the browser.
 
-Open **Research** to inspect source readiness and imported retail, asking-price and manually recorded sales evidence. Use **Observations** for the separate Open Prices dataset. Optional adapters require your authorised feeds and credentials. Run `npm run worker:loop` for recurring public imports while the local process is running.
+## Evidence classes
+
+Bounty never pools these:
+
+- **Retail offers**: what it costs to acquire an item (a shelf price, a feed or a catalogue). An affiliate feed or online catalogue never establishes branch stock; only a dated branch check in the right locality does.
+- **Active asking prices**: what competitors hope to get. They measure resale competition and are never used as sale prices.
+- **Completed sales**: what a buyer actually paid, including buyer-paid postage. Only these set a sale price, and only when they match the exact item (barcode, size, pack, model and condition). Independent sales count distinct named sellers; a listing id is not a seller.
+
+Open Prices observations (ODbL) are kept apart from licensed feed data. Claimed previous prices and recommended retail prices from a feed are shown for comparison and never used as the cost.
+
+## What the tabs do
+
+- **Planner** models five illustrative Leeds offers, labelled as sample data, which can never become a buy alert. It applies your cash, transport (walking, cycling, public transport fare, car or van cost per mile, parking), carrying limit, storage, fees and stricter thresholds. Each card shows cash required before payout, fees, returns allowance, travel shared across units, parcel costs, contribution, active hours, time until payment, earnings per hour, the loss if nothing sells, the break-even sale price, access needs, when price and stock were last checked and the main uncertainty. A first purchase is capped at a trial batch and by the demand the evidence supports, and payment waits for the last unit to sell. Only offers inside every buying threshold reach the shortlist; an offer that fails one (price band, weight, profit per unit after its share of travel, or return), or has a blank cost, is listed separately with the reason. A blank public transport fare means not entered, never free: until you enter it (or tick that your travel is free) the figures that depend on the journey are shown as not known and nothing is shortlisted. "What changes if I drive?" compares the same trips by car (or by public transport if you drive), including mileage, parking, total load and trips that only work one way.
+- **Goals** holds your dispatch days, storage, cash date, payout timing and monthly target, plus named goals with optional deadlines that count only cash received (payouts less costs) by their date. It compares baskets as one shopping trip under one cash limit (every item in a basket shown stays inside the thresholds with its share of the journey), and shows realised earnings, household savings after trip costs, pending payouts and potential proceeds from live trips as separate figures.
+- **Research** lists imported evidence by class, matches a barcoded offer to completed sales of the exact variant, lets you confirm attributes the source left blank after looking at the item, and shows the claimed, observed and sold prices side by side. It estimates a trip with category rules, the opportunity tier, access needs, the main uncertainty, the payout date for the last unit and the full buy-alert checklist. The journey, parcel cost, packaging cost and handling time must be entered; a blank is never zero. Choosing a looser category than the item suggests (General for clothing or food) keeps the stricter rules unless you give a reason, and always says what was dropped. An Open Prices offer is costed at the newest price seen at the same shop, and the shelf count is the latest branch check or stock report less units members have bought through bounties since; planning more units than are left blocks the alert. "Track in ledger" stays disabled until every cost is entered. Following a link to Goals or Sources keeps the estimate in progress.
+- **Validation audit** (at the foot of Research) tracks the 30-item validation for the pilot locality (one London borough, still to be chosen). Each item is judged on the stored evidence, and anything you typed that disagrees with it is shown as a contradiction. An item counts towards the 30 only with a recorded offer, stored evidence that is not sample data, at least one confirmed exact sale and a branch check in the locality, and it is judged on the offer as it was when saved, so a later re-import does not change the result. A complete audit can be signed off only when at least one item passed (the bar is still to be agreed). Signing off records that the operator reviewed the result, not that the figures are proven: until then every bounty in the locality carries the pilot warning with the current count, and afterwards cards and alerts say "Pilot audit in X signed off on <date>: P of E items passed."
+- **Bounties** shares a checked opportunity with local members. Distribution is capped by evidenced shelf units, sales and competing listings seen in the last 7 days, and unknown competition means no distribution. Figures are for the units one member can claim, labelled with whose journey they use, and a claim re-checks the trip with the member's own journey cost and time. Claims reserve attention, never retailer stock. Every check is re-run on every read, and each branch check or import re-runs the open bounties' estimates and every holder's own figures: a lapsed stock check, an empty shelf, a price rise, an expired offer, sales that have aged out or an out-of-date competition check stop claims at once, members who were alerted or hold a claim get a "Don't make the trip" notice, and they are told when it reopens. When more units are claimed than are left on the shelf, the earliest claims stand and later holders are told to stop; a holder whose own figures no longer pass is told why. Claims share demand, so units already claimed count against the next member's sales and payout. A first-order price is used once: buying at it records the offer as used, and a member who has used it, or says they do not qualify, no longer sees the bounty. A new-customer or first-order price is shown only to members who say they qualify, each member confirms their own promotion eligibility, their stricter thresholds apply to their alerts and claims, and an unproven item is limited to one trial batch per member. Members buy and own the stock and carry the risk; bounties pay no reward. Paid early access and earned reputation are shown separately, sponsored bounties are labelled, and every card warns when the locality has not been validated, or after a sign-off says how many audit items passed.
+- **Ledger** reconciles each trip from receipt to sale, payout, expenses, returns and working time, against the prediction it started from. A trade counts as verified only when each receipt and each payout has its own proof attached, there is a sale, and the records reconcile. One file proves one receipt or payout in the whole ledger, so the same document cannot verify two trips. Earnings per hour use only trips with work time recorded and say how much money was left out. Sample predictions never count in potential proceeds or forecast accuracy, and household savings are never counted as earnings.
+- **Sources** shows each source's readiness, licence, recent import runs and display permissions, plus the dated Open Prices observations with attribution.
+
+## Opportunity rules
+
+The agreed buying thresholds are £5 to £50 purchase price per unit, under 2 kg, at least £5 profit per unit after variable costs (including the unit's share of travel), at least a 35% return on the purchase price (compared exactly, never rounded up), several recent independent sales of the exact item, and a trial batch of three for a first purchase. You can tighten these for yourself but not loosen them. The Planner, Goals and Research share your stricter thresholds in this browser; save them on your member profile in Bounties for them to apply to your alerts and claims. Category rules apply on top: clothing needs a size and a returns allowance of at least 15%; food needs its packaging checked and at least 30 days left on the best-before date after the expected sale. Each opportunity is placed in one of five tiers: Priority 1, Priority 2, Watch (with the purchase price that would qualify), Review or Reject.
+
+A buy alert needs every check to pass on positive evidence: live data, an exact match, every required cost and time entered (including the journey), positive contribution, your hourly floor, a fresh offer, confirmed branch stock, promotion eligibility (or costing at the regular price), a known parcel cost, at least three independent completed sales in 90 days from distinct named sellers, a payout for the last unit before the date you need the cash, display permission, Priority 1 or 2, a trial-sized batch, and no more units than the sales rate supports in two weeks after competing listings. Anything missing or unknown fails the check.
+
+## Not built yet
+
+- Accounts and authentication. Members, the operator and visitors are chosen on this computer, so keep the API on localhost.
+- Membership billing. Paid tiers are recorded by the operator, and tier names, windows and prices are still open decisions.
+- Alert delivery. Alerts and "Don't make the trip" notices are recorded in the app; nothing is sent by email or text.
+- Credentialed sources. Hobnight, Keepa and eBay Browse adapters are built and checked against their published specs and live endpoints, but have not been run with real credentials. There is no automated source of completed eBay sales; they are recorded by hand. See [INTEGRATIONS.md](docs/INTEGRATIONS.md).
+- Linking verified Ledger trades back to an item, so every item is still held to a trial batch, and a member's own sales history does not yet change the units suggested.
+- Member transport and carry profiles. Bounty access needs assume a hand-carried load, so a walker and a driver receive the same alerts; each claim is checked against the member's own journey cost and time.
+
+## Documents
+
+[Product requirements](docs/PRD.md) · [Architecture and module contracts](docs/ARCHITECTURE.md) · [Source register, credentials and import commands](docs/SOURCES.md) · [Integration verification register](docs/INTEGRATIONS.md)

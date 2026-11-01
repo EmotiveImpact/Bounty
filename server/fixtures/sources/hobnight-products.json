@@ -1,0 +1,49 @@
+{
+  "data": [
+    {
+      "id": 101,
+      "external_id": "254656543",
+      "gtin": "5000112637922",
+      "name": "Semi skimmed milk 2 pints",
+      "brand": "Example Dairy",
+      "size": "2 Pints",
+      "url": "https://www.tesco.com/groceries/en-GB/products/101",
+      "price": "1.75",
+      "currency": "GBP",
+      "availability": "in_stock",
+      "supermarket": { "id": 1, "name": "Tesco", "slug": "tesco", "region": "uk" },
+      "last_scraped_at": "2026-10-30T08:00:00Z"
+    },
+    {
+      "id": 102,
+      "gtin": null,
+      "name": "Whole milk 4 pints",
+      "size": "4 pints",
+      "url": "https://groceries.asda.com/product/102",
+      "price": "1.95",
+      "currency": "GBP",
+      "availability": "unknown",
+      "supermarket": { "id": 2, "name": "ASDA", "slug": "asda", "region": "uk" },
+      "last_scraped_at": "2026-10-29T08:00:00Z"
+    },
+    {
+      "id": 201,
+      "gtin": "5000112637922",
+      "name": "Milk (Ireland)",
+      "price": "1.60",
+      "currency": "GBP",
+      "availability": "in_stock",
+      "supermarket": { "id": 9, "name": "Tesco Ireland", "slug": "tesco-ie", "region": "ie" }
+    },
+    {
+      "id": 202,
+      "name": "Milk (euro)",
+      "price": "1.60",
+      "currency": "EUR",
+      "availability": "in_stock",
+      "supermarket": { "id": 10, "name": "Dunnes", "slug": "dunnes", "region": "uk" }
+    }
+  ],
+  "links": {},
+  "meta": { "current_page": 1, "last_page": 1, "per_page": 100, "total": 4 }
+}
