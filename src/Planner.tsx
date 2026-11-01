@@ -556,7 +556,15 @@ export default function Planner() {
 
   const all = result?.trips ?? [];
   const isHidden = (t: { accessNeeds: AccessNeed[] }) => t.accessNeeds.some((n) => hidden.includes(n.id));
-  const trips = all.filter((t) => !isHidden(t));
+  // Display only: the member's sort order and shop filter for the cards.
+  const [sort, setSort] = useState<SortKey>("best");
+  const [shop, setShop] = useState("");
+  const shops = [...new Set(all.map((t) => t.shop))].sort();
+  const shown = all.filter((t) => !isHidden(t));
+  const trips = sortTrips(
+    shown.filter((t) => !shop || t.shop === shop),
+    sort,
+  );
   const hiddenTrips = all.filter(isHidden);
   const trip = trips.find((t) => t.sku === selected) ?? trips[0];
 
@@ -784,7 +792,7 @@ export default function Planner() {
         <h2>Trips that fit</h2>
         {result && (
           <span className="muted">
-            {trips.length ? `${plural(trips.length, "trip")} shortlisted, best first` : "None shortlisted yet"}
+            {trips.length ? `${plural(trips.length, "trip")} shortlisted` : "None shortlisted yet"}
             {result.rejected.length ? ` · ${result.rejected.length} not shortlisted` : ""}
           </span>
         )}
@@ -798,6 +806,32 @@ export default function Planner() {
                 .join(", ")}. Until then nothing is shortlisted. The list of offers not shortlisted says why for each one.`
             : "No offer is inside your buying thresholds, so nothing is shortlisted. The list of offers not shortlisted says why."}
         </p>
+      )}
+      {all.length > 1 && (
+        <div className="planner-sortbar" role="group" aria-label="Sort and filter the trips">
+          <span className="planner-sort">
+            <span className="muted">Sort by</span>
+            {SORTS.map(([key, label]) => (
+              <button key={key} type="button" aria-pressed={sort === key} onClick={() => setSort(key)}>
+                {label}
+              </button>
+            ))}
+          </span>
+          {shops.length > 1 && (
+            <label className="planner-shop">
+              <span className="muted">Shop</span>
+              <select value={shop} onChange={(e) => setShop(e.target.value)}>
+                <option value="">All shops</option>
+                {shops.map((s) => (
+                  <option key={s}>{s}</option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+      )}
+      {shop && !trips.length && shown.length > 0 && (
+        <p className="muted">No shortlisted trip at {shop}. Choose All shops to see the others.</p>
       )}
       <div className="planner-grid">
         {trips.map((t) => (
@@ -828,6 +862,21 @@ export default function Planner() {
       />
     </div>
   );
+}
+
+type SortKey = "best" | "hourly" | "unit" | "near";
+const SORTS: [SortKey, string][] = [
+  ["best", "Best first"],
+  ["hourly", "Earnings an hour"],
+  ["unit", "Profit a unit"],
+  ["near", "Nearest"],
+];
+/** The cards in the chosen order. Best first keeps the planner's ranking; an unknown figure sorts last. */
+function sortTrips(list: Trip[], key: SortKey) {
+  if (key === "best") return list;
+  const value = (t: Trip) =>
+    key === "hourly" ? t.economics.hourly : key === "unit" ? t.economics.unitContribution : -t.miles;
+  return [...list].sort((a, b) => (value(b) ?? -Infinity) - (value(a) ?? -Infinity));
 }
 
 // Display only: a simple drawing of each sample item, so a card reads at a
@@ -908,6 +957,11 @@ function TripCard({ trip: t, active, onChoose }: { trip: Trip; active: boolean; 
             <span className="badge ev-asking">Others listed</span>
             <b>{t.competingListings ?? "not known"}</b>
           </span>
+        </span>
+        <span className="planner-cost">
+          {e.journeyPerUnit === null
+            ? "Your share of travel is not known until you enter your fare."
+            : `${money(t.buy)} + ${money(e.journeyPerUnit)} travel = ${money(t.buy + e.journeyPerUnit)} a unit with your journey`}
         </span>
         <span className={"planner-fit " + (t.fits ? "ok" : "warn")}>
           {t.reason}

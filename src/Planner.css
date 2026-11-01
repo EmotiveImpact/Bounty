@@ -730,3 +730,42 @@ h3 .badge {
 .planner-detail .planner-figures {
   grid-template-columns: minmax(9em, 1fr) minmax(0, auto);
 }
+/* Sort and filter strip above the trip cards (display only). */
+.planner-sortbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+}
+.planner-sort {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.planner-sort .muted {
+  margin-right: 4px;
+}
+.planner-sort button {
+  border-radius: 999px;
+  padding: 7px 13px;
+  font-weight: 500;
+  font-size: 13.5px;
+}
+.planner-shop {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+.planner-shop select {
+  height: 36px;
+  font-size: 14px;
+}
+.planner-cost {
+  font-size: 13px;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  margin-top: -4px;
+}
