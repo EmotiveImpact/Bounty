@@ -908,7 +908,7 @@ h3 .badge {
 .planner-cats button[aria-pressed="true"] {
   background: #fff;
   border-color: #fff;
-  color: var(--ink);
+  color: #0d1726;
 }
 .planner-finds .planner-sort button {
   background: transparent;
@@ -917,11 +917,13 @@ h3 .badge {
 }
 .planner-finds .planner-sort button[aria-pressed="true"] {
   background: #fff;
-  color: var(--ink);
+  color: #0d1726;
   border-color: #fff;
 }
 .planner-finds .planner-shop select {
   background: #fff;
+  color: #0d1726;
+  color-scheme: light;
 }
 .planner-finds .planner-trip.active,
 .planner-finds .planner-trip.active:hover:not(:disabled) {
@@ -960,7 +962,7 @@ h3 .badge {
   width: 140px;
   transform: rotate(-45deg);
   background: var(--brand);
-  color: #fff;
+  color: var(--brand-ink);
   text-align: center;
   font-size: 12px;
   font-weight: 700;

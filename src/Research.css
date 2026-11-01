@@ -363,12 +363,12 @@
 
 /* Offer search: a search band in the spirit of a comparison site. */
 .research-calculator fieldset.research-search {
-  background: var(--cta);
+  background: var(--band);
   border: 0;
   border-radius: var(--radius);
   padding: 18px 20px 16px;
   margin-top: 16px;
-  color: var(--cta-ink);
+  color: #fff;
 }
 .research-search legend {
   float: left;

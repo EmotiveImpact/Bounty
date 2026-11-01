@@ -19,6 +19,8 @@
   --brand: #0b7a55;
   --brand-2: #08603f;
   --brand-soft: #e5f3ec;
+  --brand-ink: #ffffff;
+  --band: #12213a;
   --cta: #12213a;
   --cta-ink: #ffffff;
   --cta-hover: #1e3358;
@@ -56,6 +58,60 @@
   background: var(--bg);
   color-scheme: light;
   -webkit-font-smoothing: antialiased;
+}
+/* Dark version: follows the device setting. Light stays the default. The
+   three price colours keep their meaning, only brighter on the dark ground. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b1118;
+    --surface: #121a24;
+    --surface-2: #16202c;
+    --tile: #1b2634;
+    --ink: #e8eef5;
+    --ink-2: #c3cedb;
+    --muted: #94a2b4;
+    --line: #233041;
+    --line-2: #34465c;
+    --brand: #36c690;
+    --brand-2: #5bd6a8;
+    --brand-soft: #12342a;
+    --brand-ink: #04150e;
+    --band: #142740;
+    --cta: #e8eef5;
+    --cta-ink: #0d1726;
+    --cta-hover: #ffffff;
+    --retail: #79a5f5;
+    --retail-soft: #15233c;
+    --asking: #f2a650;
+    --asking-soft: #33230f;
+    --sold: #2fb383;
+    --sold-ink: #04150e;
+    --sold-soft: #12342a;
+    --pass: #45d19a;
+    --pass-soft: #12342a;
+    --fail: #f47e66;
+    --fail-ink: #ffb8a8;
+    --fail-soft: #3a1b15;
+    --info: #a9b6c6;
+    --info-soft: #1b2634;
+    --note: #2b2611;
+    --note-line: #7a6a1f;
+    --note-ink: #f1e3a6;
+    --paid: #ab9ff2;
+    --paid-soft: #231f3d;
+    --sponsor: #d59cf6;
+    --sponsor-soft: #2c1a38;
+    --strip: #070b10;
+    --strip-ink: #c3cedb;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+    --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3);
+    color-scheme: dark;
+  }
+  /* Item pictures are drawn on pastel tiles; dim them a touch at night. */
+  .planner-picture svg,
+  .bounty-hero svg {
+    filter: brightness(0.92);
+  }
 }
 * {
   box-sizing: border-box;
@@ -133,7 +189,7 @@ html {
   height: 32px;
   border-radius: 9px;
   background: var(--brand);
-  color: #fff;
+  color: var(--brand-ink);
   display: grid;
   place-items: center;
   font: 700 17px/1 var(--sans);
