@@ -14,8 +14,8 @@ export function memoryDb(...schemas) {
 // Starts the API for the given route modules on an ephemeral port.
 // Returns { call(method, path, body?), close() }; call resolves to
 // { status, body } with the parsed JSON body.
-export async function serve(db, modules) {
-  const server = createServer(createApi(db, { modules }));
+export async function serve(db, modules, options = {}) {
+  const server = createServer(createApi(db, { modules, ...options }));
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = "http://127.0.0.1:" + server.address().port;
   return {

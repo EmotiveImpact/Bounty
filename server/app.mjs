@@ -3,6 +3,7 @@
 // Handlers receive { req, url, params, body } and return a JSON value or
 // reply(status, value). Throw HttpError (or call fail) for client errors.
 import { HttpError, isReply, readJson } from "./http.mjs";
+import { authorised } from "./access.mjs";
 import * as evidenceRoutes from "./routes-evidence.mjs";
 import * as researchRoutes from "./routes-research.mjs";
 import * as planRoutes from "./routes-plan.mjs";
@@ -33,7 +34,10 @@ const originHost = (value) => {
   return match ? match[1] : "";
 };
 
-export function createApi(db, { modules = routeModules } = {}) {
+// publicHosts and password come from accessConfig() in access.mjs. Without
+// them the API answers only requests addressed to this machine.
+export function createApi(db, { modules = routeModules, publicHosts = [], password = null } = {}) {
+  const allowedHosts = new Set([...LOCAL_HOSTS, ...publicHosts]);
   const table = modules
     .flatMap((m) => m.routes(db))
     .map(([method, pattern, handler, options = {}]) => ({
@@ -76,13 +80,18 @@ export function createApi(db, { modules = routeModules } = {}) {
     };
     try {
       // DNS-rebinding guard: only answer requests addressed to this machine.
-      if (!LOCAL_HOSTS.has(hostHeader(req.headers.host || "")))
+      if (!allowedHosts.has(hostHeader(req.headers.host || "")))
         return send(403, { error: "Local access only" });
+      // A hosted pilot asks for the shared password before anything else.
+      if (password !== null && !authorised(req, password)) {
+        res.setHeader("WWW-Authenticate", 'Basic realm="Bounty", charset="UTF-8"');
+        return send(401, { error: "Enter the Bounty password" });
+      }
       const url = new URL(req.url, "http://127.0.0.1");
       const method = req.method || "GET";
       if (method !== "GET" && method !== "HEAD") {
         const origin = req.headers.origin;
-        if (origin && !LOCAL_HOSTS.has(originHost(origin)))
+        if (origin && !allowedHosts.has(originHost(origin)))
           return send(403, { error: "Local access only" });
         // Browsers mark requests from another site; refuse those writes even
         // when an Origin header is missing.
