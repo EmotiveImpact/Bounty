@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { api, loadProfile, money, percent } from "./api";
+import { api, loadLens, loadProfile, money, percent, saveLens, type Lens } from "./api";
 import { ItemTile, byMode } from "./Planner";
+import { LensSwitch, VerdictBadge, type Verdict } from "./Verdict";
 import "./Deals.css";
 
 // The first screen: every find with its shop price, what it sells for and
@@ -35,6 +36,9 @@ export type Deal = {
   notes: string[];
   travel: Travel;
   sample: boolean;
+  verdict: Verdict;
+  reason: string;
+  walkAway: number | null;
 };
 type DealsResponse = {
   deals: Deal[];
@@ -47,7 +51,7 @@ type DealsResponse = {
  * any: how they travel and their own selling fees. Nothing is sent when they
  * have never opened it, so a first visit needs no setup at all.
  */
-function savedExtras(): Record<string, unknown> {
+export function savedExtras(): Record<string, unknown> {
   let saved = false;
   try {
     saved = localStorage.getItem("bounty-profile") !== null;
@@ -110,6 +114,11 @@ export default function Deals() {
   const [cat, setCat] = useState("");
   const [sort, setSort] = useState<SortKey>("profit");
   const [open, setOpen] = useState<string | null>(null);
+  const [lens, setLensState] = useState<Lens>(loadLens);
+  const setLens = (l: Lens) => {
+    setLensState(l);
+    saveLens(l);
+  };
   const opener = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
@@ -162,16 +171,21 @@ export default function Deals() {
           ))}
         </div>
       )}
-      {all.length > 1 && (
-        <div className="deals-sorts" role="group" aria-label="Sort the deals">
-          <span className="muted">Sort by</span>
-          {SORTS.map(([key, label]) => (
-            <button key={key} type="button" aria-pressed={sort === key} onClick={() => setSort(key)}>
-              {label}
-            </button>
-          ))}
-        </div>
-      )}
+      <div className="deals-bar">
+        {all.length > 1 ? (
+          <div className="deals-sorts" role="group" aria-label="Sort the deals">
+            <span className="muted">Sort by</span>
+            {SORTS.map(([key, label]) => (
+              <button key={key} type="button" aria-pressed={sort === key} onClick={() => setSort(key)}>
+                {label}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <span />
+        )}
+        <LensSwitch lens={lens} onChange={setLens} />
+      </div>
       {all.some((d) => d.sample) && (
         <p className="notice deals-sample">
           <strong>Sample data.</strong> Illustrative Leeds offers with modelled sales, so nothing here is a
@@ -189,8 +203,18 @@ export default function Deals() {
           {all.length ? "No deal matches this search. Clear it or choose All to see the others." : "No deals yet."}
         </p>
       )}
-      <div className="deals-grid">
+      {result && lens === "pro" && deals.length > 0 && (
+        <ProTable
+          deals={deals}
+          onOpen={(el, sku) => {
+            opener.current = el;
+            setOpen(sku);
+          }}
+        />
+      )}
+      <div className="deals-grid" hidden={lens === "pro"}>
         {result &&
+          lens === "simple" &&
           deals.map((d) => (
             <DealCard
               key={d.sku}
@@ -202,7 +226,7 @@ export default function Deals() {
               }}
             />
           ))}
-        {result && <Sharper />}
+        {result && lens === "simple" && <Sharper />}
       </div>
       {result && (
         <p className="muted deals-fees">
@@ -261,6 +285,10 @@ function DealCard({ deal: d, chips, onOpen }: { deal: Deal; chips: string[]; onO
         <span className={"deals-profit" + (small ? " small" : "")}>
           <b>{d.unitProfit === null ? "Not known yet" : money(d.unitProfit)}</b>
           <span>profit a unit after fees and postage</span>
+        </span>
+        <span className="deals-verdict">
+          <VerdictBadge verdict={d.verdict} />
+          {d.walkAway !== null && <span className="muted">Walk away above {money(d.walkAway)}</span>}
         </span>
         <span className="deals-chips">
           <span className="deals-chip travel">{travelText(d.travel)}</span>
@@ -328,6 +356,16 @@ function DealPanel({ deal: d, rules, onClose }: { deal: Deal; rules: DealsRespon
           </button>
         </div>
 
+        <div className="deals-answer">
+          <VerdictBadge verdict={d.verdict} sample={d.sample} />
+          <p>{d.reason}.</p>
+          {d.walkAway !== null && (
+            <p>
+              Walk away if the shelf price is above <strong>{money(d.walkAway)}</strong>. Above that it no longer makes{" "}
+              {money(rules.minUnitProfit)} a unit and a {percent(rules.minReturn)} return.
+            </p>
+          )}
+        </div>
         {c && d.salePrice !== null && d.unitProfit !== null ? (
           <table className="deals-sum">
             <caption className="deals-sr">How the profit a unit is worked out</caption>
@@ -423,5 +461,78 @@ function DealPanel({ deal: d, rules, onClose }: { deal: Deal; rules: DealsRespon
         </div>
       </div>
     </>
+  );
+}
+
+/**
+ * Pro view: every deal as one dense row, for people who scan the numbers.
+ * The same figures as the cards, plus return on spend and competition.
+ */
+function ProTable({ deals, onOpen }: { deals: Deal[]; onOpen: (el: HTMLElement, sku: string) => void }) {
+  return (
+    <div className="deals-pro" role="region" aria-label="Deals in detail" tabIndex={0}>
+      <table>
+        <caption className="deals-sr">Every deal with its figures. Choose a name to see the working.</caption>
+        <thead>
+          <tr>
+            <th scope="col">Item</th>
+            <th scope="col">Answer</th>
+            <th scope="col" className="n">
+              Shop
+            </th>
+            <th scope="col" className="n">
+              Sells for
+            </th>
+            <th scope="col" className="n">
+              Profit
+            </th>
+            <th scope="col" className="n">
+              Return
+            </th>
+            <th scope="col" className="n">
+              Walk away
+            </th>
+            <th scope="col" className="n">
+              Sales
+            </th>
+            <th scope="col" className="n">
+              Listed
+            </th>
+            <th scope="col" className="n">
+              Shelf
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {deals.map((d) => (
+            <tr key={d.sku}>
+              <th scope="row">
+                <button type="button" className="deals-pro-name" onClick={(e) => onOpen(e.currentTarget, d.sku)}>
+                  {d.name}
+                </button>
+                <small>
+                  {d.shop}
+                  {d.miles !== null ? `, ${d.miles} mi` : ""}
+                  {d.sample ? " · sample" : ""}
+                </small>
+              </th>
+              <td>
+                <VerdictBadge verdict={d.verdict} />
+              </td>
+              <td className="n retail">{money(d.buy)}</td>
+              <td className="n sold">{d.salePrice === null ? "–" : money(d.salePrice)}</td>
+              <td className={"n" + (d.unitProfit !== null && d.unitProfit <= 0 ? " loss" : " gain")}>
+                {d.unitProfit === null ? "–" : money(d.unitProfit)}
+              </td>
+              <td className="n">{d.returnOnCost === null ? "–" : percent(d.returnOnCost)}</td>
+              <td className="n">{d.walkAway === null ? "–" : money(d.walkAway)}</td>
+              <td className="n">{d.sales.length}</td>
+              <td className="n">{d.competingListings ?? "–"}</td>
+              <td className="n">{d.stock ?? "–"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

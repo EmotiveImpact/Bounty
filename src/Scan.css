@@ -1,0 +1,231 @@
+/* Scan: one big answer first. Buy, Think and Leave reuse the verdict colours
+   from style.css; prices keep their usual colours (shop blue, sold green). */
+.scan {
+  display: grid;
+  gap: 14px;
+  max-width: 720px;
+}
+.scan-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.scan-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px;
+  box-shadow: var(--shadow);
+}
+.scan-form label {
+  display: grid;
+  gap: 5px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.scan-form input {
+  width: 100%;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  padding: 11px 12px;
+  font-size: 16px;
+  background: var(--surface);
+}
+.scan-camera {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+}
+.scan-camera video {
+  width: 100%;
+  max-width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: 12px;
+  background: var(--strip);
+}
+.scan-go,
+.scan-go:hover:not(:disabled) {
+  border: 0;
+  border-radius: 10px;
+  background: var(--brand);
+  color: var(--brand-ink);
+  font-weight: 700;
+  padding: 11px 18px;
+  text-align: center;
+  text-decoration: none;
+}
+.scan-ghost,
+.scan-ghost:hover:not(:disabled) {
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 600;
+  padding: 10px 14px;
+  text-align: center;
+  text-decoration: none;
+}
+.scan-small {
+  font-size: 13px;
+}
+.scan-samples {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 13.5px;
+}
+.scan-samples button {
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.scan-answer {
+  display: grid;
+  gap: 10px;
+  outline: none;
+}
+.scan-verdict {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  border-radius: var(--radius);
+  padding: 16px 18px;
+}
+.scan-verdict p {
+  color: var(--ink-2);
+}
+.scan-big {
+  font-size: 40px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.scan-name {
+  font-size: 16px;
+  color: var(--ink);
+}
+.scan-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 8px;
+}
+.scan-facts span {
+  display: grid;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 8px 12px;
+}
+.scan-facts small {
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.scan-facts b {
+  font-size: 19px;
+  font-variant-numeric: tabular-nums;
+}
+.scan-facts .gain,
+.scan-tally li b {
+  color: var(--pass);
+}
+.scan-facts .loss {
+  color: var(--fail);
+}
+.scan-facts .retail {
+  color: var(--retail);
+}
+.scan-facts .sold {
+  color: var(--sold);
+}
+.scan-walk {
+  border: 1.5px dashed var(--line-2);
+  border-radius: 12px;
+  padding: 10px 14px;
+  font-size: 14.5px;
+}
+.scan-walk b {
+  color: var(--fail);
+}
+.scan-actions,
+.scan-take {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.scan-take > span:first-child {
+  flex: 1 1 160px;
+  font-weight: 600;
+}
+.scan-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.scan-step button {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  font-size: 18px;
+  font-weight: 800;
+  padding: 0;
+}
+.scan-step b {
+  min-width: 26px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.scan-tally {
+  display: grid;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px;
+}
+.scan-tally-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.scan-tally h2 {
+  font-size: 17px;
+}
+.scan-tally ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+}
+.scan-tally li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid var(--line);
+  padding: 7px 0;
+  font-size: 14px;
+}
+@media (max-width: 560px) {
+  .scan-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .scan-big {
+    font-size: 34px;
+  }
+}

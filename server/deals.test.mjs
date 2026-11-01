@@ -112,7 +112,66 @@ test("GET and POST /api/deals", async () => {
     assert.equal(posted.body.deals[0].travel.cost, 380);
     const bad = await api.call("POST", "/api/deals", { transport: "Rocket" });
     assert.equal(bad.status, 400);
+    const scanned = await api.call("POST", "/api/scan", { sku: "pot", price: 900 });
+    assert.equal(scanned.status, 200);
+    assert.equal(scanned.body.deal.buy, 900);
+    assert.equal((await api.call("POST", "/api/scan", { barcode: "123" })).status, 400);
   } finally {
     await api.close();
   }
+});
+
+test("each deal carries a plain verdict and a walk-away shop price", async () => {
+  const { judge, walkAwayPrice, VERDICT_MIN_SALES } = await import("./deals.mjs");
+  const jacket = dealFor(bySku.jacket);
+  assert.equal(jacket.verdict, "buy");
+  assert.match(jacket.reason, /Sample figures, not real sales$/);
+  // Net after fees, returns, postage and packaging is 2900 - 1187 = 1713.
+  // £5 profit caps it at 1213; a 35% return caps it at floor(1713 / 1.35) = 1268.
+  assert.equal(jacket.walkAway, 1213);
+  const knit = dealFor(bySku.knit);
+  assert.equal(knit.verdict, "think");
+  assert.match(knit.reason, /below £5\.00/);
+  // A loss reads LEAVE and has no walk-away price inside the band.
+  const loss = dealFor({ ...bySku.jacket, buy: 4000 });
+  assert.equal(loss.verdict, "leave");
+  assert.match(loss.reason, /You would lose £/);
+  // No completed sales: unknown, never a guess.
+  const none = dealFor({ ...bySku.jacket, sales: [] });
+  assert.equal(none.verdict, "unknown");
+  assert.equal(none.walkAway, null);
+  // Too few sales reads THINK even when every threshold is met.
+  const few = judge({ salePrice: 3000, costs: { fees: 0, returns: 0, postage: 0, packaging: 0 }, unitProfit: 2000, sales: VERDICT_MIN_SALES - 1, notes: [] });
+  assert.equal(few.verdict, "think");
+  assert.match(few.reason, /fewer than the 3 needed/);
+  // The walk-away price meets both thresholds exactly and one penny more does not.
+  const costs = { fees: 417, returns: 435, postage: 300, packaging: 35 };
+  const w = walkAwayPrice(2900, costs);
+  assert.equal(dealFor({ ...bySku.jacket, buy: w }).meetsThresholds, true);
+  assert.equal(dealFor({ ...bySku.jacket, buy: w + 1 }).meetsThresholds, false);
+  // Never above the £50 band, never below £5.
+  assert.equal(walkAwayPrice(100_000, { fees: 0, returns: 0, postage: 0, packaging: 0 }), 5000);
+  assert.equal(walkAwayPrice(900, { fees: 0, returns: 0, postage: 0, packaging: 0 }), null);
+});
+
+test("a scan uses the shelf sticker price and never guesses an unknown barcode", async () => {
+  const { scan } = await import("./deals.mjs");
+  const r = scan({ sku: "jacket", price: 1500 });
+  assert.equal(r.found, true);
+  assert.equal(r.shelfPrice, 1500);
+  assert.equal(r.deal.buy, 1500);
+  assert.equal(r.deal.unitProfit, 2900 - 1500 - 417 - 435 - 300 - 35);
+  assert.equal(r.deal.verdict, "think");
+  assert.equal(scan({ sku: "jacket" }).shelfPrice, 1000);
+  const unknown = scan({ barcode: "5000112637922" });
+  assert.equal(unknown.found, false);
+  assert.equal(unknown.verdict, "unknown");
+  assert.equal(unknown.barcode, "05000112637922");
+  assert.throws(() => scan({ barcode: "12345" }), HttpError);
+  assert.throws(() => scan({ sku: "nope" }), HttpError);
+  assert.throws(() => scan({ sku: "jacket", price: 0 }), HttpError);
+  assert.throws(() => scan({}), HttpError);
+  assert.throws(() => scan(null), HttpError);
+  // Travel extras work the same as on the Deals list.
+  assert.equal(scan({ sku: "jacket", transport: "Walk" }).deal.travel.added, true);
 });

@@ -8,9 +8,10 @@
 // they travel, and it never hides, blocks or reorders a deal. Nothing here
 // is a buy alert: the Planner and the alert gate still decide that.
 import { MODES, SAMPLE_ASSUMPTIONS, lowerMedian, tripEconomics } from "./trip.mjs";
-import { OPPORTUNITY_RULES, categoryReturnsRate, hardFilters } from "./opportunity.mjs";
+import { OPPORTUNITY_RULES, categoryReturnsRate, hardFilters, meetsReturn } from "./opportunity.mjs";
 import { blankInputs, fareMissing, journeyFor, offers as sampleOffers, unitThresholdFailures } from "./catalog.mjs";
 import { fail } from "./http.mjs";
+import { normaliseBarcode } from "./matching.mjs";
 
 const isObject = (v) => Boolean(v) && typeof v === "object" && !Array.isArray(v);
 
@@ -139,8 +140,68 @@ export function dealFor(offer, options = {}, rules = OPPORTUNITY_RULES) {
     notes,
     travel: dealTravel(offer, options),
     sample: offer.sample === true,
+    ...sampleLabel(judge({ salePrice, costs: e?.costs ?? null, unitProfit, sales: completed.length, notes }, rules), offer),
   };
 }
+
+// A sample deal's sales are modelled, so its verdict says so in its reason.
+function sampleLabel(j, offer) {
+  return offer.sample === true ? { ...j, reason: j.reason + ". Sample figures, not real sales" } : j;
+}
+
+/**
+ * The fewest completed sales of the exact item before a deal can read BUY.
+ * A value Claude set for Edem to confirm: fewer sales than this reads THINK.
+ */
+export const VERDICT_MIN_SALES = 3;
+
+/**
+ * The highest shop price, in pence, at which one unit still meets the profit
+ * and return thresholds, or null when no price in the agreed band does.
+ * Profit a unit falls penny for penny with the shop price, because fees,
+ * the returns allowance, postage and packaging are all taken from the sale
+ * price, so the limit is worked out directly and then checked with
+ * meetsReturn() so it matches the thresholds exactly.
+ */
+export function walkAwayPrice(salePrice, costs, rules = OPPORTUNITY_RULES) {
+  if (!Number.isSafeInteger(salePrice) || !costs) return null;
+  const net = salePrice - costs.fees - costs.returns - costs.postage - costs.packaging;
+  let p = Math.min(
+    net - rules.minUnitProfit,
+    Math.floor((net * 10000) / (10000 + Math.round(rules.minReturn * 10000))),
+    rules.maxUnitPrice,
+  );
+  while (p >= rules.minUnitPrice && !(net - p >= rules.minUnitProfit && meetsReturn(net - p, p, rules.minReturn))) p--;
+  return p >= rules.minUnitPrice ? p : null;
+}
+
+/**
+ * The plain answer for a card or a scan: buy, think, leave, or unknown when
+ * there is no completed-sale estimate. BUY needs every threshold met and at
+ * least VERDICT_MIN_SALES completed sales; a positive profit that misses a
+ * threshold reads THINK; a loss reads LEAVE. This is a reading of the
+ * evidence, never a buy alert: sample deals stay labelled as samples.
+ */
+export function judge({ salePrice, costs, unitProfit, sales, notes }, rules = OPPORTUNITY_RULES) {
+  const walkAway = walkAwayPrice(salePrice, costs, rules);
+  if (unitProfit === null)
+    return { verdict: "unknown", reason: "No completed sales of this exact item yet, so there is no proof of what it sells for", walkAway };
+  if (unitProfit <= 0)
+    return { verdict: "leave", reason: `You would lose ${gbp(-unitProfit)} a unit after fees and postage`, walkAway };
+  if (notes.length === 0 && sales >= VERDICT_MIN_SALES)
+    return {
+      verdict: "buy",
+      reason: `${sales} completed sales back it up, and you keep ${gbp(unitProfit)} a unit after fees and postage`,
+      walkAway,
+    };
+  const why =
+    notes.length > 0
+      ? notes[0]
+      : `Only ${sales} completed ${sales === 1 ? "sale" : "sales"} so far, fewer than the ${VERDICT_MIN_SALES} needed`;
+  return { verdict: "think", reason: `${gbp(unitProfit)} a unit, but: ${why}`, walkAway };
+}
+
+const gbp = (pence) => "£" + (pence / 100).toFixed(2);
 
 /**
  * Every offer as a deal, biggest profit a unit first; a deal whose profit is
@@ -162,4 +223,37 @@ export function listDeals(options = {}, { offers = sampleOffers } = {}) {
       minReturn: OPPORTUNITY_RULES.minReturn,
     },
   };
+}
+
+/**
+ * One scan in the shop. The body names a sample deal by `sku`, or a scanned
+ * `barcode`, and may carry the price on the shelf sticker (`price`, pence)
+ * and the same optional extras as the Deals list. A valid barcode with no
+ * completed-sale evidence in Bounty is answered as not found, never guessed.
+ */
+export function scan(input, { offers = sampleOffers } = {}) {
+  if (!isObject(input)) fail("Send the scan as a JSON object");
+  const { sku, barcode, price, ...rest } = input;
+  const options = readDealOptions(rest);
+  if (price !== undefined && price !== null && (!Number.isSafeInteger(price) || price < 1 || price > 100_000))
+    fail("The shelf price must be a whole number of pence from 1 to 100000");
+  let offer = null;
+  let code = null;
+  if (typeof sku === "string" && sku) {
+    offer = offers.find((o) => o.sku === sku) ?? null;
+    if (!offer) fail("No deal has that reference");
+  } else if (barcode !== undefined) {
+    code = normaliseBarcode(barcode);
+    if (!code) fail("That is not a valid barcode. Check the digits and try again");
+    offer = offers.find((o) => o.barcode && normaliseBarcode(o.barcode) === code) ?? null;
+  } else fail("Scan a barcode or pick a deal");
+  if (!offer)
+    return {
+      found: false,
+      barcode: code,
+      verdict: "unknown",
+      reason: "Bounty has no completed sales for this barcode yet. Do not buy on a guess: check it in Research first",
+    };
+  const shelf = Number.isSafeInteger(price) ? price : offer.buy;
+  return { found: true, barcode: code, shelfPrice: shelf, deal: dealFor({ ...offer, buy: shelf }, options) };
 }

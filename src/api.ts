@@ -218,3 +218,22 @@ export const barcodeText = (code: string | null | undefined): string => {
   const text = typeof code === "string" ? code : "";
   return /^0{6}\d{8}$/.test(text) ? text.slice(6) : /^0\d{13}$/.test(text) ? text.slice(1) : text;
 };
+
+// Simple or Pro: how much detail Deals and Scan show. Both views use the same
+// figures; Pro adds return on spend, competition and quantities. A display
+// choice remembered in this browser, never a paid feature.
+export type Lens = "simple" | "pro";
+export function loadLens(): Lens {
+  try {
+    return localStorage.getItem("bounty-lens") === "pro" ? "pro" : "simple";
+  } catch {
+    return "simple";
+  }
+}
+export function saveLens(lens: Lens) {
+  try {
+    localStorage.setItem("bounty-lens", lens);
+  } catch {
+    // Private windows may refuse storage; the switch still works for this visit.
+  }
+}

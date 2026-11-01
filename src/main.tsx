@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
 import Deals from "./Deals";
+import Scan from "./Scan";
 import Planner from "./Planner";
 import Goals from "./Goals";
 import Research from "./Research";
@@ -16,14 +17,19 @@ const TABS = {
     lead: "Cheap in the shop, sells for more online. The biggest profit a unit comes first, and nothing needs setting up.",
     view: Deals,
   },
+  Scan: {
+    title: "Scan in the shop",
+    lead: "Scan or type a barcode and add the sticker price for a straight answer: buy, think or leave.",
+    view: Scan,
+  },
   Planner: {
     title: "Trip planner",
     lead: "Optional. Add your travel, cash and carrying limit to see which trips fit you.",
     view: Planner,
   },
   Goals: {
-    title: "Goals and baskets",
-    lead: "Optional. Plan against your dispatch days, storage, cash date and monthly target.",
+    title: "Money and goals",
+    lead: "What you are saving or earning towards, planned against your dispatch days, storage and cash date.",
     view: Goals,
   },
   Research: {
@@ -32,13 +38,13 @@ const TABS = {
     view: Research,
   },
   Bounties: {
-    title: "Bounties",
-    lead: "Share checked opportunities without flooding the store or the market.",
+    title: "Tips",
+    lead: "Shelf tips and bounties with a set number of places, so each one stays worth claiming.",
     view: Bounties,
   },
   Ledger: {
-    title: "Outcome ledger",
-    lead: "Reconcile receipts, sales, payouts, costs and time against the prediction.",
+    title: "Stock and sales",
+    lead: "What you bought, listed, sold and got paid, checked against what Bounty predicted.",
     view: Ledger,
   },
   Sources: {
@@ -192,7 +198,7 @@ function App() {
         </footer>
       </div>
       <nav className="bottombar" aria-label="Sections">
-        {MEMBER.map((t) => navButton(t))}
+        {MEMBER.map((t) => navButton(t, t === "Scan" ? "scan-tab" : undefined))}
         <button aria-pressed={moreActive} aria-expanded={toolsOpen} onClick={() => setToolsOpen(!toolsOpen)}>
           <Icon name="tools" />
           <span className="rail-label">More</span>
@@ -213,26 +219,29 @@ function App() {
 }
 
 // Deals first, so anyone can open the app and see finds with no setup. The
-// trip planner and goals are optional extras for sharper numbers; the
-// research desk and source admin are tools. On phones the extras and tools
-// share the More menu.
-const MEMBER: Tab[] = ["Deals", "Bounties", "Ledger"];
-const EXTRAS: Tab[] = ["Planner", "Goals"];
+// phone bar follows a reseller's day: browse Deals at home, check Tips,
+// Scan in the shop, then track Stock and Money. The trip planner is an
+// optional extra; the research desk and source admin are tools. On phones
+// the extras and tools share the More menu.
+const MEMBER: Tab[] = ["Deals", "Bounties", "Scan", "Ledger", "Goals"];
+const EXTRAS: Tab[] = ["Planner"];
 const TOOLS: Tab[] = ["Research", "Sources"];
 const MORE: Tab[] = [...EXTRAS, ...TOOLS];
 const LABEL: Record<Tab, string> = {
   Deals: "Deals",
+  Scan: "Scan",
   Planner: "Trip planner",
-  Goals: "Goals",
+  Goals: "Money",
   Research: "Research",
-  Bounties: "Bounties",
-  Ledger: "Ledger",
+  Bounties: "Tips",
+  Ledger: "Stock",
   Sources: "Sources",
 };
 
 // Line icons for the menu, drawn on a 24-unit grid.
 const ICON_PATHS: Record<string, string[]> = {
   Deals: ["M19 5 5 19", "M7 9.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z", "M17 19.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z"],
+  Scan: ["M4 8V5a1 1 0 0 1 1-1h3", "M16 4h3a1 1 0 0 1 1 1v3", "M20 16v3a1 1 0 0 1-1 1h-3", "M8 20H5a1 1 0 0 1-1-1v-3", "M8 9v6M11 9v6M14 9v6M17 9v6"],
   Planner: ["M12 21s-6-5.3-6-10a6 6 0 0 1 12 0c0 4.7-6 10-6 10z", "M12 13.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4z"],
   Goals: ["M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16z", "M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M12 12.5v-1"],
   Research: ["M11 17.5a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13z", "M20 20l-4.2-4.2"],
