@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { api, barcodeText, dateTime, loadMemberRules, money, toPence, type MemberRules, type RuleKey } from "./api";
 import "./Bounties.css";
+import { ItemTile } from "./Planner";
 
 // Shapes returned by server/routes-bounties.mjs. Money is integer pence.
 type Tier = { id: string; name: string; offsetMinutes: number; earnPoints: number | null };
@@ -1627,6 +1628,49 @@ function unitsOnShelf(s: Bounty["pressure"]["sourcing"]) {
     : `${plural(s.availableUnits, "unit")} on the shelf (${basis}${bought})`;
 }
 
+/** Display only: the places under the cap as a bar, and the shelf as a chip. */
+function Places({ bounty }: { bounty: Bounty }) {
+  const cap = Math.max(bounty.cap, 0);
+  const bought = Math.min(bounty.completedUnits, cap);
+  const claimed = Math.min(bounty.claimedUnits, cap - bought);
+  const free = Math.max(cap - bought - claimed, 0);
+  const segments = cap > 0 && cap <= 24;
+  const shelf = bounty.shelf.state === "seen" ? "ok" : bounty.shelf.state === "none" ? "warn" : "unknown";
+  return (
+    <div className="bounty-places">
+      <span className="bounty-places-label">
+        <b>{bounty.status === "open" ? `${plural(bounty.remaining, "place")} left` : "Closed"}</b>
+        <span className="muted">of {plural(cap, "unit")} under the cap</span>
+      </span>
+      {segments ? (
+        <span className="bounty-bar" aria-hidden="true">
+          {Array.from({ length: cap }, (_, i) => (
+            <i key={i} className={i < bought ? "bought" : i < bought + claimed ? "claimed" : "free"} />
+          ))}
+        </span>
+      ) : (
+        <span className="bounty-bar solid" aria-hidden="true">
+          <i className="bought" style={{ flex: bought || 0.0001 }} />
+          <i className="claimed" style={{ flex: claimed || 0.0001 }} />
+          <i className="free" style={{ flex: free || 0.0001 }} />
+        </span>
+      )}
+      <span className="bounty-key">
+        <span>
+          <i className="bought" /> {bought} bought
+        </span>
+        <span>
+          <i className="claimed" /> {claimed} claimed
+        </span>
+        <span>
+          <i className="free" /> {free} free
+        </span>
+      </span>
+      <span className={"bounty-shelf " + shelf}>{reportText(bounty.shelf)}</span>
+    </div>
+  );
+}
+
 function BountyCard({
   bounty,
   acting,
@@ -1663,20 +1707,50 @@ function BountyCard({
   const validation = bounty.validation;
   return (
     <article className={"bounty" + (bounty.status === "open" ? "" : " closed")}>
-      <div className="bounty-head">
-        <h3>{bounty.title}</h3>
-        <div>
-          {bounty.sample && <span className="badge sample">Sample</span>}
-          {bounty.placement && <span className="badge sponsored">{bounty.placement}</span>}
-          {!bounty.sample && tierBadge(o?.tier ?? null)}
-          <span className={"badge " + (go ? "ok" : "warn")}>{trip.label}</span>
-          {!bounty.sample && bounty.status === "open" && (
-            <span className={"badge " + (bounty.alert.canSend ? "ok" : "warn")}>
-              {bounty.alert.canSend ? "Alerts can be sent" : "No alerts"}
-            </span>
-          )}
+      <div className="bounty-hero">
+        <ItemTile sku="" category="general" />
+        <div className="bounty-title">
+          <h3>{bounty.title}</h3>
+          <span className="bounty-meta">
+            {bounty.retailer ?? "Retailer not shown"} · {bounty.locality} · Ends {when(bounty.expiresAt)}
+          </span>
+          <div className="bounty-head">
+            <div>
+              {bounty.sample && <span className="badge sample">Sample</span>}
+              {bounty.placement && <span className="badge sponsored">{bounty.placement}</span>}
+              {!bounty.sample && tierBadge(o?.tier ?? null)}
+              <span className={"badge " + (go ? "ok" : "warn")}>{trip.label}</span>
+              {!bounty.sample && bounty.status === "open" && (
+                <span className={"badge " + (bounty.alert.canSend ? "ok" : "warn")}>
+                  {bounty.alert.canSend ? "Alerts can be sent" : "No alerts"}
+                </span>
+              )}
+            </div>
+          </div>
         </div>
+        <Places bounty={bounty} />
       </div>
+      {e && (
+        <div className="bounty-deal">
+          <span>
+            <span className="badge ev-retail">Shop price</span>
+            <b className="p-retail">{cash(e.unitCost)}</b>
+          </span>
+          <span className="bounty-arrow" aria-hidden="true">
+            →
+          </span>
+          <span>
+            <span className={"badge " + (bounty.sample ? "ev-estimate" : "ev-sold")}>
+              {bounty.sample ? "Sells for about" : "Sold for about"}
+            </span>
+            <b className={bounty.sample ? "p-estimate" : "p-sold"}>{cash(e.salePrice)}</b>
+          </span>
+          <span className="bounty-deal-profit">
+            <b>{cash(o?.unitProfit ?? e.unitContribution)}</b>
+            <span>profit a unit</span>
+          </span>
+        </div>
+      )}
       {!bounty.sample && bounty.accessNeeds?.length ? (
         <div className="access-line">
           <small className="muted">Access needs:</small> <AccessList needs={bounty.accessNeeds} />
@@ -2224,12 +2298,17 @@ export default function Bounties() {
     <section className="bounties">
       {terms && (
         <>
-          <p className="notice">{terms.privacy}</p>
+          <p className="notice bounties-privacy">{terms.privacy}</p>
           <div className="terms-box">
-            <b>{terms.buyAndResell}</b>
-            <span>{terms.reputation}</span>
-            <span>{terms.paid}</span>
-            <span>{terms.promotion}</span>
+            <h2>How bounties work</h2>
+            <ul>
+              <li>
+                <b>{terms.buyAndResell}</b>
+              </li>
+              <li>{terms.reputation}</li>
+              <li>{terms.paid}</li>
+              <li>{terms.promotion}</li>
+            </ul>
             <span className="muted">{terms.times}</span>
           </div>
         </>
@@ -2322,7 +2401,10 @@ export default function Bounties() {
         </article>
       )}
 
-      <h2>Bounties</h2>
+      <div className="bounties-head">
+        <h2>Open bounties</h2>
+        {shown && shown.length > 0 && <span className="muted">{shown.length === 1 ? "1 bounty" : `${shown.length} bounties`}</span>}
+      </div>
       {acting !== "operator" && typeof acting !== "number" && (
         <p className="muted">Choose a member under "Acting as" to claim or report, or the operator view to verify and send alerts.</p>
       )}
