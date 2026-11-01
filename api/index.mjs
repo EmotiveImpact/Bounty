@@ -10,8 +10,9 @@ const { freshPrices } = await import("../server/demo.mjs");
 
 let handler;
 try {
+  if (!process.env.BOUNTY_PASSWORD)
+    throw Error("add BOUNTY_PASSWORD (16 or more characters) in the Vercel project's environment variables, then redeploy");
   const { publicHosts, password } = accessConfig();
-  if (!password) throw Error("Set BOUNTY_PASSWORD in the Vercel project's environment variables, then redeploy");
   const db = database();
   const api = createApi(db, { publicHosts, password });
   const beforeRequest = freshPrices(db);
