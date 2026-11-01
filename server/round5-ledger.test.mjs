@@ -272,9 +272,12 @@ test("F5: on one day a purchase covers a sale recorded before it; other movement
   // Buy, sell, return and sell again all on one day, in that order.
   const sameDay = resold({ units: 1 }).map((e) => ({ ...e, occurred: "2026-10-02" }));
   assert.deepEqual(codes(sameDay), []);
-  // The second sale entered before the return on that day is short.
+  // Round five, fix b: the second sale entered before the return on that day
+  // is no longer short, because the order of one day's entries is not known
+  // and the return first explains it (this assertion expected
+  // "sold-above-bought", which was the verifier's defect R2).
   const [receipt, sale1, payout1, refund, sale2] = resold({ units: 1 }).map((e) => ({ ...e, occurred: "2026-10-02" }));
-  assert.deepEqual(codes([receipt, sale1, payout1, { ...sale2, id: refund.id - 0.5 }, refund]), ["sold-above-bought"]);
+  assert.deepEqual(codes([receipt, sale1, payout1, { ...sale2, id: refund.id - 0.5 }, refund]), []);
 });
 
 test("F5 routes: a refund says whether the item came back; both kinds are recorded and checked", async (t) => {
@@ -338,7 +341,7 @@ test("F5 routes: a refund says whether the item came back; both kinds are record
   assert.match(res.body.error, /Leave units empty when the buyer keeps the item/);
   res = await post({ type: "refund" });
   assert.equal(res.status, 400);
-  assert.match(res.body.error, /units returned.*itemReturned false/);
+  assert.match(res.body.error, /^Say how many units the buyer sent back, as a whole number from 1 to \d+, or say that the buyer kept the item$/);
   assert.equal((await post({ type: "refund", itemReturned: true })).status, 400);
   assert.equal((await post({ type: "refund", itemReturned: "no" })).status, 400);
   res = await post({ type: "expense", itemReturned: false });

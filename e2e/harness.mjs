@@ -52,7 +52,10 @@ async function waitFor(url, ms = 20000) {
 }
 
 /**
- * Starts the API and the Vite dev server against a new data directory.
+ * Starts the API and the Vite dev server against a new data directory. Vite
+ * gets its own dependency cache inside that directory: a cache shared by two
+ * runs at once (for example from two checkouts sharing node_modules) is
+ * rewritten under the other run's page, which then never loads.
  * Returns { url, apiUrl, dataDir, api(path, init), stop() }. api() calls
  * the API directly (JSON in and out) with the local Origin, so a test can
  * set up data through the real routes.
@@ -68,6 +71,7 @@ export async function startApp({ env = {} } = {}) {
     const server = await createServer({
       configFile: "vite.config.js",
       logLevel: "error",
+      cacheDir: ${JSON.stringify(join(dataDir, "vite-cache"))},
       server: { port: ${webPort}, strictPort: true, proxy: { "/api": "http://127.0.0.1:${apiPort}" } },
     });
     await server.listen();

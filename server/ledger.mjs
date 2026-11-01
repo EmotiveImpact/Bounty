@@ -31,7 +31,10 @@ export const ENTRY_TYPES = Object.freeze([
 //   refund   money you paid back to a buyer. units: how many units the buyer
 //            sent back, which go back into stock and can be sold again; none
 //            (null) when the buyer kept the item, so no stock comes back.
-//            addEntry takes itemReturned (true or false) to say which.
+//            addEntry takes itemReturned (true or false) to say which, and,
+//            when the item came back, optionally returnedOn: the date it
+//            came back, when that differs from the date the money went out
+//            (kept in ledger_refund_returns).
 //   work     elapsed working time in minutes (no money)
 //   saving   household only: the saving against the usual price
 export const ENTRY_TYPES_BY_KIND = Object.freeze({
@@ -83,6 +86,16 @@ const proofsTable = (name, entries = "ledger_entries") => `CREATE TABLE IF NOT E
  label TEXT NOT NULL,
  created TEXT NOT NULL
 )`;
+// The date a returned item came back, for refunds where it came back on a
+// different day from the refund itself (the stock walk uses it; the refund's
+// own date stays the date the money went out). A table of its own rather than
+// a new ledger_entries column: older databases gain it in place with nothing
+// rebuilt and every existing entry row exactly as it was. One row per refund
+// entry at most; a refund without a row came back on its own date.
+const RETURNS_TABLE = `CREATE TABLE IF NOT EXISTS ledger_refund_returns (
+ entry_id INTEGER PRIMARY KEY REFERENCES ledger_entries(id),
+ returned_on TEXT NOT NULL
+)`;
 // Which rows of the old outcomes table have been copied into trips, so that
 // running the migration again never duplicates them.
 const LEGACY_TABLE = `CREATE TABLE IF NOT EXISTS ledger_legacy_outcomes (
@@ -102,6 +115,9 @@ export function schema(db, { now = new Date() } = {}) {
     db.exec(proofsTable("ledger_proofs"));
     db.exec(LEGACY_TABLE);
     migrateToAutoincrement(db);
+    // After the rebuild above (which only ever runs on databases made before
+    // this table existed), so the rebuild never has to carry its rows.
+    db.exec(RETURNS_TABLE);
     db.exec("CREATE INDEX IF NOT EXISTS ledger_entries_trip ON ledger_entries(trip_id)");
     db.exec("CREATE INDEX IF NOT EXISTS ledger_entries_occurred ON ledger_entries(occurred)");
     db.exec("CREATE INDEX IF NOT EXISTS ledger_proofs_trip ON ledger_proofs(trip_id)");
@@ -328,7 +344,33 @@ function entryView(row) {
     // Refunds only: true when the buyer sent the item back (units returned
     // to stock), false when the buyer kept it. Null on other entries.
     itemReturned: row.type === "refund" ? returnsStock(row) : null,
+    // Refunds where the item came back only: the date it came back, when it
+    // was given; null means it is taken to have come back on the refund's
+    // own date.
+    returnedOn: returnsStock(row) ? row.returned_on ?? null : null,
   };
+}
+
+// Databases whose schema() has created ledger_refund_returns. A database
+// opened without the ledger schema (only ever in tests of the migration)
+// reads every refund as coming back on its own date.
+const returnsReady = new WeakSet();
+function hasReturnsTable(db) {
+  if (returnsReady.has(db)) return true;
+  const found = Boolean(
+    db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ledger_refund_returns'").get(),
+  );
+  if (found) returnsReady.add(db);
+  return found;
+}
+/** Entry rows, with returned_on for refunds that give it, oldest first. */
+function entryRows(db, tripId = null) {
+  const where = tripId === null ? "" : "WHERE e.trip_id = ?";
+  const sql = hasReturnsTable(db)
+    ? `SELECT e.*, r.returned_on FROM ledger_entries e LEFT JOIN ledger_refund_returns r ON r.entry_id = e.id ${where} ORDER BY e.occurred, e.id`
+    : `SELECT e.* FROM ledger_entries e ${where} ORDER BY e.occurred, e.id`;
+  const query = db.prepare(sql);
+  return tripId === null ? query.all() : query.all(tripId);
 }
 /** Proof metadata as the API returns it. Never includes file contents. */
 function proofView(row) {
@@ -358,10 +400,7 @@ const groupBy = (rows, key) => {
 /** Every trip with its entries and proofs, oldest entries first. */
 function loadAll(db) {
   const trips = db.prepare("SELECT * FROM ledger_trips ORDER BY id DESC").all().map(tripView);
-  const entries = groupBy(
-    db.prepare("SELECT * FROM ledger_entries ORDER BY occurred, id").all().map(entryView),
-    "trip_id",
-  );
+  const entries = groupBy(entryRows(db).map(entryView), "trip_id");
   const proofs = groupBy(
     db.prepare("SELECT * FROM ledger_proofs ORDER BY id").all().map(proofView),
     "trip_id",
@@ -384,10 +423,7 @@ function requireTrip(db, id) {
 /** One trip with its entries, proof metadata and reconciliation. */
 export function getTrip(db, id) {
   const trip = requireTrip(db, id);
-  const entries = db
-    .prepare("SELECT * FROM ledger_entries WHERE trip_id = ? ORDER BY occurred, id")
-    .all(id)
-    .map(entryView);
+  const entries = entryRows(db, id).map(entryView);
   const proofs = db
     .prepare("SELECT * FROM ledger_proofs WHERE trip_id = ? ORDER BY id")
     .all(id)
@@ -439,52 +475,135 @@ const shortDate = (date) =>
  * Splits recorded sales into paid out and still to be paid out.
  *
  * Payouts are applied in date order. A payout that says how many units it
- * covers pays that many sold units, oldest sales first. A payout with no unit
- * count is taken to cover every sale dated on or before it, because a
- * marketplace pays a sale out after it happens. The gap between the sales
- * covered and the payouts is fees the marketplace kept; only sales no payout
- * covers are pending, so the same money is never both pending and fees.
+ * covers pays that many sold units of the sales dated on or before it,
+ * oldest sales first. A payout with no unit count is taken to cover every
+ * sale dated on or before it, because a marketplace pays a sale out after it
+ * happens. The gap between the sales covered and the payouts is fees the
+ * marketplace kept; only sales no payout covers are pending, so the same
+ * money is never both pending and fees.
+ *
+ * Refunds where the buyer sent the item back (round five, fix b): a sale
+ * refunded before it was paid out is not paid out, so its refunded units are
+ * no longer pending (see payoutWalk for which sale a refund applies to). A
+ * refund where the buyer kept the item changes nothing here: the sale stands
+ * and the ledger cannot tell which sale or how much of it the refund was.
  *
  * basis: "units" when every payout gives its units, "dates" when any payout
  * was matched by date, "no payouts" when there is none yet (every recorded
- * sale is pending). Returns { pending, paid, fees, basis } where paid is the
- * value of the sales covered and fees is null when it cannot be worked out
- * (no sales, or payouts above the sales they cover).
+ * sale not refunded is pending). Returns { pending, paid, fees, basis } where
+ * paid is the value of the sales covered and fees is null when it cannot be
+ * worked out (no sales, or payouts above the sales they cover).
  */
 export function payoutPosition(entries) {
+  const { pending, paid, fees, basis } = payoutWalk(entries);
+  return { pending, paid, fees, basis };
+}
+
+const sameReference = (a, b) =>
+  typeof a === "string" && typeof b === "string" && a.trim() !== "" && a.trim().toLowerCase() === b.trim().toLowerCase();
+
+/**
+ * payoutPosition() with the units refunded before they were paid out:
+ * { pending, paid, fees, basis, refundedUnpaid, refundedUnpaidUnits }.
+ *
+ * Each sold unit is unpaid, paid, or refunded before it was paid. Payouts and
+ * refunds where the item came back are taken in date order; on one day,
+ * payouts before refunds, so a refund on the day of a payout is never taken
+ * to have stopped that payout. A refund applies to sales dated on or before
+ * it, by one rule:
+ *   - units already paid out and not yet refunded, first. A refund of a sale
+ *     that was paid out cancels nothing still to come, and taking that
+ *     reading first means a payout still to come is never hidden on a guess;
+ *   - only units no reading leaves paid are taken as refunded before they
+ *     were paid: the cheapest unpaid units first (hiding the least money
+ *     still to come), oldest first among equals. They are no longer pending.
+ * When the refund's reference (the order number) matches sales, the rule is
+ * applied to those sales first, then to every earlier sale for any units
+ * they cannot take. One order can hold several items, each recorded as a
+ * sale under the same order number, so a reference narrows the candidates
+ * without choosing among them (round five, fix b, second pass).
+ * A payout with units pays unpaid units first; if it covers more units than
+ * are unpaid, it pays units refunded before payout too (the marketplace paid
+ * them after all), so they never take a later sale's place. Its units never
+ * reach a sale dated after it. A payout with no units covers every sale up to
+ * its date, refunded ones included, as before.
+ * Refunds where the buyer kept the item are not followed: see payoutPosition.
+ */
+export function payoutWalk(entries) {
   const sales = entries
     .filter((e) => e.type === "sale")
     .sort(byDate)
     .map((e) => {
       const units = Math.max(1, e.units ?? 1);
-      return { entry: e, units, left: units };
+      // left: unpaid; cancelled: refunded before it was paid out; paidOpen:
+      // paid out and not refunded.
+      return { entry: e, units, left: units, cancelled: 0, paidOpen: 0 };
     });
   const payouts = entries.filter((e) => e.type === "payout").sort(byDate);
   const salesTotal = sales.reduce((t, s) => t + s.entry.amount, 0);
   const payoutTotal = payouts.reduce((t, e) => t + e.amount, 0);
-  if (!payouts.length) return { pending: salesTotal, paid: 0, fees: null, basis: "no payouts" };
   const hasUnits = (e) => Number.isSafeInteger(e.units) && e.units > 0;
-  for (const payout of payouts) {
-    if (hasUnits(payout)) {
-      let units = payout.units;
-      for (const sale of sales) {
-        if (!units) break;
-        const covered = Math.min(sale.left, units);
-        sale.left -= covered;
-        units -= covered;
+  const rank = (e) => (e.type === "payout" ? 0 : 1);
+  const events = [...payouts, ...entries.filter(returnsStock)].sort((a, b) =>
+    a.occurred !== b.occurred ? (a.occurred < b.occurred ? -1 : 1) : rank(a) - rank(b) || a.id - b.id,
+  );
+  const upTo = (date) => sales.filter((s) => s.entry.occurred <= date);
+  const take = (sale, from, to, wanted) => {
+    const n = Math.min(sale[from], wanted);
+    sale[from] -= n;
+    if (to) sale[to] += n;
+    return n;
+  };
+  // Applies a refund's units to the candidate sales: units already paid out
+  // and not refunded first (cancelling nothing still to come), then the
+  // cheapest unpaid units, oldest first among equals. Returns the units left.
+  const refundFrom = (candidates, units) => {
+    for (const sale of candidates) units -= take(sale, "paidOpen", null, units);
+    const cheapestFirst = [...candidates].sort(
+      (a, b) => a.entry.amount / a.units - b.entry.amount / b.units || byDate(a.entry, b.entry),
+    );
+    for (const sale of cheapestFirst) units -= take(sale, "left", "cancelled", units);
+    return units;
+  };
+  for (const e of events) {
+    const earlier = upTo(e.occurred);
+    if (e.type === "payout") {
+      if (hasUnits(e)) {
+        let units = e.units;
+        for (const sale of earlier) units -= take(sale, "left", "paidOpen", units);
+        // Paid and already refunded: neither pending nor open to a refund.
+        for (const sale of earlier) units -= take(sale, "cancelled", null, units);
+      } else {
+        for (const sale of earlier) {
+          sale.paidOpen += sale.left;
+          sale.left = 0;
+          sale.cancelled = 0;
+        }
       }
-    } else {
-      for (const sale of sales) if (sale.entry.occurred <= payout.occurred) sale.left = 0;
+      continue;
     }
+    // The sales the refund names first: one order can hold several items,
+    // each recorded as a sale under the same order number, so a reference
+    // narrows the candidates and the same rule picks among them. Whatever the
+    // named sales cannot take falls to every earlier sale, by the same rule.
+    const named = earlier.filter((s) => sameReference(s.entry.reference, e.reference));
+    refundFrom(earlier, refundFrom(named, Number(e.units)));
   }
-  const pending = sales.reduce((t, s) => t + Math.round((s.entry.amount * s.left) / s.units), 0);
-  const paid = salesTotal - pending;
+  const valueOf = (field) => sales.reduce((t, s) => t + Math.round((s.entry.amount * s[field]) / s.units), 0);
+  const pending = valueOf("left");
+  const refundedUnpaid = valueOf("cancelled");
+  const refundedUnpaidUnits = sales.reduce((t, s) => t + s.cancelled, 0);
+  if (!payouts.length)
+    return { pending, paid: 0, fees: null, basis: "no payouts", refundedUnpaid, refundedUnpaidUnits };
+  const paid = salesTotal - pending - refundedUnpaid;
   const gap = paid - payoutTotal;
   return {
     pending,
     paid,
     fees: sales.length && gap >= 0 ? gap : null,
     basis: payouts.every(hasUnits) ? "units" : "dates",
+    refundedUnpaid,
+    refundedUnpaidUnits,
   };
 }
 
@@ -501,48 +620,216 @@ const unitsText = (n) => (n === 0 ? "none" : n === 1 ? "1 unit" : n.toLocaleStri
 /**
  * Follows a trip's stock in date order. Receipts add units; a sale takes its
  * units from the stock on hand at that point; a refund where the buyer sent
- * the item back puts its units back into stock, so they can be sold again; a
- * refund where the buyer kept the item moves no stock. Within one day the
- * receipts come first (entries carry a date, not a time, and a purchase
+ * the item back puts its units back into stock, so they can be sold again, on
+ * the date the item came back (returnedOn) when the refund gives one and on
+ * the refund's own date otherwise; a refund where the buyer kept the item
+ * moves no stock.
+ *
+ * Entries carry a date, not a time, so within one day their order is not
+ * known (round five, fix b). Each day's receipts come first (a purchase
  * recorded after a sale on the same day still covers it, as the
- * sale-before-receipt check allows), then the other movements in the order
- * they were recorded.
+ * sale-before-receipt check allows). The day's sales and returns are then
+ * flagged only when no order of them keeps both the stock on hand and the
+ * units sold and not yet sent back from going below zero (dayOrder: every
+ * order is tried, except on a day with movements in so many sizes that it
+ * is judged on its totals). When no
+ * order works, the movements that fit in the best order are applied and the
+ * first sale left over (or, with no sale left, the first return) is flagged.
  *
  * Returns { onHand, short, shortSales, overReturned }: short is the first
- * sale that needed more units than were in stock at that point, as
- * { entry, units, onHand }, and shortSales how many sales did; overReturned
- * is the first return of more units than had been sold and not already
- * returned by then, as { entry, units, out }.
+ * sale that needed more units than could have been in stock at that point,
+ * as { entry, units, onHand }, and shortSales how many sales did;
+ * overReturned is the first return of more units than could have been sold
+ * and not already returned by then, as { entry, units, out }.
  */
 export function stockWalk(entries) {
-  const receiptFirst = (e) => (e.type === "receipt" ? 0 : 1);
   const moves = entries
     .filter((e) => e.type === "receipt" || e.type === "sale" || returnsStock(e))
-    .sort((a, b) =>
-      a.occurred !== b.occurred ? (a.occurred < b.occurred ? -1 : 1) : receiptFirst(a) - receiptFirst(b) || a.id - b.id,
+    .map((e) => ({
+      entry: e,
+      kind: e.type === "refund" ? "return" : e.type,
+      units: Number(e.units ?? 0),
+      date: e.type === "refund" && e.returnedOn ? e.returnedOn : e.occurred,
+    }))
+    .sort((a, b) => (a.date !== b.date ? (a.date < b.date ? -1 : 1) : a.entry.id - b.entry.id));
+  // out: units sold and not yet sent back.
+  const state = { onHand: 0, out: 0, short: null, shortSales: 0, overReturned: null };
+  for (let i = 0; i < moves.length; ) {
+    let j = i;
+    while (j < moves.length && moves[j].date === moves[i].date) j += 1;
+    const day = moves.slice(i, j);
+    for (const m of day) if (m.kind === "receipt") state.onHand += m.units;
+    settleDay(
+      day.filter((m) => m.kind !== "receipt"),
+      state,
     );
-  let onHand = 0;
-  let out = 0; // units sold and not yet sent back
-  let short = null;
-  let shortSales = 0;
-  let overReturned = null;
-  for (const e of moves) {
-    const units = Number(e.units ?? 0);
-    if (e.type === "receipt") onHand += units;
-    else if (e.type === "sale") {
-      if (units > onHand) {
-        shortSales += 1;
-        short ??= { entry: e, units, onHand };
-      }
-      onHand = Math.max(0, onHand - units);
-      out += units;
+    i = j;
+  }
+  return { onHand: state.onHand, short: state.short, shortSales: state.shortSales, overReturned: state.overReturned };
+}
+
+/** Applies one day's sales and returns (in entry order) to the stock state. */
+function settleDay(moves, state) {
+  let rest = moves;
+  while (rest.length) {
+    const placed = new Set(dayOrder(rest, state.onHand, state.out));
+    for (const m of placed) {
+      const sign = m.kind === "sale" ? 1 : -1;
+      state.onHand -= sign * m.units;
+      state.out += sign * m.units;
+    }
+    rest = rest.filter((m) => !placed.has(m));
+    if (!rest.length) return;
+    // No order fits what is left: a sale had too few in stock (or, with no
+    // sale left, a return brought back more than was out). Flag it, apply it
+    // as far as it can go, and carry on with the rest of the day.
+    const m = rest.find((x) => x.kind === "sale") ?? rest[0];
+    if (m.kind === "sale") {
+      state.shortSales += 1;
+      state.short ??= { entry: m.entry, units: m.units, onHand: state.onHand };
+      state.onHand = Math.max(0, state.onHand - m.units);
+      state.out += m.units;
     } else {
-      if (units > out) overReturned ??= { entry: e, units, out };
-      out = Math.max(0, out - units);
-      onHand += units;
+      state.overReturned ??= { entry: m.entry, units: m.units, out: state.out };
+      state.out = Math.max(0, state.out - m.units);
+      state.onHand += m.units;
+    }
+    rest = rest.filter((x) => x !== m);
+  }
+}
+
+// Above this many sales and returns on one day for one trip, subsets are not
+// all tried: movements of the same kind and size are counted instead (see
+// dayOrder).
+const MAX_ORDERED_MOVES = 12;
+// Above this many combinations of those counts, the day is judged on its
+// totals (see dayOrder).
+const MAX_COUNT_STATES = 1 << 16;
+
+/**
+ * The most of one day's sales and returns that some order can apply while
+ * the stock on hand (onHand) and the units out (out) never go below zero:
+ * all of them when such an order exists. Every subset an order can reach is
+ * tried, so nothing is flagged that some order of the day would explain.
+ * With more than MAX_ORDERED_MOVES movements, movements of the same kind and
+ * size are interchangeable, so every combination of how many of each have
+ * gone is tried instead (countedOrder; exact too, round five, fix b, third
+ * pass). Only when there are more than MAX_COUNT_STATES such combinations is
+ * the day judged on its totals: it is accepted when no movement is bigger
+ * than the stock on hand and out together (which no movement on the day
+ * changes, so a bigger one can never go; with nothing on hand or out, no
+ * movement can go at all) and its totals allow it (sales no more than the
+ * stock plus the day's returns, returns no more than the units out plus the
+ * day's sales). Otherwise it is placed greedily, so the flag names a
+ * movement.
+ */
+function dayOrder(moves, onHand, out) {
+  const n = moves.length;
+  const delta = moves.map((m) => (m.kind === "sale" ? m.units : -m.units));
+  // d: units sold less units returned so far today.
+  const fits = (i, d) => (moves[i].kind === "sale" ? moves[i].units <= onHand - d : moves[i].units <= out + d);
+  if (n > MAX_ORDERED_MOVES) {
+    const counted = countedOrder(moves, onHand, out);
+    if (counted) return counted;
+    const sold = moves.filter((m) => m.kind === "sale").reduce((t, m) => t + m.units, 0);
+    const back = moves.filter((m) => m.kind !== "sale").reduce((t, m) => t + m.units, 0);
+    // No movement bigger than the stock on hand and out together (so with
+    // nothing on hand or out, no movement of a unit or more can go).
+    const within = moves.every((m) => m.units <= onHand + out);
+    if (within && sold <= onHand + back && back <= out + sold) return moves;
+    const placed = [];
+    const left = new Set(moves.keys());
+    let d = 0;
+    for (let progress = true; progress; ) {
+      progress = false;
+      for (const i of left)
+        if (fits(i, d)) {
+          placed.push(moves[i]);
+          left.delete(i);
+          d += delta[i];
+          progress = true;
+          break;
+        }
+    }
+    return placed;
+  }
+  const size = 1 << n;
+  const reached = new Uint8Array(size);
+  const dOf = new Int32Array(size);
+  reached[0] = 1;
+  let best = 0;
+  let bestCount = 0;
+  for (let mask = 0; mask < size; mask++) {
+    if (!reached[mask]) continue;
+    let count = 0;
+    for (let i = 0; i < n; i++) if (mask & (1 << i)) count += 1;
+    if (count > bestCount) {
+      best = mask;
+      bestCount = count;
+    }
+    for (let i = 0; i < n; i++) {
+      const next = mask | (1 << i);
+      if (next === mask || reached[next] || !fits(i, dOf[mask])) continue;
+      reached[next] = 1;
+      dOf[next] = dOf[mask] + delta[i];
     }
   }
-  return { onHand, short, shortSales, overReturned };
+  return moves.filter((_, i) => best & (1 << i));
+}
+
+/**
+ * dayOrder for many movements: sales and returns of the same size are
+ * interchangeable, so a state is how many of each kind and size have gone
+ * (the stock on hand and out follow from it), and every state some order
+ * can reach is tried. Returns the most movements some order can apply (the
+ * first ones of each kind and size, in entry order), or null when there are
+ * more than MAX_COUNT_STATES states.
+ */
+function countedOrder(moves, onHand, out) {
+  const groups = new Map();
+  for (const m of moves) {
+    const key = m.kind + ":" + m.units;
+    if (!groups.has(key)) groups.set(key, { sign: m.kind === "sale" ? 1 : -1, units: m.units, list: [] });
+    groups.get(key).list.push(m);
+  }
+  const g = [...groups.values()];
+  // A state's index in mixed radix: one more of group k adds stride[k], so
+  // every state comes after the states it is reached from.
+  const stride = [];
+  let size = 1;
+  for (const x of g) {
+    stride.push(size);
+    size *= x.list.length + 1;
+    if (size > MAX_COUNT_STATES) return null;
+  }
+  const used = (state, k) => Math.floor(state / stride[k]) % (g[k].list.length + 1);
+  const reached = new Uint8Array(size);
+  reached[0] = 1;
+  let best = 0;
+  let bestCount = 0;
+  for (let state = 0; state < size; state++) {
+    if (!reached[state]) continue;
+    // d: units sold less units returned so far today.
+    let d = 0;
+    let count = 0;
+    for (let k = 0; k < g.length; k++) {
+      const u = used(state, k);
+      count += u;
+      d += g[k].sign * g[k].units * u;
+    }
+    if (count > bestCount) {
+      best = state;
+      bestCount = count;
+    }
+    for (let k = 0; k < g.length; k++) {
+      if (used(state, k) === g[k].list.length) continue;
+      const fit = g[k].sign > 0 ? g[k].units <= onHand - d : g[k].units <= out + d;
+      if (fit) reached[state + stride[k]] = 1;
+    }
+  }
+  const placed = new Set();
+  for (let k = 0; k < g.length; k++) for (const m of g[k].list.slice(0, used(best, k))) placed.add(m);
+  return moves.filter((m) => placed.has(m));
 }
 
 /**
@@ -551,7 +838,11 @@ export function stockWalk(entries) {
  * they are not checked. Stock is followed in date order (stockWalk), so a
  * unit a buyer sent back can be sold again, while a sale with too few units
  * in stock at that point, or after a refund where the buyer kept the item,
- * is flagged. Returns [{ code, message }].
+ * is flagged. Within one day no order of entries is assumed: a day's sales
+ * and returns are flagged only when no order of them adds up. Advice in a
+ * message is only what the trip still allows: an entry cannot be edited,
+ * only removed and recorded again while the trip is open, and a closed trip
+ * cannot change at all. Returns [{ code, message }].
  */
 export function findDiscrepancies(trip, entries) {
   const discrepancies = [];
@@ -587,13 +878,25 @@ export function findDiscrepancies(trip, entries) {
   if (stock.short) {
     const { entry, units, onHand } = stock.short;
     const more = stock.shortSales - 1;
+    // A return recorded after the short sale, with no date the item came
+    // back: the item may have come back before its refund was paid. An entry
+    // cannot be edited, so the way to give that date is to remove the refund
+    // and record it again, which only an open trip allows.
+    const laterReturn = entries.some((e) => returnsStock(e) && !e.returnedOn && e.occurred > entry.occurred);
+    const advice =
+      trip.status === "closed"
+        ? " The trip is closed, so its entries cannot change."
+        : " Check the units, or record the purchase or the return the stock came from." +
+          (laterReturn
+            ? " If an item a buyer sent back came back before its refund was paid, remove that refund and record it again with the date the item came back."
+            : "");
     flag(
       "sold-above-bought",
       `The sale on ${shortDate(entry.occurred)} is for ${unitsText(units)}, but ` +
         (onHand === 0 ? "none was" : `only ${unitsText(onHand)} ${onHand === 1 ? "was" : "were"}`) +
         " in stock at that point (units bought, less units sold, plus units buyers sent back)." +
         (more > 0 ? ` ${more === 1 ? "1 later sale" : more + " later sales"} also had too few in stock.` : "") +
-        " Check the units, or record the purchase or the return the stock came from.",
+        advice,
     );
   }
   if (position.basis === "units" && unitsPaidOut > unitsSold)
@@ -602,7 +905,9 @@ export function findDiscrepancies(trip, entries) {
     const { entry, units, out } = stock.overReturned;
     flag(
       "returned-above-sold",
-      `The refund on ${shortDate(entry.occurred)} says ${unitsText(units)} came back, but ` +
+      `The refund on ${shortDate(entry.occurred)}` +
+        (entry.returnedOn ? ` (item back on ${shortDate(entry.returnedOn)})` : "") +
+        ` says ${unitsText(units)} came back, but ` +
         (out === 0 ? "no units had" : `only ${unitsText(out)} had`) +
         " been sold and not already returned by then.",
     );
@@ -803,7 +1108,17 @@ export function verification(trip, entries, proofs = [], uses = null) {
  *   cashTiedUp = spend not yet recovered by payouts on an open trip.
  *   realisedHourly = the whole trip's realised contribution over all its
  *     work time, whatever month each entry falls in (null with no work time).
- *     On a trip that is not completed yet it is the figure so far.
+ *     On a trip that is not completed yet it is the figure so far. Null when
+ *     purchaseMissing: what the stock cost is not known, so neither is what
+ *     the time earned.
+ *   purchaseMissing = the trip sold stock (a sale, payout or refund) with no
+ *     purchase recorded for all of it (purchaseMissing(); never for legacy
+ *     totals, which record their costs as a total). The month's and the
+ *     measures' earnings per hour count such a trip at its recorded result
+ *     only where that lowers the figure, and name it either way.
+ *   refundedUnpaid / refundedUnpaidUnits = sales refunded, with the item
+ *     sent back, before they were paid out: not pending, because a refunded
+ *     sale is not paid out (payoutWalk).
  *   completedOn = the date the trip was completed (completedOn()), or null
  *     while it is still open and not finished. The month summary's earnings
  *     per hour count a trip in the month it was completed.
@@ -830,9 +1145,12 @@ export function reconcile(trip, entries, proofs = [], uses = null) {
   const spend = receipts + expenses + refunds;
 
   const realisedContribution = resale ? payouts - spend : null;
+  const noPurchase = resale && purchaseMissing(entries, trip);
   const realisedHourly =
-    resale && minutes > 0 ? Math.round((realisedContribution * 60) / minutes) : null;
-  const position = resale ? payoutPosition(entries) : { pending: 0, fees: null, basis: null };
+    resale && minutes > 0 && !noPurchase ? Math.round((realisedContribution * 60) / minutes) : null;
+  const position = resale
+    ? payoutWalk(entries)
+    : { pending: 0, fees: null, basis: null, refundedUnpaid: 0, refundedUnpaidUnits: 0 };
   const pendingPayout = open ? position.pending : 0;
   const impliedFees = position.fees;
   const unsoldUnits = resale ? Math.max(0, unitsBought - unitsSold + unitsReturned) : null;
@@ -917,8 +1235,11 @@ export function reconcile(trip, entries, proofs = [], uses = null) {
     unsoldUnits,
     realisedContribution,
     realisedHourly,
+    purchaseMissing: noPurchase,
     pendingPayout,
     pendingBasis: open ? position.basis : null,
+    refundedUnpaid: resale ? position.refundedUnpaid : 0,
+    refundedUnpaidUnits: resale ? position.refundedUnpaidUnits : 0,
     impliedFees,
     cashTiedUp,
     householdSavings: resale ? 0 : savings,
@@ -956,6 +1277,61 @@ export function completedOn(trip, entries, { unitsBought, unsoldUnits, pending, 
   if (trip.status === "closed") return last;
   const finished = unitsBought > 0 && unsoldUnits === 0 && payouts > 0 && pending === 0;
   return finished ? last : null;
+}
+
+/**
+ * True for resale entries that sold stock (a sale, a payout or a refund)
+ * with no purchase recorded for all of it: no purchase receipt at all, or
+ * more units sold, less units buyers sent back, than were bought. What the
+ * stock cost is then not known, so the trip's own earnings per hour are not
+ * known, and its recorded result is the most it can have earned: the month's
+ * and the measures' figures count it only where that lowers them, and name
+ * it either way (countWhereLower; round five, fix b).
+ * Not for:
+ *   - a trip that sold nothing (time and expenses only, such as a wasted
+ *     journey): its cost is known, and leaving it out would overstate;
+ *   - legacy totals (pass the trip): their "total actual costs" are recorded
+ *     as one expense, the stock included, so their cost is known.
+ */
+export function purchaseMissing(entries, trip = null) {
+  if (trip?.source === "legacy") return false;
+  const sold = entries.some((e) => e.type === "sale" || e.type === "payout" || e.type === "refund");
+  if (!sold) return false;
+  if (!entries.some((e) => e.type === "receipt")) return true;
+  const net = sumOf(entries, "sale", "units") - sumOf(entries.filter(returnsStock), "refund", "units");
+  return net > sumOf(entries, "receipt", "units");
+}
+
+/**
+ * Which trips that sold stock with no purchase recorded (purchaseMissing)
+ * earnings per hour count. Their recorded result is the most they can have
+ * earned, since what their stock cost is not known: counted, a gain could
+ * overstate the figure; left out, a weak result would raise it. So each is
+ * counted at its recorded result only where that lowers the figure, and the
+ * rest are left out (round five, fix b, second pass). The lowest earners per
+ * hour go first, so the figure ends as low as any choice of them could make
+ * it. With no measured trip there is no figure to lower: all are left out,
+ * and so is any with no work time (as trips without work time are).
+ *   base: { minutes, earnings } of the measured trips.
+ *   trips: [{ minutes, earnings, ... }].
+ * Returns { counted, leftOut }, each a list of the given trips.
+ */
+export function countWhereLower(base, trips) {
+  const counted = [];
+  const leftOut = trips.filter((t) => !(t.minutes > 0));
+  let { minutes, earnings } = base;
+  const timed = trips.filter((t) => t.minutes > 0).sort((a, b) => a.earnings / a.minutes - b.earnings / b.minutes);
+  for (const [i, t] of timed.entries()) {
+    // Lower than the figure so far: t.earnings / t.minutes < earnings / minutes.
+    if (!(minutes > 0) || t.earnings * minutes >= earnings * t.minutes) {
+      leftOut.push(...timed.slice(i));
+      break;
+    }
+    counted.push(t);
+    minutes += t.minutes;
+    earnings += t.earnings;
+  }
+  return { counted, leftOut };
 }
 
 // ---------------------------------------------------------------------------
@@ -1023,8 +1399,8 @@ function unitsInput(value, type, kind, itemReturned = null) {
   }
   if (type === "refund" && kind === "resale" && absent(value))
     fail(
-      "units returned must be a whole number between 1 and " + MAX_UNITS +
-        ": say how many units the buyer sent back, or send itemReturned false when the buyer kept the item",
+      "Say how many units the buyer sent back, as a whole number from 1 to " + MAX_UNITS +
+        ", or say that the buyer kept the item",
     );
   const required = kind === "resale" && ["receipt", "sale", "refund"].includes(type);
   const optional =
@@ -1042,8 +1418,11 @@ function unitsInput(value, type, kind, itemReturned = null) {
  * must be real calendar dates, not in the future. A refund says whether the
  * buyer sent the item back: itemReturned true (or left out, as before) with
  * the units that came back, which return to stock and can be sold again, or
- * itemReturned false with no units when the buyer kept the item. Returns the
- * new id.
+ * itemReturned false with no units when the buyer kept the item. A refund
+ * where the item came back may give returnedOn, the date it came back (a
+ * real date, not before 2000 and not in the future), when that was not the
+ * day the money went out: the stock walk uses it, the money keeps the
+ * refund's date. Returns the new id.
  */
 export function addEntry(db, tripId, input, { now = new Date() } = {}) {
   const trip = requireTrip(db, tripId);
@@ -1068,20 +1447,33 @@ export function addEntry(db, tripId, input, { now = new Date() } = {}) {
   }
   let itemReturned = null;
   if (!absent(input.itemReturned)) {
-    if (type !== "refund") fail("itemReturned applies to refund entries only");
-    itemReturned = bool(input.itemReturned, "itemReturned");
+    if (type !== "refund") fail("Whether the buyer sent the item back applies to refund entries only.");
+    itemReturned = bool(input.itemReturned, "Whether the buyer sent the item back");
   }
   const units = unitsInput(input.units, type, trip.kind, itemReturned);
   const reference = text(input.reference, "reference", 120, { optional: true });
   const occurred = pastDate(input.occurred, "date", now);
   const note = text(input.note, "note", 500, { optional: true });
-  const result = db
-    .prepare(
-      `INSERT INTO ledger_entries (trip_id, type, amount, units, reference, occurred, minutes, note, created)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(trip.id, type, amount, units, reference, occurred, minutes, note, now.toISOString());
-  return Number(result.lastInsertRowid);
+  let returnedOn = null;
+  if (!absent(input.returnedOn)) {
+    if (type !== "refund")
+      fail("The date the item came back applies to refund entries only: the day an item a buyer sent back reached you.");
+    if (itemReturned === false)
+      fail("Leave the date the item came back empty when the buyer kept the item: nothing came back.");
+    returnedOn = pastDate(input.returnedOn, "The date the item came back", now);
+  }
+  return transaction(db, () => {
+    const result = db
+      .prepare(
+        `INSERT INTO ledger_entries (trip_id, type, amount, units, reference, occurred, minutes, note, created)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(trip.id, type, amount, units, reference, occurred, minutes, note, now.toISOString());
+    const id = Number(result.lastInsertRowid);
+    if (returnedOn)
+      db.prepare("INSERT INTO ledger_refund_returns (entry_id, returned_on) VALUES (?, ?)").run(id, returnedOn);
+    return id;
+  });
 }
 
 /**
@@ -1098,6 +1490,7 @@ export function deleteEntry(db, tripId, entryId) {
   if (!entry) fail("No entry " + entryId + " on this trip", 404);
   transaction(db, () => {
     db.prepare("UPDATE ledger_proofs SET entry_id = NULL WHERE entry_id = ?").run(entryId);
+    if (hasReturnsTable(db)) db.prepare("DELETE FROM ledger_refund_returns WHERE entry_id = ?").run(entryId);
     db.prepare("DELETE FROM ledger_entries WHERE id = ?").run(entryId);
   });
   return getTrip(db, trip.id);
@@ -1255,12 +1648,25 @@ export function checkProofTarget(db, { tripId, entryId, sha256 }) {
  *     (left out until they are); completedLater counts trips with entries
  *     dated in the month that were completed in a later month (counted
  *     there).
+ *     hourlyNoPurchase = { trips, earnings, open, openNoWork, countedTrips,
+ *     countedEarnings }: trips completed in the month that sold stock with no
+ *     purchase recorded for all of it (purchaseMissing()). Their recorded
+ *     result is the most they can have earned, so each is counted only where
+ *     it lowers the figure (countWhereLower): countedTrips and
+ *     countedEarnings are those counted, and they are in hourly too. trips
+ *     and earnings are those left out, and open how many of those are still
+ *     open (a closed trip takes no new entries, so its purchase can no longer
+ *     be added). openNoWork is how many of the open ones have no work time:
+ *     they stay out until their work time is recorded too, as every trip
+ *     without work time does (round five, fix b, third pass). Kept out of
+ *     hourly so its shape is unchanged.
  *   payouts / verifiedPayouts / verifiedEarnings = the same cash figures, in
  *     total and for verified trades only (see verification(): every receipt
  *     and payout has its own proof, a sale is recorded and the records
  *     reconcile).
  * Current position (open resale trips, whatever their dates):
- *   pendingPayouts = recorded sales no payout covers yet (payoutPosition).
+ *   pendingPayouts = recorded sales no payout covers yet and not refunded
+ *     before they were paid out (payoutPosition).
  *   potentialProceeds = predicted proceeds on open trips whose prediction
  *     came from live evidence, that have a purchase receipt and no payout
  *     yet. The prediction is scaled to the units actually bought, and sales
@@ -1301,6 +1707,9 @@ export function summary(db, month) {
     stillOpen: 0,
     completedLater: 0,
   };
+  // Completed this month after selling stock with no purchase recorded
+  // (purchaseMissing): counted only where they lower the figure (countWhereLower).
+  const noPurchaseTrips = [];
   for (const { trip, entries, proofs, uses } of loadAll(db)) {
     const monthEntries = entries.filter(inMonth);
     if (trip.kind === "household") {
@@ -1318,9 +1727,13 @@ export function summary(db, month) {
     totals.realisedMinutes += minutes;
     // Earnings per hour: whole trips completed this month, with every entry
     // they have, whatever its month. A trip completes on its last entry, so
-    // no trip has entries after the month it was completed in.
+    // no trip has entries after the month it was completed in. A trip that
+    // sold stock with no purchase recorded is set aside, whatever its time,
+    // and counted below only where it lowers the figure.
     if (r.completedOn && inMonth({ occurred: r.completedOn })) {
-      if (r.minutes > 0) {
+      if (r.purchaseMissing) {
+        noPurchaseTrips.push({ minutes: r.minutes, earnings: r.realisedContribution, open: trip.status === "open" });
+      } else if (r.minutes > 0) {
         hourly.trips += 1;
         hourly.minutes += r.minutes;
         hourly.earnings += r.realisedContribution;
@@ -1354,6 +1767,13 @@ export function summary(db, month) {
       }
     }
   }
+  const np = countWhereLower(hourly, noPurchaseTrips);
+  for (const t of np.counted) {
+    hourly.trips += 1;
+    hourly.minutes += t.minutes;
+    hourly.earnings += t.earnings;
+  }
+  const total = (list) => list.reduce((sum, t) => sum + t.earnings, 0);
   return {
     month,
     realisedEarnings: totals.realisedEarnings,
@@ -1368,6 +1788,14 @@ export function summary(db, month) {
     realisedMinutes: totals.realisedMinutes,
     realisedHourly: hourly.trips > 0 ? Math.round((hourly.earnings * 60) / hourly.minutes) : null,
     hourly,
+    hourlyNoPurchase: {
+      trips: np.leftOut.length,
+      earnings: total(np.leftOut),
+      open: np.leftOut.filter((t) => t.open).length,
+      openNoWork: np.leftOut.filter((t) => t.open && !(t.minutes > 0)).length,
+      countedTrips: np.counted.length,
+      countedEarnings: total(np.counted),
+    },
     payouts: totals.payouts,
     verifiedPayouts: totals.verifiedPayouts,
     verifiedEarnings: totals.verifiedEarnings,
@@ -1381,7 +1809,9 @@ export function summary(db, month) {
       "Potential proceeds count only live-evidence predictions on trips with a purchase receipt. " +
       "Realised hourly covers only the trips completed in the month (closed, or open with everything bought sold and paid out), " +
       "each with all its payouts, costs and work time, whatever month they fall in. " +
-      "Trips still open are left out, and money from trips without work time is left out.",
+      "Trips still open are left out, and money from trips without work time is left out. " +
+      "Trips that sold stock with no purchase recorded for it are left out too, because what the stock cost is not known, " +
+      "except where counting them at their recorded result lowers the figure.",
   };
 }
 
@@ -1413,6 +1843,11 @@ function median(values) {
  *     each with all its payouts, costs and work time whatever their dates
  *     (the same whole-trip basis as the month summary), and a like-for-like
  *     comparison with predicted hourly on the measured trips that have both.
+ *     Closed trips that sold stock with no purchase recorded for it count in
+ *     realised only where their recorded result lowers it (countWhereLower):
+ *     noPurchaseCountedTrips and noPurchaseCountedEarnings are those counted
+ *     (in trips too), noPurchaseTrips and noPurchaseEarnings those left out.
+ *     The comparison leaves them all out: their realised figure is not known.
  */
 export function metrics(db) {
   const all = loadAll(db);
@@ -1438,10 +1873,23 @@ export function metrics(db) {
   const verified = closed.filter(({ r }) => r.verified);
   const verifiedPayouts = verified.reduce((t, { r }) => t + r.payouts, 0);
   const payoutDays = closed.map(({ r }) => r.timeToPayoutDays).filter((d) => d !== null);
-  const worked = closed.filter(({ r }) => r.minutes > 0);
+  // Earnings per hour fail closed: a trip that sold stock with no purchase
+  // recorded for it (purchaseMissing) counts only where it lowers the figure.
+  const measured = closed.filter(({ r }) => r.minutes > 0 && !r.purchaseMissing);
+  const np = countWhereLower(
+    {
+      minutes: measured.reduce((t, { r }) => t + r.minutes, 0),
+      earnings: measured.reduce((t, { r }) => t + r.realisedContribution, 0),
+    },
+    closed.filter(({ r }) => r.purchaseMissing).map(({ r }) => ({ minutes: r.minutes, earnings: r.realisedContribution })),
+  );
+  const worked = [...measured.map(({ r }) => ({ minutes: r.minutes, earnings: r.realisedContribution })), ...np.counted];
+  const earningsOf = (list) => list.reduce((t, x) => t + x.earnings, 0);
   const hourlyOf = (contribution, minutes) =>
     minutes > 0 ? Math.round((contribution * 60) / minutes) : null;
-  const comparable = predicted.filter(({ trip, r }) => r.minutes > 0 && trip.predicted.activeMinutes > 0);
+  const comparable = predicted.filter(
+    ({ trip, r }) => r.minutes > 0 && !r.purchaseMissing && trip.predicted.activeMinutes > 0,
+  );
   return {
     closedTrips: closed.length,
     verifiedTrips: verified.length,
@@ -1467,9 +1915,13 @@ export function metrics(db) {
     hourly: {
       trips: worked.length,
       realised: hourlyOf(
-        worked.reduce((t, { r }) => t + r.realisedContribution, 0),
-        worked.reduce((t, { r }) => t + r.minutes, 0),
+        earningsOf(worked),
+        worked.reduce((t, x) => t + x.minutes, 0),
       ),
+      noPurchaseTrips: np.leftOut.length,
+      noPurchaseEarnings: earningsOf(np.leftOut),
+      noPurchaseCountedTrips: np.counted.length,
+      noPurchaseCountedEarnings: earningsOf(np.counted),
       comparison: {
         trips: comparable.length,
         realised: hourlyOf(

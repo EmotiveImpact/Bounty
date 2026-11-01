@@ -11,6 +11,16 @@ export const ALERT_RULES = Object.freeze({
 
 import { londonDate } from "./http.mjs";
 
+// The checks suitability.mjs gives for the person making a trip, and what
+// each says when it was not given (it then fails).
+const SUITABILITY_CHECK_IDS = Object.freeze(["one-unit-load", "total-load", "cash-available", "storage-space"]);
+const SUITABILITY_UNCHECKED = Object.freeze({
+  "one-unit-load": "One unit was not checked against your load limit",
+  "total-load": "The load for every unit planned was not checked against your load limit",
+  "cash-available": "The cash the trip needs was not checked against the cash you can spend",
+  "storage-space": "The units were not checked against your storage at home",
+});
+
 const DAY = 86400000;
 const CALENDAR = /^\d{4}-\d{2}-\d{2}$/;
 export function ageDays(date, now) {
@@ -76,6 +86,17 @@ export function ageDays(date, now) {
 //                      window (opportunity.demandUnits); null when unknown
 //  sellWindowWeeks     the window demandUnits was worked out for
 //  provenItem          true when a verified trade exists for the item
+//  suitability         whether the trip fits the person making it (round 5):
+//                      the checks from suitability.mjs suitability() for
+//                      their transport, carry limit, cash and storage
+//                      (one-unit-load, total-load, cash-available,
+//                      storage-space), each kept as a gate check; a check
+//                      that is missing fails. "per-member" for a bounty,
+//                      whose figures are shared with many members: each
+//                      member's own profile decides at the alert and the
+//                      claim (bounties.mjs). Missing on live evidence fails
+//                      closed; sample figures (the Planner, which caps its
+//                      units by the same limits) carry no such check
 export function evaluateAlert(input = {}, rules = ALERT_RULES) {
   const checks = [];
   const add = (id, ok, pass, failure) =>
@@ -260,6 +281,29 @@ export function evaluateAlert(input = {}, rules = ALERT_RULES) {
       : "Sales support about " + input.demandUnits + " unit" + (input.demandUnits === 1 ? "" : "s") +
           " within " + weeks + " weeks after competing listings, fewer than the " + input.units + " planned",
   );
+  // The trip must fit the person making it: one unit and every unit within
+  // their load limit, the cash before payout within what they can spend,
+  // and the units within their storage. Unknown fails (suitability.mjs).
+  if (Array.isArray(input.suitability)) {
+    for (const id of SUITABILITY_CHECK_IDS) {
+      const c = input.suitability.find((x) => x && x.id === id);
+      const detail = typeof c?.detail === "string" && c.detail.trim() ? c.detail.trim() : SUITABILITY_UNCHECKED[id];
+      add(id, c?.ok === true, detail, detail);
+    }
+  } else if (input.suitability === "per-member")
+    add(
+      "member-fit",
+      true,
+      "Checked for each member: their own transport, carrying limit, cash and storage decide when they are alerted and when they claim",
+      null,
+    );
+  else if (input.evidenceClass === "live")
+    add(
+      "member-fit",
+      false,
+      null,
+      "Not checked against the transport, carrying limit, cash and storage of the person making the trip",
+    );
   return {
     eligible: checks.every((c) => c.ok),
     reasons: checks.filter((c) => !c.ok).map((c) => c.detail),

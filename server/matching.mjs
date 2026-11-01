@@ -529,6 +529,12 @@ const timeOf = (value) =>
  * seller is a different seller. lowestAsking is the lowest asking price plus
  * buyer shipping where shipping is known; lowestAskingIncludesShipping is
  * false when the lowest figure excludes unknown shipping.
+ *
+ * bySeller (round 5b) lists each stated seller of a current listing as
+ * { seller, listings, seen: [{ observed, listed }] } (ISO times; listed is
+ * null when the source gives none), sorted by seller, or null when
+ * competition is unknown. Listings without a seller are not in it, so they
+ * can never be taken for a member's own.
  */
 export function competition(offer, rows, { now = new Date(), maxAgeDays = ASKING_MAX_AGE_DAYS, lookup = null } = {}) {
   const gtin = normaliseBarcode(offer?.barcode);
@@ -565,6 +571,7 @@ export function competition(offer, rows, { now = new Date(), maxAgeDays = ASKING
     return {
       activeListings: null,
       sellers: null,
+      bySeller: null,
       lowestAsking: null,
       lowestAskingIncludesShipping: null,
       ...base,
@@ -574,12 +581,25 @@ export function competition(offer, rows, { now = new Date(), maxAgeDays = ASKING
           : `Competing listings last checked ${londonDay.format(new Date(newest))}: run an asking-price lookup before sharing`,
     };
   const named = new Set();
+  // Per named seller (round 5b): how many current listings, and when each
+  // was seen and listed, so a member's own listings of units they bought
+  // through a bounty can be counted once (bounties.mjs ownListings).
+  const perSeller = new Map();
   let unnamed = 0;
   let lowest = null;
   for (const r of listings) {
     const seller = sellerName(r.seller);
-    if (seller) named.add(seller);
-    else unnamed++;
+    if (seller) {
+      named.add(seller);
+      const entry = perSeller.get(seller) ?? { seller, listings: 0, seen: [] };
+      entry.listings++;
+      const listed = timeOf(r.listed);
+      entry.seen.push({
+        observed: new Date(timeOf(r.observed)).toISOString(),
+        listed: Number.isFinite(listed) ? new Date(listed).toISOString() : null,
+      });
+      perSeller.set(seller, entry);
+    } else unnamed++;
     const shippingKnown = Number.isSafeInteger(r.shipping) && r.shipping >= 0;
     const total = r.price + (shippingKnown ? r.shipping : 0);
     if (
@@ -592,6 +612,9 @@ export function competition(offer, rows, { now = new Date(), maxAgeDays = ASKING
   return {
     activeListings: listings.length,
     sellers: named.size + unnamed,
+    bySeller: [...perSeller.values()]
+      .map((e) => ({ ...e, seen: e.seen.sort((a, b) => a.observed.localeCompare(b.observed)) }))
+      .sort((a, b) => a.seller.localeCompare(b.seller)),
     lowestAsking: lowest ? lowest.total : null,
     lowestAskingIncludesShipping: lowest ? lowest.shippingKnown : null,
     ...base,

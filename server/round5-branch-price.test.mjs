@@ -95,6 +95,9 @@ const request = (over = {}) => ({
   offerAttributes: { pack: "1", model: "BTS-20", condition: "new", size: "one size" },
   category: "general",
   categoryReason: "A loudspeaker, not food: Open Prices suggests Food for every observation",
+  // Round 5 (suitability): the operator's own transport, carrying limit,
+  // cash and storage; without them the trip is never eligible.
+  profile: { transport: "Walk", carryKg: 5, cashAvailable: 100000, storageUnits: 20 },
   ...over,
 });
 const AWIN = { offer: { provider: "awin", sourceId: "A1" }, offerAttributes: undefined };
@@ -125,10 +128,21 @@ async function app(db) {
         alertLocalities: [locality],
         paidTier: "diamond",
         paidUntil: new Date(Date.now() + 200 * DAY).toISOString().slice(0, 10),
+        // Round 5 (suitability): a member is only alerted, and can only claim,
+        // once their transport, carrying limit and storage are known.
+        transport: "Car",
+        carryKg: 25,
+        storageUnits: 50,
       })
     ).body.member;
   const claim = (bountyId, memberId) =>
-    call("POST", `/api/bounties/${bountyId}/claims`, { memberId, units: 1, journeyCost: 0, journeyMinutes: 15 });
+    call("POST", `/api/bounties/${bountyId}/claims`, {
+      memberId,
+      units: 1,
+      journeyCost: 0,
+      journeyMinutes: 15,
+      cashAvailable: 100000,
+    });
   return { api, call, bountyFor, member, claim, close: () => api.close() };
 }
 
@@ -416,6 +430,8 @@ test("the gate fails closed without the price at the branch and the tier goes to
     meetsThresholds: true,
     units: 1,
     demandUnits: 4,
+    // The trip fits the person making it (round 5, finding 4).
+    suitability: "per-member",
   };
   const gate = (over) => evaluateAlert({ ...passing, ...over }).checks.find((c) => c.id === "price-at-branch");
   assert.deepEqual(gate({}), {

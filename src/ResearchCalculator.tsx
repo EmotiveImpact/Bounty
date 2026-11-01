@@ -3,6 +3,7 @@ import {
   api,
   barcodeText,
   dateTime,
+  editedTripFields,
   hours,
   loadMemberRules,
   loadProfile,
@@ -384,7 +385,11 @@ type Estimate = {
   journey?: { known: boolean; missing: string[]; costKnown: boolean; minutesKnown: boolean };
   missingInputs?: string[];
   demand?: Demand;
-  access?: { needs: AccessNeed[]; carryKg: number; carrySource: "request" | "default" };
+  // carryKg is the operator's own carry limit, or null when not entered.
+  access?: { needs: AccessNeed[]; carryKg: number | null; carrySource: "profile" | "request" | "unknown" };
+  // Whether the trip fits the operator's transport, carrying limit, cash
+  // and storage (server/suitability.mjs, round 5).
+  suitability?: Suitability;
   checked?: { price: string | null; stock: string | null; locality: string | null };
   mainUncertainty?: string;
   offerAttributes?: AttributeResult;
@@ -396,6 +401,34 @@ type Estimate = {
   assumptions: string[];
   warnings: string[];
 };
+// The operator's own trip profile as the estimate takes it: a null field is
+// not entered, never zero. Cash is pence.
+export type TripProfile = {
+  transport: string | null;
+  carryKg: number | null;
+  cashAvailable: number | null;
+  storageUnits: number | null;
+};
+export type SuitabilityCheck = {
+  id: "one-unit-load" | "total-load" | "cash-available" | "storage-space";
+  ok: boolean;
+  known: boolean;
+  detail: string;
+  maxUnits: number | null;
+};
+export type Suitability =
+  | {
+      basis: "profile";
+      ok: boolean;
+      known: boolean;
+      checks: SuitabilityCheck[];
+      reasons: string[];
+      missing: string[];
+      loadLimitKg: number | null;
+      maxUnits: { load: number | null; cash: number | null; storage: number | null; all: number | null };
+      cashRequired: number | null;
+    }
+  | { basis: "per-member"; note: string; cashRequired: number | null };
 type EstimateRequest = {
   offer: { provider: string; sourceId: string };
   sales: { provider: string; sourceId: string }[];
@@ -409,7 +442,7 @@ type EstimateRequest = {
   locality?: string;
   category?: CategoryId;
   categoryReason?: string;
-  carryKg?: number;
+  profile?: TripProfile | null;
   packagingChecked?: boolean;
   bestBefore?: string;
   offerAttributes?: Partial<Record<AttrKey, string>>;
@@ -535,7 +568,50 @@ type Inputs = {
   categoryReason: string;
   packagingChecked: boolean;
   bestBefore: string;
+  // The operator's own transport, carrying limit (kg), cash for the trip (£)
+  // and storage (units), prefilled from what the Planner saved. Every one is
+  // required, and they are used only once profileChecked is ticked, because
+  // the Planner saves its starting values too: a value nobody entered must
+  // never stand in for the operator's own.
+  transport: string;
+  carryKg: string;
+  cashAvailable: string;
+  storageUnits: string;
+  profileChecked: boolean;
 };
+// How the Planner names transport (server/trip.mjs MODES).
+export const TRANSPORTS = ["Walk", "Bicycle", "Public transport", "Car", "Van"] as const;
+export const TRANSPORT_WORDS: Record<string, string> = {
+  Walk: "On foot",
+  Bicycle: "By bicycle",
+  "Public transport": "By public transport",
+  Car: "By car",
+  Van: "By van",
+};
+// Only the trip fields someone changed in the Planner (the profile names
+// them, round 5b), never its starting values (loadProfile fills those in,
+// and an older version saved them on load): every other field is blank.
+export function savedTripProfile() {
+  const out = { transport: "", carryKg: "", cashAvailable: "", storageUnits: "" };
+  try {
+    const edited = editedTripFields();
+    if (!edited.length) return out;
+    const raw = JSON.parse(localStorage.getItem("bounty-profile") || "{}");
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+    const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
+    if (edited.includes("transport") && typeof raw.transport === "string" && (TRANSPORTS as readonly string[]).includes(raw.transport))
+      out.transport = raw.transport;
+    const carry = n(raw.carry);
+    if (edited.includes("carry") && carry !== null && carry <= 1000) out.carryKg = String(carry);
+    const budget = n(raw.budget);
+    if (edited.includes("budget") && budget !== null) out.cashAvailable = String(Math.round(budget * 100) / 100);
+    const storage = n(raw.storage);
+    if (edited.includes("storage") && storage !== null) out.storageUnits = String(Math.round(storage));
+  } catch {
+    /* storage unavailable: nothing saved */
+  }
+  return out;
+}
 function initialInputs(): Inputs {
   const p = loadProfile();
   // A first purchase is a trial batch, so start small whatever the profile
@@ -564,6 +640,8 @@ function initialInputs(): Inputs {
     categoryReason: "",
     packagingChecked: false,
     bestBefore: "",
+    ...savedTripProfile(),
+    profileChecked: false,
   };
 }
 // Costs and times the estimate needs entered: a blank is never counted as
@@ -690,6 +768,44 @@ function stricterRules(value: Stricter): MemberRules {
   return rules;
 }
 
+// The profile fields: [field, label, kind, hint].
+const PROFILE_INPUTS: [keyof Inputs, string, FieldKind, string][] = [
+  ["carryKg", "How much you can carry (kg), required", "kg", "What you can carry yourself, in kilograms"],
+  [
+    "cashAvailable",
+    "Cash you can spend on this trip (£), required",
+    "pounds",
+    "Before any payout comes in. A blank is never counted as zero or as enough",
+  ],
+  ["storageUnits", "Room at home for this trip's units, required", "count", "On top of the stock already at home"],
+];
+/** The profile as the estimate takes it (blank is null), or an error message. */
+function tripProfileOf(inputs: Inputs): TripProfile | string {
+  const out: TripProfile = {
+    transport: (TRANSPORTS as readonly string[]).includes(inputs.transport) ? inputs.transport : null,
+    carryKg: null,
+    cashAvailable: null,
+    storageUnits: null,
+  };
+  for (const [field, label, kind] of PROFILE_INPUTS) {
+    const value = readNumber(String(inputs[field]), kind);
+    if (Number.isNaN(value)) return label.replace(", required", "") + " must be a number";
+    if (value !== undefined) (out as Record<string, number | string | null>)[field] = value;
+  }
+  return out;
+}
+/** Profile fields left blank, in words. */
+export function profileBlanks(inputs: Inputs) {
+  const p = tripProfileOf(inputs);
+  if (typeof p === "string") return [];
+  const out: string[] = [];
+  if (p.transport === null) out.push("how you will travel");
+  if (p.carryKg === null) out.push("how much you can carry");
+  if (p.cashAvailable === null) out.push("the cash you can spend");
+  if (p.storageUnits === null) out.push("the units you can store");
+  return out;
+}
+
 /** Builds the estimate request, or returns an error message. */
 function buildRequest(
   offer: Offer,
@@ -697,7 +813,6 @@ function buildRequest(
   inputs: Inputs,
   stricter: Stricter,
   offerAttributes: Partial<Record<AttrKey, string>>,
-  carryKg: number | null,
 ): EstimateRequest | string {
   const read = (field: keyof Inputs, kind: FieldKind) => readNumber(String(inputs[field]), kind);
   const costs: Record<string, number> = {};
@@ -715,6 +830,8 @@ function buildRequest(
     if (Number.isNaN(readNumber(stricter[key], kind))) return label + " must be a number";
   const rules = stricterRules(stricter);
   const hourlyFloor = read("hourlyFloor", "pounds");
+  const profile = tripProfileOf(inputs);
+  if (typeof profile === "string") return profile;
   const food = categoryChoice(inputs, offer).applied === "food";
   const reason = inputs.categoryReason.trim();
   return {
@@ -733,7 +850,9 @@ function buildRequest(
     ...(inputs.locality.trim() ? { locality: inputs.locality.trim() } : {}),
     ...(inputs.category ? { category: inputs.category } : {}),
     ...(inputs.category && reason ? { categoryReason: reason.slice(0, 300) } : {}),
-    ...(carryKg !== null ? { carryKg } : {}),
+    // Sent only once ticked as right for this trip; without it every check
+    // that needs the profile asks for it to be confirmed.
+    profile: inputs.profileChecked ? profile : null,
     ...(food ? { packagingChecked: inputs.packagingChecked } : {}),
     ...(food && inputs.bestBefore ? { bestBefore: inputs.bestBefore } : {}),
     ...(Object.keys(offerAttributes).length ? { offerAttributes } : {}),
@@ -742,7 +861,7 @@ function buildRequest(
 
 // The estimate request without what the audit sets from the item itself
 // (the offer, the sales, the locality, promotion eligibility and the unit
-// weight): costs, units, rules, the hourly floor, the cash date, the category
+// weight) and without the operator's own trip profile: costs, units, rules, the hourly floor, the cash date, the category
 // and its checks, and any attributes the operator confirmed.
 export function estimateInputsOf(req: EstimateRequest): Record<string, unknown> {
   const {
@@ -751,6 +870,8 @@ export function estimateInputsOf(req: EstimateRequest): Record<string, unknown> 
     locality: _locality,
     promotionEligible: _promotion,
     weightKg: _weight,
+    // One person's transport, cash and storage, not the item's.
+    profile: _profile,
     ...rest
   } = req;
   return rest;
@@ -816,6 +937,8 @@ function loadDraft(): Draft | null {
         if (typeof v === typeof base[k]) (inputs as Record<string, unknown>)[k] = v;
       }
     if (!["", "general", "clothing", "food"].includes(inputs.category)) inputs.category = "";
+    if (inputs.transport !== "" && !(TRANSPORTS as readonly string[]).includes(inputs.transport))
+      inputs.transport = "";
     const o = d.selected as Offer | null | undefined;
     const selected =
       o && typeof o === "object" && isText(o.provider) && isText(o.sourceId) && isText(o.title) ? o : null;
@@ -851,12 +974,6 @@ export function clearResearchDraft() {
     /* nothing stored */
   }
 }
-// The member's carry limit from the shared profile, for the access needs.
-function profileCarry(): number | null {
-  const carry = loadProfile().carry;
-  return typeof carry === "number" && Number.isFinite(carry) && carry >= 0 && carry <= 1000 ? carry : null;
-}
-
 export function ResearchCalculator({
   onAuditDraft,
 }: {
@@ -864,7 +981,6 @@ export function ResearchCalculator({
 }) {
   // Restored once, on mount, from this browser tab's saved draft.
   const [restored] = useState(loadDraft);
-  const [carryKg] = useState(profileCarry);
   const [query, setQuery] = useState(restored?.query ?? "");
   const [offers, setOffers] = useState<{ rows: Offer[]; total: number }>({
     rows: [],
@@ -1006,8 +1122,8 @@ export function ResearchCalculator({
 
   const request = useMemo(
     () =>
-      selected ? buildRequest(selected, confirmed, inputs, stricter, offerAttributes, carryKg) : null,
-    [selected, confirmed, inputs, stricter, offerAttributes, carryKg],
+      selected ? buildRequest(selected, confirmed, inputs, stricter, offerAttributes) : null,
+    [selected, confirmed, inputs, stricter, offerAttributes],
   );
   const requestKey = request && typeof request === "object" ? JSON.stringify(request) : null;
 
@@ -1405,6 +1521,7 @@ export function ResearchCalculator({
                 </span>
               </label>
             </div>
+            <TripProfileFields inputs={inputs} set={set} />
             {offer.promotion && (
               <label className="confirm">
                 <input
@@ -2258,8 +2375,8 @@ function OfferSummary({ offer }: { offer: Offer }) {
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 // "a, b and c" for short lists of plain labels.
-const listText = (items: string[]) =>
-  items.length <= 1 ? items.join("") : items.slice(0, -1).join(", ") + " and " + items[items.length - 1];
+const listText = (items: string[], and = "and") =>
+  items.length <= 1 ? items.join("") : items.slice(0, -1).join(", ") + ` ${and} ` + items[items.length - 1];
 // Costs whose blank the figures leave out (server/estimate.mjs REQUIRED_INPUTS).
 const MONEY_LABELS: Record<string, string> = {
   postage: "parcel cost",
@@ -2441,6 +2558,157 @@ function BranchPriceLine({ estimate }: { estimate: Estimate }) {
   );
 }
 
+// The operator's own transport, carrying limit, cash and storage for this
+// trip (round 5). Every field is required and they count only once ticked.
+function TripProfileFields({
+  inputs,
+  set,
+}: {
+  inputs: Inputs;
+  set: (field: keyof Inputs, value: string | boolean) => void;
+}) {
+  const blanks = profileBlanks(inputs);
+  return (
+    <div className="trip-profile" role="group" aria-labelledby="trip-profile-title">
+      <h4 id="trip-profile-title">Does this trip fit you?</h4>
+      <p className="muted">
+        Your transport, what you can carry, the cash you can spend and the room you have at home
+        for this trip's units, on top of the stock already there. A field is filled in only when
+        you changed it in the Planner, never from its starting values; the Planner's storage is
+        your room in all, so take off any stock already at home. Every field is required: a blank
+        is never counted as zero or as enough.
+      </p>
+      <div className="grid2 inputs">
+        <label>
+          How you will travel, required
+          <select
+            value={inputs.transport}
+            aria-invalid={!inputs.transport}
+            onChange={(ev) => set("transport", ev.target.value)}
+          >
+            <option value="">Choose how you will travel</option>
+            {TRANSPORTS.map((t) => (
+              <option key={t} value={t}>
+                {TRANSPORT_WORDS[t]}
+              </option>
+            ))}
+          </select>
+          <span className="muted">
+            By car or van you can load at least 25 kg; by public transport at most 10 kg
+          </span>
+        </label>
+        {PROFILE_INPUTS.map(([field, label, kind, hint]) => (
+          <label key={field}>
+            {label}
+            <input
+              type="number"
+              inputMode="decimal"
+              min={0}
+              max={kind === "kg" ? 1000 : 100000}
+              step={kind === "count" ? 1 : 0.01}
+              value={String(inputs[field])}
+              aria-invalid={String(inputs[field]).trim() === ""}
+              onChange={(ev) => set(field, ev.target.value)}
+            />
+            <span className="muted">{hint}</span>
+          </label>
+        ))}
+      </div>
+      <label className="confirm">
+        <input
+          type="checkbox"
+          checked={inputs.profileChecked}
+          onChange={(ev) => set("profileChecked", ev.target.checked)}
+        />
+        <span>
+          These are right for this trip: how I will travel, what I can carry, the cash I can spend
+          and the room I have at home.
+        </span>
+      </label>
+      {!inputs.profileChecked ? (
+        <p className="warn">
+          Tick once you have checked them. Until then they are not used, and the trip cannot
+          become a buy alert.
+        </p>
+      ) : (
+        blanks.length > 0 && (
+          <p className="warn">
+            Not entered: {listText(blanks)}. The trip cannot become a buy alert until you do.
+          </p>
+        )
+      )}
+    </div>
+  );
+}
+
+// Whether the trip fits the operator's own profile, in plain words. The
+// headline follows the checks (round 5b): "No" as soon as a known check
+// fails, naming the limits that bind and only the remedies that apply;
+// "Not known yet" names what is blank (a profile value, the unit weight, or
+// a cost the cash figure needs).
+const LIMIT_WORDS: Record<SuitabilityCheck["id"], string> = {
+  "one-unit-load": "your load limit",
+  "total-load": "your load limit",
+  "cash-available": "the cash you can spend",
+  "storage-space": "your room at home",
+};
+const MISSING_WORDS: Record<string, string> = {
+  transport: "how you will travel",
+  carryKg: "how much you can carry",
+  cashAvailable: "the cash you can spend",
+  storageUnits: "your room at home",
+};
+export function fitHeadline(fit: Extract<Suitability, { basis: "profile" }>): string {
+  if (fit.ok) return "Yes: it fits your transport, carrying limit, cash and storage.";
+  const failing = fit.checks.filter((c) => c.known && !c.ok);
+  if (failing.length) {
+    const limits = [...new Set(failing.map((c) => LIMIT_WORDS[c.id]))];
+    const counts = failing.map((c) => c.maxUnits).filter((n): n is number => typeof n === "number");
+    const most = counts.length ? Math.min(...counts) : null;
+    const remedies: string[] = [];
+    if (failing.some((c) => c.id === "one-unit-load" || c.id === "total-load")) remedies.push("travel another way or carry more");
+    if (failing.some((c) => c.id === "cash-available")) remedies.push("have more cash ready");
+    if (failing.some((c) => c.id === "storage-space")) remedies.push("make room at home");
+    // Each remedy kept whole, so "travel another way or carry more" never
+    // runs into the next one (round 5b): "..., and make room at home".
+    const all = remedies.length <= 1 ? remedies.join("") : `${remedies.slice(0, -1).join(", ")}, and ${remedies[remedies.length - 1]}`;
+    if (most !== null && most >= 1)
+      return `No: at most ${most} ${most === 1 ? "unit fits" : "units fit"} ${listText(limits)}. ${
+        remedies.length <= 1 ? `Lower the units to buy, or ${all}.` : `Lower the units to buy. To buy them all, ${all}.`
+      }`;
+    return `No: not one unit fits ${listText(limits)}. To make this trip you would need to ${all}.`;
+  }
+  const causes: string[] = [];
+  const missing = fit.missing.filter((k) => MISSING_WORDS[k]);
+  if (missing.length) causes.push(`confirm ${listText(missing.map((k) => MISSING_WORDS[k]))} above`);
+  const unknown = (id: SuitabilityCheck["id"]) => fit.checks.some((c) => c.id === id && !c.known);
+  const loadKnown = !fit.missing.includes("transport") && !fit.missing.includes("carryKg");
+  if ((unknown("one-unit-load") || unknown("total-load")) && loadKnown) causes.push("enter the unit weight");
+  if (unknown("cash-available") && !fit.missing.includes("cashAvailable"))
+    causes.push("enter every cost, so the cash the trip needs before any payout is known");
+  return `Not known yet: ${causes.length ? listText(causes, "and") : "a value these checks need is blank"}. A blank is never counted as zero or as enough.`;
+}
+
+function FitPanel({ estimate }: { estimate: Estimate }) {
+  const fit = estimate.suitability;
+  if (!fit || fit.basis !== "profile") return null;
+  return (
+    <div className="fit-panel" data-fit={fit.ok ? "yes" : "no"}>
+      <h3>Does this trip fit you?</h3>
+      <p className={fit.ok ? "ok" : "warn"} data-headline>
+        {fitHeadline(fit)}
+      </p>
+      <ul className="checks">
+        {fit.checks.map((c) => (
+          <li key={c.id} className={c.ok ? "pass" : ""} data-check={c.id}>
+            {c.detail}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function Result({ estimate, stale }: { estimate: Estimate; stale: boolean }) {
   const e = estimate.economics;
   const s = estimate.sample;
@@ -2473,6 +2741,7 @@ function Result({ estimate, stale }: { estimate: Estimate; stale: boolean }) {
       {estimate.access && <AccessLabels needs={estimate.access.needs} />}
       <CheckedLine estimate={estimate} />
       <BranchPriceLine estimate={estimate} />
+      <FitPanel estimate={estimate} />
       {missing.length > 0 && (
         <p className="notice warn">
           Not entered: {listText(missing)}. A blank is never counted as zero, so profit and
@@ -2642,9 +2911,15 @@ const sameText = (a: string | null | undefined, b: string | null | undefined) =>
 
 // What the server says back about a saved check (server/audit.mjs
 // recordCheck): the stored row, plus, when known, whether the time was
-// stamped by the server and a warning that a newer check or report still
-// decides the shelf.
-type SavedCheck = StockCheck & { checkedAtStamped?: boolean; olderWarning?: string | null };
+// stamped by the server, a warning that a newer check or report still
+// decides the shelf, and a warning that Open Prices does not place the shop
+// the branch names in the check's locality, so prices seen there do not
+// count for the check.
+type SavedCheck = StockCheck & {
+  checkedAtStamped?: boolean;
+  olderWarning?: string | null;
+  branchWarning?: string | null;
+};
 
 /**
  * Records a branch check. "Checked at" starts empty: a blank time is the
@@ -2661,7 +2936,10 @@ type SavedCheck = StockCheck & { checkedAtStamped?: boolean; olderWarning?: stri
  * price what one unit costs there without a loyalty card or multibuy. A
  * trip is costed at a shelf price recorded here; without one the price is
  * confirmed at this branch only when the offer is an Open Prices price from
- * the shop the check names.
+ * the shop the check names. After a save the form shows the server's
+ * warnings in place of the usual message: that a newer check still decides
+ * the shelf, then that Open Prices does not place the shop the branch names
+ * in this locality, so prices seen there do not count for the check.
  */
 function StockCheckForm({
   offer,
@@ -2772,9 +3050,14 @@ function StockCheckForm({
               typeof saved?.price_pence === "number"
                 ? " Shelf price " + money(saved.price_pence) + " recorded."
                 : " No shelf price recorded, so the price is confirmed at this branch only if the offer is an Open Prices price from the shop this check names.";
+            // Each warning ends with what to do, so the usual sentence about
+            // the shelf price is left out when there is one.
+            const warnings = [saved?.olderWarning, saved?.branchWarning].filter(
+              (w): w is string => typeof w === "string" && w.trim() !== "",
+            );
             setMessage(
-              saved?.olderWarning
-                ? { text: "Check saved. " + saved.olderWarning, warn: true }
+              warnings.length
+                ? { text: "Check saved. " + warnings.join(" "), warn: true }
                 : {
                     text:
                       "Check saved for " +

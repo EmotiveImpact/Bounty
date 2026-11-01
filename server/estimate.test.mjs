@@ -165,6 +165,7 @@ const priceAll = (db, pence) => {
   db.prepare("UPDATE availability_checks SET price_pence = ?").run(pence);
 };
 
+const PROFILE = Object.freeze({ transport: "Car", carryKg: 25, cashAvailable: 100000, storageUnits: 20 });
 const request = (extra = {}) => ({
   offer: { provider: "awin", sourceId: "offer-1" },
   sales: salesOf(SALES),
@@ -185,6 +186,8 @@ const request = (extra = {}) => ({
   cashNeededDays: 14,
   locality: "Leeds",
   weightKg: 0.9,
+  // The person making the trip (round 5): a car, so two 0.9 kg units fit.
+  profile: PROFILE,
   now: NOW,
   ...extra,
 });
@@ -653,7 +656,8 @@ test("unknown or heavy unit weight rejects the opportunity and blocks the alert"
     assert.equal(r.opportunity.meetsThresholds, false);
     assert.equal(r.inputs.weightKg, null);
     assert.ok(r.warnings.some((w) => /unit weight not entered/i.test(w)));
-    assert.deepEqual(failing(r), ["buying-thresholds"]);
+    // An unknown weight cannot be checked against the load limit either (round 5).
+    assert.deepEqual(failing(r), ["buying-thresholds", "one-unit-load", "total-load"]);
     assert.equal(r.alert.eligible, false);
   }
   const heavy = estimateFromEvidence(db, request({ weightKg: 2 }));
@@ -876,7 +880,8 @@ test("a blank journey cost or time fails closed; an entered 0 is accepted", () =
   // The figures are still shown, but the gate cannot rely on them.
   assert.ok(blank.economics.contribution > 0);
   assert.equal(blank.economics.costs.travel, 0);
-  assert.deepEqual(failing(blank), ["positive-contribution", "hourly-floor", "inputs-entered", "journey", "buying-thresholds"]);
+  // With the journey cost blank the cash the trip needs is not known (round 5).
+  assert.deepEqual(failing(blank), ["positive-contribution", "hourly-floor", "inputs-entered", "journey", "buying-thresholds", "cash-available"]);
   assert.deepEqual(blank.missingInputs, ["return journey cost", "journey time"]);
   assert.equal(blank.alert.eligible, false);
   assert.equal(tierOf(blank), "Review");
@@ -1528,7 +1533,8 @@ test("blank packaging cost and handling time are missing inputs, never zero; a t
   const { packaging: _p, handlingMinutes: _h, ...blankCosts } = request().costs;
   const blank = estimateFromEvidence(db, request({ costs: blankCosts }));
   assert.deepEqual(blank.missingInputs, ["packaging cost", "handling time"]);
-  assert.deepEqual(failing(blank), ["positive-contribution", "hourly-floor", "inputs-entered", "buying-thresholds"]);
+  // With the packaging cost blank the cash the trip needs is not known (round 5).
+  assert.deepEqual(failing(blank), ["positive-contribution", "hourly-floor", "inputs-entered", "buying-thresholds", "cash-available"]);
   const check = blank.alert.checks.find((c) => c.id === "inputs-entered");
   assert.equal(check.detail, "Not entered: packaging cost, handling time. A blank is never counted as zero");
   assert.equal(tierOf(blank), "Review");
@@ -1812,13 +1818,17 @@ test("results carry access needs, when the price and stock were checked and the 
   const db = fixture();
   const r = estimateFromEvidence(db, request());
   assert.deepEqual(r.access.needs.map((n) => n.label), ["Widely accessible"]);
-  assert.equal(r.access.carrySource, "default");
+  // The carry limit is the profile's (round 5); with none it is unknown,
+  // never the default profile's limit.
+  assert.equal(r.access.carrySource, "profile");
+  assert.equal(estimateFromEvidence(db, request({ profile: undefined })).access.carrySource, "unknown");
+  assert.equal(estimateFromEvidence(db, request({ profile: undefined })).access.carryKg, null);
   // The shelf price on the branch check dates the price (round 5).
   assert.equal(r.checked.price, new Date(Date.parse(NOW) - 3600000).toISOString());
   assert.equal(r.checked.stock, new Date(Date.parse(NOW) - 3600000).toISOString());
   assert.match(r.mainUncertainty, /^Whether buyers still pay about £30\.00/);
 
-  const heavy = estimateFromEvidence(db, request({ weightKg: 1.5, carryKg: 1 }));
+  const heavy = estimateFromEvidence(db, request({ weightKg: 1.5, carryKg: 1, profile: undefined }));
   assert.deepEqual(heavy.access.needs.map((n) => n.label), ["Vehicle required", "Heavy handling"]);
   assert.equal(heavy.access.carryKg, 1);
   assert.throws(() => validateEstimateRequest(request({ carryKg: -1 })), (e) => e instanceof HttpError && e.status === 400);

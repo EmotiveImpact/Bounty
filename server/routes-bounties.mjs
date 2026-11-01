@@ -66,6 +66,24 @@ import { blockedTripCheck, claimTerms, memberTermsInput, sharedDemand } from "./
 // for the item: recorded as sold or returned by the member, or reconciled by
 // the operator (round 5).
 import { reconcileClaim, recordResale } from "./bounties.mjs";
+// Whether a trip fits each member's own transport, carry limit, cash and
+// storage (round 5, finding 4).
+import { cashInput, memberProfileView, memberTripProfile } from "./bounties.mjs";
+// A claim made before the cash was asked for stores the cash its member can
+// spend, and a member's marketplace seller name stops their own listings
+// counting twice against the demand (round 5b).
+import { setClaimCash } from "./bounties.mjs";
+// The operator confirms a member's seller name before their listings are
+// counted once (round 5b, second verification).
+import { confirmSellerName } from "./bounties.mjs";
+// Units a member already has at home from bounties take up their storage
+// room (round 5b).
+import { homeStock, roomFor } from "./bounties.mjs";
+
+// A bounty is shared with many members, so its own estimate leaves the
+// transport, carry limit, cash and storage checks to each member's profile
+// (estimate.mjs options.suitability); memberTripCheck applies them.
+const PER_MEMBER = "per-member";
 
 // A 5 MB photo is about 6.7 million base64 characters.
 const REPORT_BODY_LIMIT = 7_200_000;
@@ -125,7 +143,9 @@ function bountyRequest(request, locality) {
   const checked = text(request.locality, "estimate.locality", 120, { optional: true });
   if (checked && normaliseLocality(checked) !== normaliseLocality(place))
     fail(`The estimate checked stock in ${checked}, not ${place}`);
-  const { now: _now, ...rest } = request;
+  // The operator's own profile (Research sends it) is not a member's: the
+  // stored request never carries one.
+  const { now: _now, profile: _profile, carryKg: _carry, ...rest } = request;
   return { ...rest, locality: place };
 }
 
@@ -152,11 +172,11 @@ function rechecker(db, { estimate, askingLookup }) {
     let result;
     try {
       if (!request) throw Error("no stored estimate request");
-      result = await estimate(db, request, { now });
+      result = await estimate(db, request, { now, suitability: PER_MEMBER });
       // The figures must be for the units one member can claim: when the
       // estimate was for more, work it out again for that many.
       const plan = planForBounty(bounty, result, { lookup, db, now });
-      if (plan.rerun) result = await estimate(db, { ...request, units: plan.figures }, { now });
+      if (plan.rerun) result = await estimate(db, { ...request, units: plan.figures }, { now, suitability: PER_MEMBER });
     } catch (error) {
       result = { error: error.message };
     }
@@ -219,11 +239,17 @@ async function recheckClaims(db, bounty, { estimate, now }) {
       let result;
       try {
         if (!request) throw Error("no stored estimate request");
-        result = await estimate(db, request, { now });
+        result = await estimate(db, request, { now, suitability: PER_MEMBER });
       } catch (error) {
         result = { error: error.message };
       }
-      out.push({ claimId: c.id, check: memberTripCheck(result, { units, journey, shared, terms: claimTerms(bounty, terms) }) });
+      // The member's profile now, with the cash they gave with the claim
+      // (round 5): a claim that stored none fails the cash check.
+      const own = claimTerms(bounty, terms);
+      // Their room at home less units held and units in their claims made
+      // before this one (homeStock).
+      const profile = memberTripProfile(member, own.cashAvailable, homeStock(db, member.id, { bountyId: bounty.id, before: c, now }));
+      out.push({ claimId: c.id, check: memberTripCheck(result, { units, journey, shared, terms: own, profile }) });
     }
     ahead += Number.isSafeInteger(units) ? units : 0;
   }
@@ -310,7 +336,7 @@ export function routes(db, options = {}) {
     let result;
     try {
       if (!request) throw Error("no stored estimate request");
-      result = await estimate(db, request, { now: clock() });
+      result = await estimate(db, request, { now: clock(), suitability: PER_MEMBER });
     } catch (error) {
       result = { error: error.message };
     }
@@ -363,6 +389,70 @@ export function routes(db, options = {}) {
     }
   }
 
+  /**
+   * The open bounties for every item a member bought through a bounty,
+   * worked out again (after their seller name changes, round 5b). A failure
+   * is reported, never thrown: the change is already stored.
+   */
+  async function refreshBought(memberId, now) {
+    const barcodes = db
+      .prepare(
+        "SELECT DISTINCT b.barcode FROM claims c JOIN bounties b ON b.id = c.bounty_id WHERE c.member_id = ? AND c.status = 'completed' AND b.sample = 0 AND b.barcode IS NOT NULL",
+      )
+      .all(memberId)
+      .map((r) => r.barcode);
+    const out = { rechecked: [], failed: [] };
+    for (const barcode of barcodes) {
+      try {
+        const done = await refreshOpenBounties(db, { barcode, now, estimate, askingLookup });
+        out.rechecked.push(...done.rechecked);
+        out.failed.push(...done.failed);
+      } catch (error) {
+        out.failed.push({ barcode, error: error.message });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The open bounties where a member holds a live claim, worked out again
+   * (round 5b, second verification): after their transport, carry limit or
+   * room at home changes, and after another of their claims is marked as
+   * bought, released or recorded as sold or returned, so each claim is
+   * checked on their profile and room now and they are told at once when
+   * it stops or reopens. except: bounty ids already worked out again. A
+   * failure is reported, never thrown: the change is already stored.
+   */
+  async function recheckMemberClaims(memberId, now, { except = [] } = {}) {
+    const skip = new Set(except);
+    const open = new Set(openBountyIds(db, { now }));
+    const at = new Date(Date.parse(now)).toISOString();
+    const ids = db
+      .prepare("SELECT DISTINCT bounty_id FROM claims WHERE member_id = ? AND status = 'active' AND expires_at > ? ORDER BY bounty_id")
+      .all(memberId, at)
+      .map((r) => r.bounty_id)
+      .filter((bountyId) => open.has(bountyId) && !skip.has(bountyId));
+    const out = { rechecked: [], failed: [] };
+    for (const bountyId of ids) {
+      try {
+        await recheck(bountyId, now);
+        out.rechecked.push(bountyId);
+      } catch (error) {
+        out.failed.push({ bountyId, error: error.message });
+      }
+    }
+    return out;
+  }
+  const merged = (...parts) => {
+    const out = { rechecked: [], failed: [] };
+    for (const p of parts.filter(Boolean)) {
+      for (const id of p.rechecked ?? []) if (!out.rechecked.includes(id)) out.rechecked.push(id);
+      out.failed.push(...(p.failed ?? []));
+      if (p.error) out.error = p.error;
+    }
+    return out;
+  };
+
   return [
     [
       "GET",
@@ -390,10 +480,67 @@ export function routes(db, options = {}) {
     [
       "PATCH",
       "/api/members/:id",
-      ({ params, body }) => {
+      async ({ params, body }) => {
         const now = clock();
-        const member = updateMember(db, pathId(params.id, "Member"), body0(body), { now });
-        return { member: memberView(db, member, { now }) };
+        const memberId = pathId(params.id, "Member");
+        const input = body0(body);
+        const before = requireMember(db, memberId);
+        const member = updateMember(db, memberId, input, { now });
+        // A new or changed seller name changes how many competing listings
+        // are the member's own units (round 5b), so the open bounties for
+        // items they bought through bounties are worked out again.
+        const sellerChanged = Object.hasOwn(input, "sellerName") && (before?.seller_name ?? null) !== (member.seller_name ?? null);
+        const bought = sellerChanged ? await refreshBought(member.id, now) : null;
+        // A changed transport, carry limit or room at home changes whether
+        // the member's live claims fit them, so each is checked again at
+        // once (round 5b): a claim waiting on a profile value goes on.
+        const profileChanged =
+          before.transport !== member.transport || before.carry_kg !== member.carry_kg || before.storage_units !== member.storage_units;
+        const claims = profileChanged ? await recheckMemberClaims(member.id, now, { except: bought?.rechecked ?? [] }) : null;
+        const bounties = bought || claims ? merged(bought, claims) : null;
+        // A completed trip profile (round 5) turns a "confirm your profile"
+        // entry into the alert, as saying they qualify does for a question,
+        // when the trip fits it and there is room under the cap.
+        let alerted = 0;
+        if (memberProfileView(member).complete)
+          for (const { bounty_id: bountyId } of db
+            .prepare("SELECT bounty_id FROM alerts WHERE member_id = ? AND kind = 'profile'")
+            .all(member.id))
+            alerted += dispatchAlerts(db, bountyId, now, { memberId: member.id }).sent.length;
+        const checked = claims?.rechecked.length ?? 0;
+        return {
+          member: memberView(db, member, { now }),
+          alerted,
+          ...(bounties ? { bounties } : {}),
+          ...(checked
+            ? { message: `Saved. Your ${checked === 1 ? "live claim was" : `${checked} live claims were`} checked again against your profile now.` }
+            : {}),
+        };
+      },
+    ],
+    [
+      "POST",
+      "/api/members/:id/seller-confirmation",
+      async ({ params, body }) => {
+        // The operator confirms that a member's seller name is theirs, from
+        // their marketplace profile or one of their listings, or withdraws
+        // that (round 5b). Until it is confirmed the member's listings count
+        // in full. Accounts are not authenticated yet, so "operator" is
+        // whoever uses the operator view (TERMS.privacy), as for reconcile.
+        const now = clock();
+        const input = body0(body);
+        if (input.viewer !== "operator")
+          fail('Only the operator can confirm a seller name: send viewer "operator" from the operator view', 403);
+        const member = confirmSellerName(db, pathId(params.id, "Member"), input, { now });
+        const bounties = await refreshBought(member.id, now);
+        return {
+          member: memberView(db, member, { now }),
+          bounties,
+          message:
+            input.withdraw === true
+              ? `Confirmation withdrawn: listings under ${member.seller_name ? `"${member.seller_name}"` : "this member's seller name"} count in full as competing listings again.`
+              : `Confirmed: "${member.seller_name}" is ${member.name}'s seller name. Their listings with a listing time after they bought the item through a bounty are counted once, up to the units they still hold.`,
+        };
       },
     ],
     [
@@ -444,7 +591,7 @@ export function routes(db, options = {}) {
             fail("A sample bounty takes no estimate: remove the estimate or set sample to false");
         } else {
           request = bountyRequest(input.estimate, input.locality);
-          result = await estimate(db, request, { now });
+          result = await estimate(db, request, { now, suitability: PER_MEMBER });
           lookup = await lookupFor(result?.offer?.gtin, now);
           // Work the figures out for the units one member can claim (the
           // smallest of the estimate's units, the cap and the trial batch).
@@ -455,7 +602,7 @@ export function routes(db, options = {}) {
           // works the figures out again for more units once the cap allows
           // them (for example after units from an earlier bounty are
           // recorded as sold), as it does for fewer.
-          if (plan.rerun) result = await estimate(db, { ...request, units: plan.figures }, { now });
+          if (plan.rerun) result = await estimate(db, { ...request, units: plan.figures }, { now, suitability: PER_MEMBER });
         }
         const bounty = createBounty(db, input, { estimate: result, request, lookup, now });
         const view = bountyView(db, bounty, { viewer: { kind: "operator" }, now });
@@ -503,6 +650,8 @@ export function routes(db, options = {}) {
         const member = requireMember(db, input.memberId);
         const units = claimUnits(input.units);
         const journey = journeyInput(input);
+        // The cash they can spend on this trip: required, never zero (round 5).
+        const cashAvailable = cashInput(input);
         // The member's own hourly floor and cash date (optional).
         const terms = memberTermsInput(input, { now });
         const qualifies = input.qualifiesForPromotion;
@@ -526,9 +675,16 @@ export function routes(db, options = {}) {
           check,
           qualifiesForPromotion: qualifies === true,
           terms,
+          cashAvailable,
           now,
         });
-        const own = memberTripCheck(check, { units, journey, shared, terms: claimTerms(fresh, terms) });
+        const own = memberTripCheck(check, {
+          units,
+          journey,
+          shared,
+          terms: claimTerms(fresh, terms),
+          profile: memberTripProfile(member, cashAvailable, roomFor(db, requireBounty(db, bountyId), member.id, now)),
+        });
         const bounty = requireBounty(db, bountyId);
         return reply(201, {
           claim: made,
@@ -557,6 +713,7 @@ export function routes(db, options = {}) {
         const member = requireMember(db, input.memberId);
         const units = claimUnits(input.units);
         const journey = journeyInput(input);
+        const cashAvailable = cashInput(input);
         const terms = memberTermsInput(input, { now });
         const bounty = requireBounty(db, bountyId);
         if (bounty.sample) fail("Sample bounty: illustrative figures only, so there is no trip to check", 409);
@@ -572,6 +729,9 @@ export function routes(db, options = {}) {
           journey,
           shared: sharedDemand(db, bounty, member, now),
           terms: claimTerms(bounty, terms),
+          // Their stored transport, carry limit and storage, and the cash
+          // they can spend on this trip (round 5).
+          profile: memberTripProfile(member, cashAvailable, roomFor(db, requireBounty(db, bountyId), member.id, now)),
         });
         const blockers = [...view.claimBlockers];
         let headline = blockers.length ? view.trip.headline : null;
@@ -622,16 +782,54 @@ export function routes(db, options = {}) {
     [
       "POST",
       "/api/claims/:id/release",
-      ({ params, body }) => {
+      async ({ params, body }) => {
+        const now = clock();
         const input = body0(body);
-        const released = releaseClaim(db, { claimId: pathId(params.id, "Claim"), memberId: input.memberId, now: clock() });
-        return { claim: released, message: "Claim released. Its units are free for other members." };
+        const released = releaseClaim(db, { claimId: pathId(params.id, "Claim"), memberId: input.memberId, now });
+        // The room it took at home is free for the member's other live
+        // claims again (round 5b).
+        const bounties = await recheckMemberClaims(released.member_id, now, { except: [released.bounty_id] });
+        return { claim: released, bounties, message: "Claim released. Its units are free for other members." };
+      },
+    ],
+    [
+      "POST",
+      "/api/claims/:id/cash",
+      async ({ params, body }) => {
+        // "Check my figures" under a live claim (round 5b): the member who
+        // holds it gives the cash they can spend on this trip (a claim made
+        // before the cash was asked for stores none), and every claim on the
+        // bounty is checked again on the evidence now.
+        const now = clock();
+        const input = body0(body);
+        const stored = setClaimCash(db, {
+          claimId: pathId(params.id, "Claim"),
+          memberId: input.memberId,
+          cashAvailable: input.cashAvailable,
+          now,
+        });
+        const bounty = await recheck(stored.bounty_id, now);
+        const member = requireMember(db, stored.member_id);
+        const view = bountyView(db, bounty, { viewer: { kind: "member", member }, now });
+        const mine = view.claims.find((c) => c.id === stored.id) ?? null;
+        const f = mine?.figures ?? null;
+        const cashGiven = mine?.cashAvailable ?? input.cashAvailable;
+        const saved = `Saved: £${(cashGiven / 100).toFixed(2)} you can spend on this trip.`;
+        const result = !f
+          ? "Your figures could not be worked out again: do not make the trip until they pass."
+          : f.ok
+            ? `Your figures for ${units(stored.units)} were checked again on the latest evidence and every check passes.`
+            : Array.isArray(f.confirm) && f.confirm.length
+              ? `Your figures were checked again. ${view.viewer?.stop ?? "Confirm your member profile, then check your figures again"}.`
+              : `Your figures for ${units(stored.units)} were checked again on the latest evidence and now fail: ${(f.reasons ?? []).join("; ")}.`;
+        const trip = view.trip.go || !view.trip.headline || (f && !f.ok) ? "" : ` ${view.trip.headline}.`;
+        return { claim: mine, bounty: view, message: `${saved} ${result}${trip}` };
       },
     ],
     [
       "POST",
       "/api/claims/:id/complete",
-      ({ params, body }) => {
+      async ({ params, body }) => {
         const now = clock();
         const input = body0(body);
         const done = completeClaim(db, {
@@ -644,11 +842,16 @@ export function routes(db, options = {}) {
         // Claims this member holds on other first-order bounties at the
         // retailer are told at once that the price is no longer theirs.
         if (done.promotionUsed) recheckOpenBounties(db, { retailer, now });
+        // The units bought are at home now, so the member's other live
+        // claims are checked again on the room left (round 5b): one that no
+        // longer fits is told at once.
+        const bounties = await recheckMemberClaims(done.member_id, now, { except: [done.bounty_id] });
         const used = done.promotionUsed
           ? ` You bought at a first-order price, so the first-order offer at ${retailer} is now recorded as used and its price will not be offered to you again.`
           : "";
         return {
           claim: done,
+          bounties,
           message: `Marked as bought: ${done.units} unit${done.units === 1 ? "" : "s"}. You own this stock and carry the risk.${used} ${TERMS.verified} Until you record them as sold or returned, the units you bought count against the demand for this item on any later bounty for it.`,
         };
       },
@@ -672,12 +875,15 @@ export function routes(db, options = {}) {
         const sold = isCount(input.sold) ? input.sold : 0;
         const returned = isCount(input.returned) ? input.returned : 0;
         const what = [sold ? `${units(sold)} sold` : "", returned ? `${units(returned)} returned to the shop` : ""].filter(Boolean).join(" and ");
+        const item = await refreshItem(recorded.claim.bounty_id, now);
+        // Room at home is freed for the member's live claims on other items too.
+        const own = await recheckMemberClaims(recorded.claim.member_id, now, { except: item.rechecked });
         return {
           claim: recorded.claim,
           bought: recorded.bought,
           released: recorded.released,
           outstanding: recorded.outstanding,
-          bounties: await refreshItem(recorded.claim.bounty_id, now),
+          bounties: merged(item, own),
           message: `Recorded: ${what}. ${outstandingWords(recorded.outstanding)}`,
         };
       },

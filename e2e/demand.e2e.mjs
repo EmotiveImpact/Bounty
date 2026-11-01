@@ -62,14 +62,28 @@ async function setUp() {
     });
   const paidUntil = new Date(Date.now() + 365 * DAY).toISOString().slice(0, 10);
   const member = async (name) =>
-    ok(await post("/api/members", { name, alertsOptIn: true, alertLocalities: ["Camden"], paidTier: "diamond", paidUntil }), 201).member;
+    ok(
+      await post("/api/members", {
+        name,
+        alertsOptIn: true,
+        alertLocalities: ["Camden"],
+        paidTier: "diamond",
+        paidUntil,
+        // Round 5 (suitability): a member can claim only once their
+        // transport, carrying limit and storage are known.
+        transport: "Car",
+        carryKg: 25,
+        storageUnits: 50,
+      }),
+      201,
+    ).member;
 
   ok(await check(10), 201);
   const first = ok(await bounty(), 201);
   assert.match(first.message, /with a cap of 4 units/);
   const ann = await member("Ann");
   await member("Bob");
-  const claim = ok(await post(`/api/bounties/${first.bounty.id}/claims`, { memberId: ann.id, units: 3, journeyCost: 0, journeyMinutes: 15 }), 201);
+  const claim = ok(await post(`/api/bounties/${first.bounty.id}/claims`, { memberId: ann.id, units: 3, journeyCost: 0, journeyMinutes: 15, cashAvailable: 100000 }), 201);
   ok(await post(`/api/claims/${claim.claim.id}/complete`, { memberId: ann.id }));
   ok(await check(7), 201);
   ok(await post(`/api/bounties/${first.bounty.id}/withdraw`, {}));

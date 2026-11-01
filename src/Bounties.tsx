@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { api, barcodeText, dateTime, loadMemberRules, money, toPence, type MemberRules, type RuleKey } from "./api";
+import { TRANSPORTS, TRANSPORT_WORDS, savedTripProfile } from "./ResearchCalculator";
 import "./Bounties.css";
 
 // Shapes returned by server/routes-bounties.mjs. Money is integer pence.
@@ -33,6 +34,48 @@ type Member = {
   release: { tier: Tier; via: "paid" | "earned"; offsetMinutes: number };
   rules: MemberRules;
   effectiveRules: Record<RuleKey, number>;
+  // The member's own transport, carrying limit (kg) and storage (units):
+  // null when not entered, never zero (server/bounties.mjs memberProfileView).
+  profile?: MemberProfile;
+  // The seller name their marketplace listings show, such as their eBay
+  // user name (round 5b): their own listings of units bought through
+  // bounties are then counted once against the demand. Null when not given.
+  sellerName?: string | null;
+  // When the operator confirmed the seller name is theirs (round 5b), or
+  // null: until then their listings count in full.
+  sellerConfirmedAt?: string | null;
+};
+type MemberProfile = {
+  transport: string | null;
+  carryKg: number | null;
+  // Their room at home for units in all (round 5b: the total, counting the
+  // space units bought through bounties take up).
+  storageUnits: number | null;
+  // Units at home from bounties and in live claims, and the room left now
+  // (null where the server did not work them out).
+  heldUnits?: number | null;
+  claimedUnits?: number | null;
+  roomNow?: number | null;
+  complete: boolean;
+  missing: string[];
+  loadLimitKg: number | null;
+  note: string;
+};
+// One check of whether a trip fits the member (server/suitability.mjs).
+type FitCheck = { id: string; ok: boolean; detail: string; known?: boolean; maxUnits?: number | null };
+type ViewerFit = {
+  ok: boolean;
+  complete: boolean;
+  units: number;
+  figures: number | null;
+  partial: boolean;
+  maxUnits: number | null;
+  loadLimitKg: number | null;
+  checks: FitCheck[];
+  // The profile values still missing ("transport", "carryKg", "storageUnits").
+  missing?: string[];
+  note: string | null;
+  cash: string;
 };
 type MembersResponse = {
   members: Member[];
@@ -70,6 +113,11 @@ type Claim = {
   journeyCost?: number | null;
   journeyMinutes?: number | null;
   figures?: OwnFigures | null;
+  // The cash the member said they can spend on this trip (their own claims
+  // only), and whether a live claim stores none (made before it was asked
+  // for, round 5b): the holder confirms it under the claim.
+  cashAvailable?: number | null;
+  needsCash?: boolean;
   // For units bought: what is recorded as sold, returned or reconciled, and
   // what still counts against the demand for the item (null otherwise).
   released?: Released | null;
@@ -77,6 +125,15 @@ type Claim = {
   releases?: { kind: "sold" | "returned" | "reconciled"; units: number; reason: string | null; recordedBy: string; at: string }[];
 };
 type Released = { sold: number; returned: number; reconciled: number };
+type SellerNameRow = {
+  memberId: number;
+  name: string | null;
+  sellerName: string | null;
+  confirmed: boolean;
+  prior: boolean;
+  outstanding: number;
+  status: string;
+};
 // Units earlier bounties for the item still have against its resale demand
 // (server/bounties.mjs earlierAllocation): bought and not recorded as sold or
 // returned, or held in a live claim. claims are the purchases with units
@@ -120,6 +177,8 @@ type OwnFigures = {
   // units other members already claimed or bought (UK date).
   sellDays?: number | null;
   payoutDate?: string | null;
+  // Values the member has not given that the figures wait on (round 5b).
+  confirm?: string[] | null;
 };
 // The units already claimed or bought on the bounty, as the member's check
 // counted them against demand.
@@ -158,6 +217,8 @@ type TripCheck = {
   blockers?: string[];
   ownOk?: boolean;
   ownReasons?: string[];
+  // Load, cash and storage for this member at these units.
+  fit?: { ok: boolean; known: boolean; checks: FitCheck[]; loadLimitKg: number | null; missing: string[] } | null;
 };
 type Check = { id: string; ok: boolean; detail: string };
 // kind "stop" ("Don't make the trip") or "reopen" (reason "claim-stands"
@@ -180,7 +241,23 @@ type Notice = {
 // check out of date" and "Sales evidence out of date". A blocker's own label
 // replaces the state's.
 type TripState = {
-  state: "go" | "full" | "paused" | "out-of-stock" | "stock-unconfirmed" | "blocked" | "sample" | "expired" | "withdrawn";
+  // "confirm-profile": the member's transport, carrying limit or storage is
+  // not entered; "does-not-fit": the trip does not fit them (round 5).
+  // "confirm-cash": the holder's claim stores no cash they can spend on the
+  // trip (made before it was asked for), and nothing else fails (round 5b).
+  state:
+    | "go"
+    | "full"
+    | "paused"
+    | "out-of-stock"
+    | "stock-unconfirmed"
+    | "blocked"
+    | "confirm-profile"
+    | "confirm-cash"
+    | "does-not-fit"
+    | "sample"
+    | "expired"
+    | "withdrawn";
   go: boolean;
   label: string;
   headline: string | null;
@@ -190,6 +267,8 @@ type TripState = {
   reason?: TripReason | null;
   // Why this holder's claim stands ("Your claim stands" only).
   note?: string | null;
+  // For "confirm-profile" from a claim's re-check: the values still missing.
+  confirm?: string[] | null;
 };
 type TripReason =
   | "shelf-empty"
@@ -204,6 +283,9 @@ type TripReason =
   | "over-claimed"
   | "own-figures"
   | "promotion-declined"
+  | "profile-unknown"
+  | "cash-unknown"
+  | "does-not-fit"
   | "sample"
   | "expired"
   | "withdrawn"
@@ -279,6 +361,9 @@ type Bounty = {
   completedUnits: number;
   remaining: number;
   earlier?: Earlier | null;
+  // For the operator only (round 5b): members holding units of this item,
+  // with the seller name each gave and whether it is confirmed.
+  sellerNames?: SellerNameRow[] | null;
   alert: {
     eligible: boolean;
     reasons: string[];
@@ -386,11 +471,19 @@ type Bounty = {
     ruleFailures: string[];
     trial: { limit: number; held: number; allowance: number; proven: boolean };
     maxClaimUnits: number;
+    // What sets maxClaimUnits, in words: "your trial batch", "what is left
+    // under the cap", or what fits their load limit or room at home.
+    claimLimit?: string | null;
     promotion: { condition: string; confirmed: boolean; risk: string | null } | null;
     eligibility?: Eligibility | null;
     askedAt?: string | null;
     stop: string | null;
     notices: Notice[];
+    profile?: MemberProfile;
+    fit?: ViewerFit | null;
+    // Units of this item they bought through bounties are outstanding and
+    // their profile has no seller name: any they list count twice (round 5b).
+    sellerNote?: string | null;
   } | null;
   terms: Terms;
 };
@@ -398,6 +491,8 @@ type BountiesResponse = { bounties: Bounty[]; terms: Terms; rules: { maxClaimUni
 type Dispatch = {
   sent: { memberId: number; name: string; tier: Tier; label: string; reputation: number }[];
   asked?: { memberId: number; name: string; condition: string | null }[];
+  // Members with no complete profile, asked to confirm it (no figures).
+  confirm?: { memberId: number; name: string; missing: string[] }[];
   notAlerted: { memberId: number; name: string; reason: string }[];
   blockers: string[];
   exposure: { cap: number; remaining: number; limit: number; alreadySent: number; budget: number };
@@ -412,7 +507,10 @@ type MemberAlert = {
   // qualify for, so there are no figures yet. "declined": the member said
   // they do not qualify or already used a first-order offer here, so the
   // bounty is not for them.
-  kind?: "alert" | "question" | "declined";
+  // "profile": the member was asked to confirm their transport, carrying
+  // limit and storage, so there are no figures yet.
+  kind?: "alert" | "question" | "declined" | "profile";
+  profile?: MemberProfile | null;
   eligibility?: Eligibility | null;
   questionNote?: string | null;
   figures?: { label: string | null; units: number | null; unitProfit: number | null; contribution: number | null; cashRequired: number | null } | null;
@@ -468,6 +566,15 @@ const minutes = (m: number) =>
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 // Server text as a sentence with one full stop at the end.
 const sentence = (text: string) => text.replace(/[.\s]+$/, "") + ".";
+const upperFirst = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1);
+// The member profile values, short (server/bounties.mjs CONFIRM_LABELS).
+const FIELD_LABELS: Record<string, string> = { transport: "transport", carryKg: "carrying limit", storageUnits: "storage", cashAvailable: "cash" };
+/** The profile values a claim's figures wait on, in words, or "" (round 5b). */
+const waitingOn = (c: Claim) =>
+  andList((c.figures?.confirm ?? []).filter((k) => k !== "cashAvailable").map((k) => FIELD_LABELS[k] ?? k));
+const andList = (items: string[]) =>
+  items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
 // Several pieces of server text as sentences, one full stop each.
 const sentences = (parts: (string | null | undefined | false)[]) =>
   parts
@@ -589,6 +696,20 @@ function textToRules(text: RuleText): MemberRules {
   return out;
 }
 
+const numText = (v: number | null | undefined) => (typeof v === "number" && Number.isFinite(v) ? String(v) : "");
+
+/** A member's transport, carrying limit and storage, in words. */
+function profileText(p: MemberProfile | undefined) {
+  if (!p) return "Not entered";
+  const parts = [
+    p.transport ? TRANSPORT_WORDS[p.transport] ?? p.transport : "transport not entered",
+    p.carryKg === null ? "carrying limit not entered" : `carries up to ${p.carryKg} kg`,
+    p.storageUnits === null ? "room at home not entered" : `room for ${plural(p.storageUnits, "unit")} at home in all`,
+  ];
+  const text = parts.join(", ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 function MemberForm({
   tiers,
   paidTierIds,
@@ -607,10 +728,31 @@ function MemberForm({
   const [paidTier, setPaidTier] = useState(member?.paid.tier?.id ?? "");
   const [paidUntil, setPaidUntil] = useState(member?.paid.until ?? "");
   const [rules, setRules] = useState<RuleText>(() => rulesToText(member?.rules ?? {}));
+  // The member's own transport, carrying limit and storage, as form text: a
+  // blank is not entered (never zero) and is sent as null.
+  const [transport, setTransport] = useState(member?.profile?.transport ?? "");
+  const [carry, setCarry] = useState(numText(member?.profile?.carryKg));
+  const [storage, setStorage] = useState(numText(member?.profile?.storageUnits));
+  // Optional: the seller name their marketplace listings show. A blank is
+  // not given, and their own listings then count in full.
+  const [seller, setSeller] = useState(member?.sellerName ?? "");
+  // A refused seller name is shown next to its field (round 5b).
+  const [sellerError, setSellerError] = useState("");
   const [message, setMessage] = useState({ text: "", error: false });
   async function save(e: FormEvent) {
     e.preventDefault();
     setMessage({ text: "", error: false });
+    setSellerError("");
+    const carryKg = carry.trim() === "" ? null : Number(carry);
+    const storageUnits = storage.trim() === "" ? null : Number(storage);
+    if (carryKg !== null && !(Number.isFinite(carryKg) && carryKg >= 0)) {
+      setMessage({ text: "Enter how much you can carry in kilograms, or leave it blank.", error: true });
+      return;
+    }
+    if (storageUnits !== null && !(Number.isInteger(storageUnits) && storageUnits >= 0)) {
+      setMessage({ text: "Enter the room you have at home for units in all as a whole number, or leave it blank.", error: true });
+      return;
+    }
     const body = {
       name: name.trim(),
       locality: locality.trim() || null,
@@ -622,19 +764,28 @@ function MemberForm({
       paidTier: paidTier || null,
       paidUntil: paidTier && paidUntil ? paidUntil : null,
       rules: textToRules(rules),
+      transport: transport || null,
+      carryKg,
+      storageUnits,
+      sellerName: seller.trim() || null,
     };
     try {
       const res = member
-        ? await api<{ member: Member }>("members/" + member.id, body, "PATCH")
-        : await api<{ member: Member }>("members", body);
-      setMessage({ text: member ? "Saved." : "Member added.", error: false });
+        ? await api<{ member: Member; message?: string }>("members/" + member.id, body, "PATCH")
+        : await api<{ member: Member; message?: string }>("members", body);
+      // A profile change checks the member's live claims again, and says so.
+      setMessage({ text: res.message ?? (member ? "Saved." : "Member added."), error: false });
       if (!member) {
         setName("");
         setPlaces("");
       }
       onSaved(res.member);
     } catch (err) {
-      setMessage({ text: (err as Error).message, error: true });
+      const text = (err as Error).message;
+      if (/seller name/i.test(text)) {
+        setSellerError(text);
+        setMessage({ text: "Not saved: check your marketplace seller name.", error: true });
+      } else setMessage({ text, error: true });
     }
   }
   return (
@@ -655,6 +806,116 @@ function MemberForm({
         Alert localities, separated by commas
         <input value={places} onChange={(e) => setPlaces(e.target.value)} placeholder="Camden, Islington" />
       </label>
+      <label>
+        Your marketplace seller name, optional (for example your eBay user name)
+        <input
+          value={seller}
+          onChange={(e) => {
+            setSeller(e.target.value);
+            setSellerError("");
+          }}
+          maxLength={64}
+          autoComplete="off"
+          aria-invalid={sellerError ? true : undefined}
+          aria-describedby={sellerError ? "seller-error" : undefined}
+        />
+        {sellerError && (
+          <span className="field-error" id="seller-error" role="alert">
+            {sellerError}
+          </span>
+        )}
+        <small className="muted">
+          Units you bought through bounties count against the demand for the item until you record them as sold or
+          returned. Once the operator checks your seller name against your marketplace profile or one of your listings
+          and confirms it, your own listings of them are counted once, not again as competing listings. Leave it blank
+          if you do not sell online: your listings then count in full.
+        </small>
+      </label>
+      <fieldset className="trip-profile">
+        <legend>How you travel, what you can carry and your storage</legend>
+        <small className="muted">
+          Every trip is checked against these: one unit and the whole batch must fit your load limit, and the units must
+          fit the room you have at home. Until all three are entered no trip is shown to you as one to make. A blank is
+          never counted as zero or as enough. The cash you can spend is asked each time you claim.
+        </small>
+        <div className="form-grid">
+          <label>
+            How you travel
+            <select value={transport} onChange={(e) => setTransport(e.target.value)} aria-invalid={!transport}>
+              <option value="">Not entered</option>
+              {TRANSPORTS.map((t) => (
+                <option key={t} value={t}>
+                  {TRANSPORT_WORDS[t]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            How much you can carry (kg)
+            <input
+              type="number"
+              min={0}
+              max={1000}
+              step={0.1}
+              inputMode="decimal"
+              value={carry}
+              aria-invalid={carry.trim() === ""}
+              onChange={(e) => setCarry(e.target.value)}
+            />
+          </label>
+          <label>
+            Room at home for units, in all
+            <input
+              type="number"
+              min={0}
+              max={100000}
+              step={1}
+              inputMode="numeric"
+              value={storage}
+              aria-invalid={storage.trim() === ""}
+              onChange={(e) => setStorage(e.target.value)}
+            />
+            <small className="muted">
+              Count all the room you keep for stock, including the space taken by units you bought through bounties and
+              have not yet sold or returned. Those units, and the units in your live claims, are taken off it for you.
+            </small>
+          </label>
+        </div>
+        <small className="muted">
+          By car or van your load limit is at least 25 kg (the boot); by public transport it is at most 10 kg, about two
+          full shopping bags; on foot or by bicycle it is what you can carry.
+        </small>
+        <button
+          type="button"
+          onClick={() => {
+            // Only the trip fields someone changed in the Planner (round 5b).
+            const saved = savedTripProfile();
+            if (!saved.transport && !saved.carryKg && !saved.storageUnits) {
+              setMessage({
+                text: "No trip fields from the Planner are kept in this browser: its starting values are never used. Enter yours here, or change how you travel, what you can carry or your storage in the Planner first.",
+                error: true,
+              });
+              return;
+            }
+            if (saved.transport) setTransport(saved.transport);
+            if (saved.carryKg) setCarry(saved.carryKg);
+            if (saved.storageUnits) setStorage(saved.storageUnits);
+            const left = [
+              saved.transport ? "" : "how you travel",
+              saved.carryKg ? "" : "how much you can carry",
+              saved.storageUnits ? "" : "your room at home",
+            ].filter(Boolean);
+            setMessage({
+              text: `Filled in from what you changed in the Planner. ${
+                left.length ? `${upperFirst(andList(left))} ${left.length === 1 ? "was" : "were"} not changed there, so enter ${left.length === 1 ? "it" : "them"} here. ` : ""
+              }Save member to keep it.`,
+              error: false,
+            });
+          }}
+        >
+          Use the Planner profile saved in this browser
+        </button>
+      </fieldset>
       <fieldset>
         <legend>Paid early access (recorded by the operator)</legend>
         <label>
@@ -732,6 +993,18 @@ function MemberSummary({ member }: { member: Member }) {
         <dd>
           {minutes(member.release.offsetMinutes)} after a bounty opens ({member.release.tier.name}, via{" "}
           {member.release.via === "paid" ? "paid early access" : "earned reputation"})
+        </dd>
+        <dt>How you travel, carry and store</dt>
+        <dd className={member.profile?.complete ? "" : "warn"} data-profile={member.profile?.complete ? "complete" : "missing"}>
+          {profileText(member.profile)}. {member.profile ? sentence(member.profile.note) : ""}
+        </dd>
+        <dt>Marketplace seller name</dt>
+        <dd data-seller={member.sellerName ? (member.sellerConfirmedAt ? "confirmed" : "given") : "none"}>
+          {member.sellerName
+            ? member.sellerConfirmedAt
+              ? `${member.sellerName}, confirmed by the operator on ${dateTime(member.sellerConfirmedAt)}`
+              : `${member.sellerName}. Waiting for the operator to confirm it is yours: until then, units you bought through bounties and list for sale count twice against the demand for the item.`
+            : "Not given: if you list units you bought through bounties, they count twice against the demand for the item"}
         </dd>
         <dt>Alerts</dt>
         <dd>
@@ -1308,6 +1581,38 @@ function OwnFiguresText({ check }: { check: TripCheck }) {
   );
 }
 
+/**
+ * Whether the trip fits the member viewing the card: their load limit and
+ * storage at the units they would take (the cash they can spend is asked
+ * when they claim), in plain words.
+ */
+function FitBlock({ fit, profile }: { fit: ViewerFit; profile?: MemberProfile }) {
+  return (
+    <div className={"fit " + (fit.ok ? "ok" : "warn")} data-fit={fit.ok ? "yes" : fit.complete ? "no" : "unknown"}>
+      <b>
+        {fit.ok
+          ? `Your load limit and room at home fit ${plural(fit.units, "unit")}`
+          : !fit.complete
+            ? `Confirm your ${andList((fit.missing ?? ["transport", "carryKg", "storageUnits"]).map((k) => FIELD_LABELS[k] ?? k))}`
+            : fit.partial && fit.maxUnits !== null
+              ? `Only ${plural(fit.maxUnits, "unit")} ${fit.maxUnits === 1 ? "fits" : "fit"} you`
+              : `Does not fit you for ${plural(fit.units, "unit")}`}
+      </b>
+      {profile && <span className="muted">Your profile: {profileText(profile)}.</span>}
+      <ul className="checks">
+        {fit.checks.map((c) => (
+          <li key={c.id} className={c.ok ? "pass" : ""} data-check={c.id}>
+            {c.detail}
+          </li>
+        ))}
+      </ul>
+      {fit.note && <small className="muted">{sentence(fit.note)}</small>}
+      {!fit.complete && <small className="muted">Enter them under "Edit profile, alerts and paid tier" above.</small>}
+      <small className="muted">{sentence(fit.cash)}</small>
+    </div>
+  );
+}
+
 function ClaimPanel({
   bounty,
   memberId,
@@ -1328,6 +1633,15 @@ function ClaimPanel({
   // the cash back. Blank means not given, never zero.
   const [floor, setFloor] = useState("");
   const [cashBy, setCashBy] = useState("");
+  // Required: the cash the member can spend on this trip before any payout
+  // (pounds). A blank is never counted as zero or as enough.
+  const [spend, setSpend] = useState("");
+  // The cash a holder can spend on this trip, under their live claim
+  // (round 5b): the stored figure, which they can correct.
+  const heldClaim = bounty.viewer?.activeClaim ?? null;
+  const storedCash = (c: Claim | null) => (typeof c?.cashAvailable === "number" ? String(c.cashAvailable / 100) : "");
+  const [holdCash, setHoldCash] = useState(() => storedCash(heldClaim));
+  useEffect(() => setHoldCash(storedCash(heldClaim)), [heldClaim?.id, heldClaim?.cashAvailable]);
   const [own, setOwn] = useState<TripCheck | null>(null);
   const [formError, setFormError] = useState("");
   const v = bounty.viewer;
@@ -1356,6 +1670,13 @@ function ClaimPanel({
       );
       return null;
     }
+    const spendPounds = spend.trim() === "" ? NaN : Number(spend);
+    if (!Number.isFinite(spendPounds) || spendPounds < 0) {
+      setFormError(
+        "Enter the cash you can spend on this trip in pounds, before any payout comes in. A blank is never counted as zero or as enough.",
+      );
+      return null;
+    }
     const own: { hourlyFloor?: number; cashNeededBy?: string } = {};
     if (floor.trim() !== "") {
       const pounds = Number(floor);
@@ -1373,7 +1694,7 @@ function ClaimPanel({
       own.cashNeededBy = cashBy;
     }
     setFormError("");
-    return { journeyCost: toPence(cost), journeyMinutes: mins, ...own };
+    return { journeyCost: toPence(cost), journeyMinutes: mins, cashAvailable: toPence(spendPounds), ...own };
   };
   const max = Math.max(1, v.maxClaimUnits);
   // While the shelf is reported empty (or the last branch check found none)
@@ -1386,9 +1707,11 @@ function ClaimPanel({
   const declined = Boolean(eligibility?.declined) && !v.activeClaim;
   const unanswered = Boolean(eligibility && !eligibility.confirmed && !eligibility.declined);
   const confirmed = Boolean(eligibility?.confirmed || v.promotion?.confirmed);
+  // What the fit block already says is not repeated in the list below it.
+  const fitShown = new Set([...(v.fit?.checks ?? []).filter((c) => !c.ok).map((c) => c.detail), v.fit?.note ?? ""]);
   const reasons = [
     ...bounty.claimBlockers,
-    ...v.blockers.filter((b) => b !== eligibility?.notForYou),
+    ...v.blockers.filter((b) => b !== eligibility?.notForYou && !(v.fit && !declined && fitShown.has(b))),
     ...(bounty.claimBlockers.length || v.blockers.length
       ? []
       : [
@@ -1409,6 +1732,12 @@ function ClaimPanel({
         </p>
       )}
       <NoticeList notices={v.notices} />
+      {v.fit && !declined && <FitBlock fit={v.fit} profile={v.profile} />}
+      {v.sellerNote && (
+        <p className="notice seller-note" role="note">
+          {sentence(v.sellerNote)}
+        </p>
+      )}
       <p className="muted">
         {v.release.open
           ? `Open to you since ${when(v.release.releaseAt)}`
@@ -1460,6 +1789,51 @@ function ClaimPanel({
               Only if you bought before the shelf was reported empty. Do not set off for this bounty now.
             </small>
           )}
+          {v.activeClaim.status === "active" && (
+            <form
+              className="claim-cash"
+              onSubmit={(e) => {
+                e.preventDefault();
+                const pounds = holdCash.trim() === "" ? NaN : Number(holdCash);
+                if (!Number.isFinite(pounds) || pounds < 0) {
+                  setFormError(
+                    "Enter the cash you can spend on this trip in pounds, before any payout comes in. A blank is never counted as zero or as enough.",
+                  );
+                  return;
+                }
+                setFormError("");
+                run(() => api(`claims/${v.activeClaim!.id}/cash`, { memberId, cashAvailable: toPence(pounds) }));
+              }}
+            >
+              <label>
+                Cash you can spend on this trip (£)
+                <input
+                  type="number"
+                  min={0}
+                  step={0.01}
+                  inputMode="decimal"
+                  value={holdCash}
+                  aria-invalid={holdCash.trim() === ""}
+                  onChange={(e) => setHoldCash(e.target.value)}
+                  required
+                />
+                <small className="muted">
+                  {v.activeClaim.needsCash
+                    ? "Your claim was made before this was asked, so it is checked again with it. "
+                    : "Change it if it was wrong or has changed: your figures are checked again with it. "}
+                  Before any payout comes in. A blank is never counted as zero or as enough.
+                </small>
+              </label>
+              {waitingOn(v.activeClaim) && (
+                <small className="muted">
+                  Your figures also wait on your {waitingOn(v.activeClaim)} in your member profile: saving your profile
+                  checks this claim again.
+                </small>
+              )}
+              {formError && <p role="alert">{formError}</p>}
+              <button type="submit">Save cash and check my figures</button>
+            </form>
+          )}
         </div>
       ) : v.canClaim && !unanswered ? (
         <form
@@ -1479,7 +1853,7 @@ function ClaimPanel({
           }}
         >
           <label>
-            Units to claim (your trial batch: up to {plural(max, "unit")} now)
+            Units to claim (up to {plural(max, "unit")} now: {v.claimLimit ?? "your trial batch"})
             <select
               value={units}
               onChange={(e) => {
@@ -1524,6 +1898,23 @@ function ClaimPanel({
               />
             </label>
             <label>
+              Cash you can spend on this trip (£)
+              <input
+                type="number"
+                min={0}
+                step={0.01}
+                inputMode="decimal"
+                value={spend}
+                aria-invalid={spend.trim() === ""}
+                onChange={(e) => {
+                  setSpend(e.target.value);
+                  setOwn(null);
+                }}
+                required
+              />
+              <small className="muted">Before any payout comes in. A blank is never counted as zero or as enough.</small>
+            </label>
+            <label>
               Your hourly floor, optional (£ an hour)
               <input
                 type="number"
@@ -1553,7 +1944,7 @@ function ClaimPanel({
           </div>
           <small className="muted">
             The card's figures use the operator's journey. Your claim is checked again at the units you claim with your own
-            journey and thresholds, the stricter of your hourly floor and the operator's, and your cash date if you give one,
+            journey, load limit, storage, the cash you can spend and thresholds, the stricter of your hourly floor and the operator's, and your cash date if you give one,
             counting the units other members have already claimed and units bought through earlier bounties for this item that
             are not yet recorded as sold or returned. It is refused if it fails.
           </small>
@@ -1607,6 +1998,18 @@ function ClaimPanel({
       <small className="muted">{bounty.terms.claim}</small>
     </div>
   );
+}
+
+/** The line under the alert checks when the shared checks pass but a listed one does not. */
+function checksClosing(bounty: Bounty) {
+  const fit = bounty.viewer?.fit;
+  const lead = "The checks for every member pass and the cap has room, but";
+  if (fit && !fit.complete)
+    return `${lead} no trip is shown to you as one to make until your transport, carrying limit and room at home are entered in your profile.`;
+  if (fit?.partial && fit.maxUnits !== null)
+    return `${lead} only ${fit.maxUnits} of the ${fit.units} units fit you: check your own figures for ${plural(fit.maxUnits, "unit")} before you claim.`;
+  if (fit && !fit.ok) return `${lead} this trip does not fit you as planned.`;
+  return "Not every check above passes.";
 }
 
 function Fact({ label, children }: { label: string; children: ReactNode }) {
@@ -1795,6 +2198,54 @@ function PurchaseRelease({
 }
 
 /**
+ * For the operator (round 5b): members holding units of this bounty's item,
+ * with the seller name each gave. Their own listings count once only after
+ * the operator checks the name against their marketplace profile or one of
+ * their listings and confirms it here; until then they count in full.
+ */
+function SellerNames({ names, onDone }: { names: SellerNameRow[]; onDone: (m: string, err?: boolean) => void }) {
+  const run = async (fn: () => Promise<{ message: string }>) => {
+    try {
+      onDone((await fn()).message);
+    } catch (err) {
+      onDone((err as Error).message, true);
+    }
+  };
+  return (
+    <div className="seller-names">
+      <b>Seller names of members holding this item</b>
+      <ul>
+        {names.map((n) => (
+          <li key={n.memberId} data-seller-name={n.confirmed ? "confirmed" : n.sellerName ? "unconfirmed" : "none"}>
+            {sentences([
+              `${n.name ?? "A member"}: ${n.sellerName ? `"${n.sellerName}"` : "no seller name"}, ${plural(n.outstanding, "unit")} not yet recorded as sold or returned`,
+              n.status,
+            ])}
+            {n.sellerName && (n.confirmed || !n.prior) && (
+              <button
+                type="button"
+                aria-label={`${n.confirmed ? "Withdraw the confirmation of" : "Confirm"} ${n.sellerName} as ${n.name ?? "this member"}'s seller name`}
+                onClick={() =>
+                  run(() =>
+                    api(`members/${n.memberId}/seller-confirmation`, {
+                      viewer: "operator",
+                      sellerName: n.sellerName,
+                      ...(n.confirmed ? { withdraw: true } : {}),
+                    }),
+                  )
+                }
+              >
+                {n.confirmed ? "Withdraw confirmation" : "Confirm seller name"}
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/**
  * Units earlier bounties for the item still have against its resale demand,
  * on the card of the bounty that replaced them: what they are, what the cap
  * would be without them, how they stop counting, and the purchases this
@@ -1915,7 +2366,19 @@ function BountyCard({
         <Fact label="Bought by members">{plural(bounty.completedUnits, "unit")}</Fact>
         <Fact label="Remaining under the cap">
           {plural(bounty.remaining, "unit")}
-          {!go && bounty.status === "open" && bounty.remaining > 0 ? ", none claimable while " + trip.label.toLowerCase() : ""}
+          {!go && bounty.status === "open" && bounty.remaining > 0
+            ? trip.state === "confirm-cash"
+              ? ", and your claim is waiting for the cash you can spend on this trip"
+              : trip.state === "confirm-profile"
+              ? bounty.viewer?.activeClaim
+                ? `, and your claim is waiting until you ${lowerFirst(trip.label)}`
+                : `, none claimable by you until you ${lowerFirst(trip.label)}`
+              : trip.state === "does-not-fit"
+                ? bounty.viewer?.fit?.partial && bounty.viewer.fit.maxUnits !== null
+                  ? `; ${bounty.viewer.fit.maxUnits} of the ${bounty.viewer.fit.units} units fit you, so check your own figures for ${plural(bounty.viewer.fit.maxUnits, "unit")} before you claim`
+                  : ", none claimable by you as planned: the trip does not fit your transport, carrying limit or storage"
+                : ", none claimable while " + trip.label.toLowerCase()
+            : ""}
         </Fact>
         <Fact label="Shelf">{shelfText(bounty)}</Fact>
         {bounty.checked && !bounty.sample && checkedText(bounty.checked) && (
@@ -2063,6 +2526,10 @@ function BountyCard({
                 <li key={r}>{r}</li>
               ))}
             </ul>
+          ) : (bounty.estimate?.checks ?? []).some((c) => !c.ok) ? (
+            // A member's own fit checks are in the list above: "every check
+            // passes" only when every listed check does.
+            <p className="warn">{checksClosing(bounty)}</p>
           ) : (
             <p className="ok">Every check passes now and the cap has room.</p>
           )}
@@ -2138,6 +2605,7 @@ function BountyCard({
 
       {isOperator && (
         <div className="operator">
+          {bounty.sellerNames && bounty.sellerNames.length > 0 && <SellerNames names={bounty.sellerNames} onDone={done} />}
           {bounty.claims.length > 0 && (
             <details>
               <summary>Claims ({bounty.claims.length})</summary>
@@ -2185,10 +2653,13 @@ function BountyCard({
                       const res = await api<Dispatch>(`bounties/${bounty.id}/alerts`, {});
                       setDispatch(res);
                       done(
-                        res.sent.length || res.asked?.length
+                        res.sent.length || res.asked?.length || res.confirm?.length
                           ? [
                               res.sent.length ? `Alerted ${plural(res.sent.length, "member")}.` : "",
                               res.asked?.length ? `Asked ${plural(res.asked.length, "member")} whether they qualify for the price.` : "",
+                              res.confirm?.length
+                                ? `Asked ${plural(res.confirm.length, "member")} to confirm their transport, carrying limit and storage.`
+                                : "",
                             ]
                               .filter(Boolean)
                               .join(" ")
@@ -2237,6 +2708,15 @@ function BountyCard({
                   {dispatch.asked.map((q) => (
                     <li key={q.memberId}>
                       {q.name}: asked whether they qualify for the price, with no figures until they say they do
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {dispatch.confirm && dispatch.confirm.length > 0 && (
+                <ul className="checks">
+                  {dispatch.confirm.map((q) => (
+                    <li key={q.memberId}>
+                      {q.name}: asked to confirm their transport, carrying limit and storage, with no figures until they do
                     </li>
                   ))}
                 </ul>
@@ -2323,6 +2803,7 @@ function AlertInbox({ memberId, refresh, onChanged }: { memberId: number; refres
                 {a.sponsored && <span className="badge sponsored">Sponsored by {a.sponsor}</span>}
                 <span className={"badge " + (tripGo(a.trip) ? "ok" : "warn")}>{a.trip.label}</span>
                 {a.kind === "question" && <span className="badge warn">Question about the price</span>}
+                {a.kind === "profile" && !a.profile?.complete && <span className="badge warn">Confirm your profile first</span>}
                 {a.trip.headline && !tripGo(a.trip) && <span className="stop">{a.trip.headline}</span>}
                 {tripGo(a.trip) && a.trip.note && <span className="go-note">{sentence(a.trip.note)}</span>}
                 {a.eligibility && !a.eligibility.confirmed && !a.eligibility.declined ? (
@@ -2358,7 +2839,7 @@ function AlertInbox({ memberId, refresh, onChanged }: { memberId: number; refres
                 {a.warning && <small className="muted">{a.warning}</small>}
                 <NoticeList notices={a.notices} />
                 <small className="muted">
-                  {a.kind === "question" ? "Asked" : "Alerted"} {when(a.created)}, {a.label}
+                  {a.kind === "question" || a.kind === "profile" ? "Asked" : "Alerted"} {when(a.created)}, {a.label}
                   {a.tier ? ` (${a.tier.name})` : ""}
                 </small>
               </li>

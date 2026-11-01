@@ -6,13 +6,17 @@
 // so a planner result is always labelled as sample and can never become a buy
 // alert.
 //
-// A blank public transport fare is a missing input, never a free journey:
-// by public transport with no fare entered (and travel not ticked as free),
-// every figure that depends on the journey (cash required, contribution,
-// profit per unit, earnings per hour, the downside and the threshold
-// verdict) is null, the offer is never shortlisted or put in a basket, and
-// it is listed with FARE_NEEDED. The journey costed at nothing is used only
-// as the best case, to say when an offer fails even before its fare.
+// A blank public transport fare is a missing input, never a free journey,
+// and never a reason on its own to hide an item. By public transport with no
+// fare entered (and travel not ticked as free), every figure after travel
+// (cash required, contribution, profit per unit, earnings per hour, the
+// downside and the after-travel threshold verdict) is null, and the same
+// figures before travel (the journey left out, not costed at nothing) are
+// given separately under `beforeTravel` and always labelled "before your
+// fare". An offer inside every threshold before travel is still shortlisted
+// (thresholds.fareNeeded) and put in baskets, ranked on profit per unit
+// before travel, with the note FARE_NEEDED; one that fails even before its
+// fare is rejected as before.
 import {
   MODES,
   SAMPLE_ASSUMPTIONS,
@@ -196,14 +200,23 @@ export const REASONS = Object.freeze({
   HOURLY: "Below hourly target",
   THRESHOLDS: "Outside your buying thresholds",
   CASH_DATE: "Not paid out by the date you need the cash",
-  FARE: "Enter your public transport fare",
+  // Everything known passes, but the public transport fare is blank: never
+  // "fits", because the fare can only lower the figures.
+  FARE: "Fits before your fare is added",
   FITS: "Fits your profile",
 });
 
-// What an offer waiting for a public transport fare is listed with.
-export const FARE_NEEDED = "Enter your return fare to see whether this trip meets your thresholds";
-// What a figure that depends on the journey reads while the fare is blank.
+// The note an offer carries while its public transport fare is blank: it is
+// inside the thresholds before travel, and the travel cost is still to be
+// added before the verdict after travel is known.
+export const FARE_NEEDED =
+  "Travel cost still to be added: enter your return fare to check this trip against your thresholds after travel";
+// What an after-travel figure reads in an alert check while the fare is blank.
 export const FARE_UNKNOWN = "not known until you enter your fare";
+// What the blank fare itself (the travel cost) reads.
+export const FARE_NOT_KNOWN = "not known yet";
+// The label every before-travel figure carries.
+export const BEFORE_FARE = "before your fare";
 
 // Load limits by transport. These are assumptions, not measurements: a car
 // boot takes a comfortable 25 kg without lifting strain, and by public
@@ -301,6 +314,33 @@ export function unknownJourney(economics) {
     unsoldLoss: null,
     breakEvenSale: null,
     journeyKnown: false,
+  };
+}
+
+/**
+ * The figures that depend on the journey, worked out with the journey left
+ * out, for a public transport trip whose fare is blank: contribution, profit
+ * per unit and its return, cash required, earnings per hour, the loss if
+ * nothing sells, the half-sold contribution and the break-even sale price.
+ * A fare only lowers contribution, profit and earnings per hour, so each is
+ * the best the trip can do; for the same units it adds exactly the fare to
+ * the cash and the loss (if the fare leaves too little cash, fewer units fit
+ * once it is entered). Each is shown only labelled "before your fare"
+ * (BEFORE_FARE), or the cash "plus your fare", never as the trip's figure.
+ * economics is the tripEconomics result with no journey cost, halfSold the
+ * same with half the units sold.
+ */
+export function beforeTravelFigures(economics, halfSold = null) {
+  const { unitProfit, returnOnCost } = unitReturns(economics);
+  return {
+    contribution: economics.contribution,
+    unitProfit,
+    returnOnCost,
+    cashRequired: economics.cashRequired,
+    hourly: economics.hourly,
+    unsoldLoss: economics.unsoldLoss,
+    halfSells: halfSold ? halfSold.contribution : null,
+    breakEvenSale: economics.breakEvenSale,
   };
 }
 
@@ -445,11 +485,15 @@ export function unitThresholdFailures(unitProfit, unitCost, rules = OPPORTUNITY_
  * zero, so the profit is then not checked and the offer fails. Evidence
  * checks are left to the alert gate.
  *
- * fareMissing: the public transport fare is blank, so economics is the best
- * case (the journey costed at nothing). The verdict is then never ok:
- * an offer that fails even at that best case fails with "at most" figures
- * and says so; otherwise it waits for the fare (FARE_NEEDED, fareNeeded
- * true). unitProfit and returnOnCost are null while the fare is blank.
+ * fareMissing: the public transport fare is blank, so economics is the trip
+ * with the journey left out. The verdict after travel is then never ok
+ * (unitProfit and returnOnCost, the after-travel figures, are null): an
+ * offer that fails even before its fare fails with "at most" figures and
+ * says so; one inside every threshold before travel is still shortlisted,
+ * with fareNeeded true and the note FARE_NEEDED as its only entry in
+ * failures. beforeTravel ({ unitProfit, returnOnCost, ok }) holds the
+ * before-travel figures and verdict while the fare is blank, and is null
+ * once the journey is known.
  */
 export function buyingThresholds(offer, economics, rules = OPPORTUNITY_RULES, { fareMissing = false } = {}) {
   const failures = hardFilters({ unitPrice: offer.buy, weightKg: offer.weight }, rules);
@@ -465,19 +509,36 @@ export function buyingThresholds(offer, economics, rules = OPPORTUNITY_RULES, { 
     const worst = unitThresholdFailures(best.unitProfit, economics.unitCost, rules, { atMost: true });
     if (worst.length) failures.push(...worst.map((f) => f + ", even before your public transport fare"));
     else if (!failures.length) {
-      // Only the fare is missing: never a pass, and never a measured failure.
+      // Only the fare is missing: never a pass after travel and never a
+      // measured failure. The offer is shortlisted on what is known.
       fareNeeded = true;
       failures.push(FARE_NEEDED);
     }
   } else failures.push(...unitThresholdFailures(best.unitProfit, economics.unitCost, rules));
+  const measured = !blank.length && best.unitProfit !== null;
   return {
     unitProfit: fareMissing ? null : best.unitProfit,
     returnOnCost: fareMissing ? null : best.returnOnCost,
     ok: failures.length === 0,
     failures,
     fareNeeded,
+    beforeTravel: fareMissing
+      ? {
+          unitProfit: measured ? best.unitProfit : null,
+          returnOnCost: measured ? best.returnOnCost : null,
+          ok: fareNeeded,
+        }
+      : null,
   };
 }
+
+/**
+ * True when an offer belongs on the shortlist (or in a basket): inside every
+ * buying threshold after its share of travel or, while the public transport
+ * fare is blank, inside every one before travel. A blank fare never hides an
+ * item; a blank cost, a failed threshold or no unit fitting still does.
+ */
+export const shortlisted = (thresholds) => thresholds.ok || thresholds.fareNeeded === true;
 
 // Wording for checks that fail on sample data, so the lists match the
 // figures shown next to them: the planner shows illustrative parcel costs
@@ -495,7 +556,11 @@ const SAMPLE_DETAILS = Object.freeze({
 const FARE_DETAILS = Object.freeze({
   "positive-contribution": () => "Contribution is " + FARE_UNKNOWN,
   "hourly-floor": () => "Earnings per hour are " + FARE_UNKNOWN,
-  journey: () => "Public transport fare not entered, so profit and earnings per hour are " + FARE_UNKNOWN,
+  journey: () =>
+    "Public transport fare not entered, so the travel cost is " +
+    FARE_NOT_KNOWN +
+    " and profit and earnings per hour after travel are " +
+    FARE_UNKNOWN,
 });
 function sampleWording(alert, { fareMissing = false } = {}) {
   const details = fareMissing ? { ...SAMPLE_DETAILS, ...FARE_DETAILS } : SAMPLE_DETAILS;
@@ -517,9 +582,10 @@ function sampleWording(alert, { fareMissing = false } = {}) {
  *
  * journeyKnown is false only when a public transport fare was not entered.
  * economics may then be unknownJourney() (contribution and earnings per
- * hour null), and bestCase is the same trip with the journey costed at
- * nothing, used only to say whether the offer fails the thresholds even
- * before its fare. Profit per unit and the return are then null, never 0.
+ * hour null), and bestCase is the same trip with the journey left out, used
+ * for the before-travel verdict (thresholds.beforeTravel): whether the offer
+ * fails even before its fare or is shortlisted waiting for it. Profit per
+ * unit and the return after travel are then null, never 0.
  */
 export function assessSample({
   offer,
@@ -648,9 +714,14 @@ function unitLimits(offer, profile, load, rules, route, economicsFor) {
  * fitting, and units never exceed the trial batch for an unproven item.
  *
  * With a blank public transport fare (fareMissing), the loss, hourly and
- * threshold reasons are judged on the best case (no fare), because a fare
- * only lowers the figures; the economics, journey cost and downside figures
- * that depend on the fare are null, and thresholds.ok is false.
+ * threshold reasons are judged before travel (the journey left out),
+ * because a fare only lowers the figures; the economics, journey cost and
+ * downside figures that depend on the fare are null, never 0, and
+ * thresholds.ok is false. `beforeTravel` (beforeTravelFigures, null once
+ * the journey is known or when no unit fits) holds the same figures before
+ * travel, `travelNote` says the travel cost is still to be added, and an
+ * offer inside every threshold before travel is still shortlisted
+ * (thresholds.fareNeeded) with the reason REASONS.FARE.
  *
  * timing is null, a goals.tripTiming() result, or a function
  * ({ units, salesPerWeek }) => tripTiming result, so the payout date can
@@ -684,10 +755,11 @@ export function plan(
       handlingMinutes: offer.handlingMinutes,
       sellThrough,
     });
-  // With a blank fare the journey is costed at nothing only to find the
-  // most units the other limits allow and the best case; every figure that
-  // depends on the fare is then unknown (unknownJourney). With no units
-  // there is no journey, so nothing depends on the fare.
+  // With a blank fare the journey is left out (journeyFor costs a missing
+  // fare at nothing) to find the most units the other limits allow and the
+  // figures before travel; every figure after travel is then unknown
+  // (unknownJourney). With no units there is no journey, so nothing depends
+  // on the fare.
   const noFare = fareMissing(profile);
   const { units, limit, caps, afterTrial } = unitLimits(offer, profile, load, rules, route, economicsFor);
   const bestCase = economicsFor(units);
@@ -764,6 +836,8 @@ export function plan(
     journey: fareUnknown ? { ...route, cost: null } : route,
     fareMissing: noFare,
     economics,
+    beforeTravel: fareUnknown ? beforeTravelFigures(bestCase, halfSold) : null,
+    travelNote: fareUnknown ? FARE_NEEDED : null,
     downside: {
       nothingSells: economics.unsoldLoss,
       halfSellsUnits: halfSold.sold,
@@ -797,7 +871,7 @@ export function alternativeProfile(profile) {
         `You already travel by ${profile.transport.toLowerCase()}, so this compares the same trip by public transport.`,
         `By public transport the load limit is the smaller of your ${profile.carry} kg and ${HAND_CARRY_KG} kg, about two full shopping bags. This is an assumption, and the Planner uses it whenever you choose public transport.`,
         !Number.isSafeInteger(profile.fare)
-          ? `No public transport fare is entered in your profile, so the public transport travel cost, cash required, contribution and earnings per hour are ${FARE_UNKNOWN}. Enter your return fare (or tick that your travel is free) to compare.`
+          ? `No public transport fare is entered in your profile, so the public transport fare is ${FARE_NOT_KNOWN}: its cash required, contribution and earnings per hour are shown ${BEFORE_FARE}, and the figures after travel are ${FARE_UNKNOWN}. Enter your return fare (or tick that your travel is free) to compare after travel.`
           : profile.fare > 0
             ? `Public transport uses your return fare of ${gbp(profile.fare)}.`
             : "Public transport uses the free fare you entered.",
@@ -814,7 +888,7 @@ export function alternativeProfile(profile) {
       `Driving time assumes ${TRANSPORT.Car.mph} mph door to door, including parking.`,
       ...(fareMissing(profile)
         ? [
-            `No public transport fare is entered in your profile, so your public transport travel cost, cash required, contribution and earnings per hour are ${FARE_UNKNOWN}, and the difference cannot be worked out.`,
+            `No public transport fare is entered in your profile, so your public transport fare is ${FARE_NOT_KNOWN}: your cash required, contribution and earnings per hour by public transport, and the differences, are shown ${BEFORE_FARE}. The figures after travel are ${FARE_UNKNOWN}.`,
           ]
         : []),
       "Your cash, storage, unit, trial batch and hourly limits stay the same.",
@@ -834,7 +908,11 @@ const COMPARED = [
   "hourly",
 ];
 
-/** One side of the comparison. With no units there is no trip. */
+/**
+ * One side of the comparison. With no units there is no trip. beforeTravel
+ * is the side's cash required, contribution and earnings per hour before its
+ * fare while a public transport fare is blank (null otherwise).
+ */
 function modeSummary(p, profile) {
   const trip = p.units > 0;
   return {
@@ -851,10 +929,21 @@ function modeSummary(p, profile) {
     contribution: p.economics.contribution,
     hourly: p.economics.hourly,
     fareMissing: p.fareMissing,
+    beforeTravel: p.beforeTravel
+      ? {
+          cashRequired: p.beforeTravel.cashRequired,
+          contribution: p.beforeTravel.contribution,
+          hourly: p.beforeTravel.hourly,
+        }
+      : null,
     reason: p.reason,
     fits: p.fits,
   };
 }
+
+// The comparison rows that depend on a public transport fare and can be
+// compared before it: the travel cost itself is simply not known yet.
+const COMPARED_BEFORE_TRAVEL = ["cashRequired", "contribution", "hourly"];
 
 /**
  * "What changes if I drive?": the same plan in the alternative mode, with
@@ -862,6 +951,12 @@ function modeSummary(p, profile) {
  * required, contribution and earnings per hour for both modes and the
  * difference (alternative minus current; null when either side has no
  * figure). timeSaved is current travel minutes minus the alternative's.
+ *
+ * While one side's public transport fare is blank its after-travel figures
+ * and their differences are null; differenceBeforeTravel then gives the
+ * cash, contribution and hourly differences using that side's figures
+ * before its fare (null where both sides are known, or either has no trip),
+ * always shown labelled "before your fare".
  */
 export function compareModes(offer, profile, current, { now, timing = null } = {}) {
   const alt = alternativeProfile(profile);
@@ -874,21 +969,49 @@ export function compareModes(offer, profile, current, { now, timing = null } = {
       Number.isFinite(a[k]) && Number.isFinite(b[k]) ? kg(b[k] - a[k]) : null,
     ]),
   );
+  const pending = Boolean(a.beforeTravel || b.beforeTravel);
+  const known = (s, k) => (s.beforeTravel ? s.beforeTravel[k] : s[k]);
+  const differenceBeforeTravel = Object.fromEntries(
+    COMPARED_BEFORE_TRAVEL.map((k) => [
+      k,
+      pending && Number.isFinite(known(a, k)) && Number.isFinite(known(b, k)) ? known(b, k) - known(a, k) : null,
+    ]),
+  );
   return {
     heading: "What changes if I drive?",
     current: a,
     alternative: b,
     difference,
+    differenceBeforeTravel,
     timeSaved: a.units && b.units ? a.travelMinutes - b.travelMinutes : null,
     assumptions: alt.assumptions,
   };
 }
 
-/** Shortlist order: fitting trips first, then earnings per hour, then contribution. */
-export const rankTrips = (a, b) =>
-  Number(b.fits) - Number(a.fits) ||
-  (b.economics.hourly ?? -Infinity) - (a.economics.hourly ?? -Infinity) ||
-  b.economics.contribution - a.economics.contribution;
+/**
+ * Shortlist order. Trips whose travel cost is known come first, in today's
+ * order: fitting trips first, then earnings per hour, then contribution.
+ * Trips waiting for a public transport fare follow, because their figures
+ * are only the best the trip can do and must not outrank a measured one:
+ * those that fit the profile before the fare first, then profit per unit
+ * before the fare, then contribution before it.
+ */
+export const rankTrips = (a, b) => {
+  const pa = Boolean(a.beforeTravel);
+  const pb = Boolean(b.beforeTravel);
+  if (pa !== pb) return Number(pa) - Number(pb);
+  if (pa)
+    return (
+      Number(b.reason === REASONS.FARE) - Number(a.reason === REASONS.FARE) ||
+      (b.beforeTravel.unitProfit ?? -Infinity) - (a.beforeTravel.unitProfit ?? -Infinity) ||
+      (b.beforeTravel.contribution ?? -Infinity) - (a.beforeTravel.contribution ?? -Infinity)
+    );
+  return (
+    Number(b.fits) - Number(a.fits) ||
+    (b.economics.hourly ?? -Infinity) - (a.economics.hourly ?? -Infinity) ||
+    b.economics.contribution - a.economics.contribution
+  );
+};
 
 const brief = (t) => ({
   sku: t.sku,
@@ -905,8 +1028,8 @@ const brief = (t) => ({
 /**
  * Why a planned trip is not shortlisted, in plain words: the price or
  * weight limits, no units fitting (so profit per unit cannot be checked),
- * the profit and return thresholds at the units planned, or, with a blank
- * public transport fare, FARE_NEEDED (or a failure even before the fare).
+ * a blank cost, or the profit and return thresholds at the units planned
+ * (with a blank public transport fare, a failure even before the fare).
  */
 function notShortlisted(t) {
   if (t.hardFilters.length) return t.hardFilters;
@@ -925,37 +1048,37 @@ function notShortlisted(t) {
  * never reaches the shortlist, and neither does one where no unit fits, so
  * its profit per unit cannot be checked: they are listed under `rejected`
  * with the reasons (tier Reject when a threshold fails). The shortlist
- * (`trips`) ranks fitting trips first, then by earnings per hour. `drive`
- * lists the offers that do not fit now but fit by the alternative transport
- * (`extra`; never one outside the price or weight limits), the shortlisted
- * trips that fit now but not by it (`lost`) and those whose public
- * transport verdict waits for a fare (`fareNeeded`, drivers with no fare
- * entered). `currentFareMissing` and `alternativeFareMissing` say which side
- * has no fare.
+ * (`trips`) is ranked by rankTrips. `drive` lists the offers that do not
+ * fit now but fit by the alternative transport (`extra`; never one outside
+ * the price or weight limits), the shortlisted trips that fit now but not
+ * by it (`lost`) and those that fit now and, by public transport with no
+ * fare entered, fit only before the fare (`fareNeeded`). `currentFareMissing`
+ * and `alternativeFareMissing` say which side has no fare.
  *
- * With a blank public transport fare nothing is shortlisted: every offer is
- * rejected, an offer that would otherwise be checked with FARE_NEEDED
- * (`fareNeeded: true`, tier unchanged) and one that fails even before its
- * fare with that failure.
+ * A blank public transport fare never hides an offer on its own: one inside
+ * every threshold before travel is shortlisted (thresholds.fareNeeded, with
+ * `beforeTravel` figures and `travelNote`), ranked after any trip whose
+ * travel is known, and `ranking` says the order is before travel. One that
+ * fails even before its fare is rejected with that failure.
  */
 export function planTrips(profile, { now = new Date().toISOString(), timing = null } = {}) {
   const planned = offers.map((o) => plan(o, profile, { now, timing }));
-  const trips = planned.filter((t) => t.thresholds.ok).sort(rankTrips);
+  const trips = planned.filter((t) => shortlisted(t.thresholds)).sort(rankTrips);
   const rejected = planned
-    .filter((t) => !t.thresholds.ok)
+    .filter((t) => !shortlisted(t.thresholds))
     .map((t) => ({
       ...brief(t),
       units: t.units,
       unitProfit: t.thresholds.unitProfit,
       returnOnCost: t.thresholds.returnOnCost,
       reasons: notShortlisted(t),
+      // Never true here: an offer waiting only for its fare is shortlisted.
       fareNeeded: t.thresholds.fareNeeded,
-      // Reject when a threshold is measured and fails; a blank input, a
-      // blank fare or no units fitting keeps the evidence tier (Review for
-      // sample data).
+      // Reject when a threshold is measured and fails; a blank input or no
+      // units fitting keeps the evidence tier (Review for sample data).
       tier: t.hardFilters.length
         ? "Reject"
-        : blankInputs(t).length || !t.units || t.thresholds.fareNeeded
+        : blankInputs(t).length || !t.units
           ? t.opportunity.tier
           : "Reject",
       accessNeeds: t.accessNeeds,
@@ -966,14 +1089,20 @@ export function planTrips(profile, { now = new Date().toISOString(), timing = nu
     loadKg: t.compare.alternative.loadKg,
     contribution: t.compare.alternative.contribution,
     hourly: t.compare.alternative.hourly,
+    beforeTravel: t.compare.alternative.beforeTravel,
     reason: t.compare.alternative.reason,
   });
   const altProfile = alternativeProfile(profile).profile;
   const waitsForFare = (t) => t.compare.alternative.reason === REASONS.FARE;
+  const waiting = trips.filter((t) => t.beforeTravel).length;
   return {
     sample: true,
     trips,
     rejected,
+    // How the shortlist is ordered: "after travel" when every trip's travel
+    // cost is known, "before travel" when none is (a blank public transport
+    // fare), "known first" when some are.
+    ranking: !waiting ? "after travel" : waiting === trips.length ? "before travel" : "known first",
     drive: {
       heading: "What changes if I drive?",
       current: profile.transport,
@@ -1076,9 +1205,9 @@ export function describeRules(overrides = {}) {
 /**
  * Validates a whole planning profile (money in pence) and returns a clean
  * copy. Every field is required; transport must be one of MODES. fare may
- * be null, meaning not entered: by public transport every figure that
- * depends on the journey is then unknown and nothing is shortlisted or put
- * in a basket until a fare (0 for free travel) is sent.
+ * be null, meaning not entered: by public transport every figure after
+ * travel is then unknown, and offers are shortlisted and put in baskets on
+ * their figures before travel until a fare (0 for free travel) is sent.
  * Error messages name each field as the Planner labels it.
  */
 export function readProfile(input) {

@@ -15,6 +15,9 @@ import { distributionCap, schema } from "./bounties.mjs";
 import { routes as bountyRoutes } from "./routes-bounties.mjs";
 import { schema as auditSchema } from "./audit.mjs";
 
+// Round 5: a member's trip profile (a car, so the units fit); a claim also
+// takes the cash they can spend on the trip.
+const FIT = { transport: "Car", carryKg: 25, storageUnits: 50 };
 const T0 = "2026-11-02T09:00:00.000Z";
 const at = (minutes) => new Date(Date.parse(T0) + minutes * 60000).toISOString();
 const GTIN = "05012345678900";
@@ -94,9 +97,9 @@ async function world() {
       estimate: { offer: { provider: "awin", sourceId: "A1" }, units: 3, costs: { journeyCost: 0, journeyMinutes: 15 } },
     });
   const join = async (name) =>
-    (await call("POST", "/api/members", { name, alertsOptIn: true, alertLocalities: ["Camden"], paidTier: "diamond", paidUntil: "2027-06-01" })).body
+    (await call("POST", "/api/members", { name, alertsOptIn: true, alertLocalities: ["Camden"], paidTier: "diamond", paidUntil: "2027-06-01", ...FIT })).body
       .member;
-  const TRIP = { journeyCost: 0, journeyMinutes: 15 };
+  const TRIP = { journeyCost: 0, journeyMinutes: 15, cashAvailable: 100000 };
   const claim = (bountyId, member, units) => call("POST", `/api/bounties/${bountyId}/claims`, { memberId: member.id, units, ...TRIP });
   const view = async (id, viewer = "operator") => (await call("GET", `/api/bounties/${id}?viewer=${viewer}`)).body.bounty;
   return { db, api, call, clock, state, bounty, join, claim, view, TRIP };

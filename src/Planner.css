@@ -106,6 +106,12 @@ h3 .badge {
 .notice.warn {
   color: #8a2716;
 }
+/* A check still to be done rather than one that failed: the travel cost
+   while the public transport fare is not known yet. */
+.checks li.planner-pending::before {
+  content: "○ ";
+  color: #6b3f00;
+}
 /* Access needs. */
 .badge.planner-access {
   background: #ece4f5;

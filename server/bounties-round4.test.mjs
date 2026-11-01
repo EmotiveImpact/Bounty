@@ -105,9 +105,13 @@ function fakeEstimate(over = {}) {
 }
 
 const JOURNEY = { cost: 300, minutes: 30 };
+// Round 5: a member's trip profile (a car, so the units fit) and the cash
+// they can spend on a trip; a claim without them is refused.
+const CASH = 100000;
+const FIT = { transport: "Car", carryKg: 25, storageUnits: 50 };
 const ownCheck = (units, journey = JOURNEY) => fakeEstimate({ units, journeyCost: journey.cost, journeyMinutes: journey.minutes });
 const claim = (db, args) =>
-  rawClaim(db, { journey: args.journey ?? JOURNEY, check: ownCheck(args.units, args.journey ?? JOURNEY), ...args });
+  rawClaim(db, { journey: args.journey ?? JOURNEY, check: ownCheck(args.units, args.journey ?? JOURNEY), cashAvailable: CASH, ...args });
 
 const bountyInput = (over = {}) => ({
   title: "Travel kettle",
@@ -125,7 +129,7 @@ const liveBounty = (db, over = {}, estimate = fakeEstimate(), { request = REQUES
   createBounty(db, bountyInput(over), { estimate, request, lookup, now });
 
 const member = (db, name, over = {}) =>
-  createMember(db, { name, alertsOptIn: true, alertLocalities: ["Camden"], ...over }, { now: T0 });
+  createMember(db, { name, alertsOptIn: true, alertLocalities: ["Camden"], ...FIT, ...over }, { now: T0 });
 const diamond = (db, name, over = {}) => member(db, name, { paidTier: "diamond", paidUntil: "2026-12-31", ...over });
 
 const check = (db, over = {}, now = at(10)) =>
@@ -149,7 +153,7 @@ const LOOKUP = { provider: "ebay", fetched: T0 };
 const FOUR = { competition: { activeListings: 0, sellers: 0, lookup: LOOKUP }, stock: { check: { units_seen: 4 } } };
 // A claim whose own figures use the same evidence (no competing listings).
 const claimFour = (db, args) =>
-  rawClaim(db, { journey: JOURNEY, check: fakeEstimate({ ...FOUR, units: args.units, journeyCost: JOURNEY.cost, journeyMinutes: JOURNEY.minutes }), ...args });
+  rawClaim(db, { journey: JOURNEY, check: fakeEstimate({ ...FOUR, units: args.units, journeyCost: JOURNEY.cost, journeyMinutes: JOURNEY.minutes }), cashAvailable: CASH, ...args });
 
 // ------------------------------------------------- the real estimate (N1, N2)
 
@@ -202,9 +206,9 @@ async function world({ unitsSeen = 6, retailer = "Argos", promotion = null, item
       expiresAt: new Date(Date.parse(clock.now) + 5 * REAL_DAY).toISOString(), sponsored: false, estimate: request(item, req), ...over,
     });
   const join = async (name) =>
-    (await call("POST", "/api/members", { name, alertsOptIn: true, alertLocalities: ["Camden"], paidTier: "diamond", paidUntil: "2027-06-01" })).body.member;
+    (await call("POST", "/api/members", { name, alertsOptIn: true, alertLocalities: ["Camden"], paidTier: "diamond", paidUntil: "2027-06-01", ...FIT })).body.member;
   const view = async (id, viewer) => (await call("GET", `/api/bounties/${id}${viewer ? "?viewer=" + viewer : ""}`)).body.bounty;
-  const TRIP = { journeyCost: 0, journeyMinutes: 15 };
+  const TRIP = { journeyCost: 0, journeyMinutes: 15, cashAvailable: CASH };
   return { db, api, call, clock, bounty, join, view, TRIP, items };
 }
 

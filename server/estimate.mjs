@@ -23,7 +23,10 @@ import {
   effectiveRules,
 } from "./opportunity.mjs";
 import { cachedLookup, displayPermitted } from "./evidence.mjs";
-import { accessNeeds, defaults as profileDefaults, gbp } from "./catalog.mjs";
+import { CAR_BOOT_KG, HAND_CARRY_KG, accessNeeds, gbp } from "./catalog.mjs";
+// Whether the trip fits the person making it: their transport, carry limit,
+// cash and storage (round 5, finding 4).
+import { readTripProfile, suitability as tripSuitability } from "./suitability.mjs";
 import { bool, fail, int, isoDate, londonDate, num, oneOf, text } from "./http.mjs";
 import {
   CONDITION_VOCABULARY,
@@ -45,6 +48,7 @@ import {
 import {
   CHECK_VALID_DAYS,
   branchIdentity,
+  branchPlace,
   sameBranch,
   shelfChecks,
   shopIsBranch,
@@ -656,7 +660,11 @@ function priceSeen(db, offer) {
  * day the higher price). An online feed or catalogue price (Awin, Hobnight,
  * Keepa) never applies to a branch by itself, and anything else fails
  * closed with a reason that names where the price was seen and where stock
- * was checked.
+ * was checked. When the price was seen at the shop a check names but Open
+ * Prices does not place that shop in the check's locality, the reason says
+ * so ("..., the shop the branch check names, but Open Prices places it
+ * outside Camden": audit.mjs branchPlace) instead of saying the price was
+ * seen somewhere other than the branch.
  *
  * Returns { confirmed, basis: "check" | "same-shop" | null, price, at,
  * check, stockCheck, seen: { price, observed, where, online }, reason }:
@@ -711,6 +719,11 @@ export function priceAtBranch(db, { offer, stock, now = new Date().toISOString()
   // check in the locality names it.
   const namers = named ? [check] : shelf.filter((c) => branchIdentity(c.branch).named && fresh(c));
   const shopCheck = seen.shop ? (namers.find((c) => shopIsBranch(seen.shop, c)) ?? null) : null;
+  // The shop the price was seen at is one a branch check names, but Open
+  // Prices does not place it in the check's locality (branchPlace): say
+  // that, not that the price was seen somewhere other than the branch.
+  const placed = seen.shop && !shopCheck ? (namers.map((c) => branchPlace(seen.shop, c)).find((p) => p?.text) ?? null) : null;
+  const notHere = placed ? `${priceText}, the shop the branch check names, but ${placed.text}` : `${priceText}, not ${branchText}`;
   let basis = usable ? "check" : shopCheck ? "same-shop" : null;
   if (usable && shopCheck && typeof seen.observed === "string") {
     const checkDay = londonDate(usable.checked_at);
@@ -738,9 +751,9 @@ export function priceAtBranch(db, { offer, stock, now = new Date().toISOString()
   if (priced)
     return {
       ...base,
-      reason: `The shelf price on the branch check in ${check.locality} (${gbp(priced.price_pence)}, ${ukTime(priced.checked_at)}) is more than ${ALERT_RULES.maxOfferAgeDays} days old, and ${lowerFirst(priceText)}, not ${branchText}: record the shelf price on a branch check there`,
+      reason: `The shelf price on the branch check in ${check.locality} (${gbp(priced.price_pence)}, ${ukTime(priced.checked_at)}) is more than ${ALERT_RULES.maxOfferAgeDays} days old, and ${lowerFirst(notHere)}: record the shelf price on a branch check there`,
     };
-  return { ...base, reason: `${priceText}, not ${branchText}: record the shelf price on a branch check there` };
+  return { ...base, reason: `${notHere}: record the shelf price on a branch check there` };
 }
 
 /**
@@ -1059,10 +1072,16 @@ export function validateEstimateRequest(request) {
       optional(request.categoryReason, (v) =>
         typeof v === "string" && !v.trim() ? null : text(v, "categoryReason", 300),
       ) ?? null,
-    // The member's carry limit in kilograms, for the access needs. Missing
-    // means the default profile's limit.
+    // The member's carry limit in kilograms, for the access needs when the
+    // profile does not give one. Missing is unknown, never the default
+    // profile's limit.
     carryKg:
       optional(request.carryKg, (v) => num(v, "carryKg", 0, 1000)) ?? null,
+    // The person making the trip: { transport, carryKg, cashAvailable,
+    // storageUnits } (round 5). Each blank value is unknown and fails its
+    // check; a value that is given must be valid (400). Missing is a
+    // profile with every value unknown.
+    profile: readTripProfile(request.profile),
     packagingChecked:
       optional(request.packagingChecked, (v) => bool(v, "packagingChecked")) ?? false,
     bestBefore: isoDate(request.bestBefore, "bestBefore", { optional: true }),
@@ -1649,8 +1668,16 @@ function mainUncertainty({ sampleData, economics, match, offer, missing, stock, 
  *  categoryReason  why a category looser than the suggested one is right.
  *            Without it the suggested category's rules stay (categoryDecision).
  *  packagingChecked, bestBefore  food checks (categoryChecks).
- *  carryKg   the member's carry limit for the access needs (default profile
- *            limit when missing).
+ *  carryKg   the member's carry limit for the access needs when the profile
+ *            gives none (unknown when missing, never the default profile's).
+ *  profile   { transport, carryKg, cashAvailable, storageUnits }: the person
+ *            making the trip (round 5). The gate gets suitability.mjs
+ *            checks for it: one unit and every unit within the load limit,
+ *            the cash before payout within cashAvailable, the units within
+ *            storage. A blank value is unknown and fails its check with a
+ *            request to confirm it; a missing profile fails all four.
+ *            options.suitability "per-member" (a bounty's own estimate)
+ *            leaves them to each member's profile instead.
  *  costs     postage, packaging, journeyCost, journeyMinutes and
  *            handlingMinutes must be entered (0 is allowed when entered). A
  *            blank one is listed in missingInputs and fails the gate's
@@ -1664,7 +1691,8 @@ function mainUncertainty({ sampleData, economics, match, offer, missing, stock, 
  * unitCost, cashNeededDays, payout (payoutSchedule), demand (demandFor),
  * prices (priceComparison), category (categoryDecision plus the rule, the
  * returns rate and the failures), journey, missingInputs, access
- * ({ needs, carryKg, carrySource }), checked ({ price, stock }),
+ * ({ needs, carryKg, carrySource }), suitability (the profile checks, or
+ * { basis: "per-member" }), checked ({ price, stock }),
  * mainUncertainty, offerAttributes, shopPrice, inputs, assumptions and
  * warnings. economics is null unless at least one confirmed exact sale
  * qualifies. competition carries the lookup used and the known
@@ -1841,6 +1869,27 @@ export function estimateFromEvidence(db, request, options = {}) {
     now,
   });
 
+  // Whether the trip fits the person making it (round 5, finding 4): one
+  // unit and every unit within their load limit, the cash before payout
+  // within what they can spend, the units within their storage. Unknown
+  // fails. A bounty shares its figures with many members, so its own
+  // estimate (options.suitability "per-member") leaves this to each
+  // member's profile at the alert and the claim (bounties.mjs).
+  const perMember = options.suitability === "per-member";
+  // Cash that leaves before any payout, as tripEconomics counts it; unknown
+  // while a money input is blank.
+  const cashRequired = moneyKnown
+    ? tripEconomics({ units: input.units, unitCost, salePrice: 0, ...costs }).cashRequired
+    : null;
+  const fit = perMember
+    ? null
+    : tripSuitability({
+        units: input.units,
+        unitKg: input.weightKg,
+        cashRequired,
+        cashFixed: costs.journeyCost,
+        profile: input.profile,
+      });
   const alertInput = {
     evidenceClass: sampleData ? "sample" : "live",
     match,
@@ -1873,6 +1922,7 @@ export function estimateFromEvidence(db, request, options = {}) {
     displayPermitted: permission.permitted,
     demandUnits: demand.units,
     sellWindowWeeks: demand.sellWindowWeeks,
+    suitability: perMember ? "per-member" : fit.checks,
   };
   // Screening pass: classifyOpportunity reads only its evidence and stock
   // checks. Its buying-thresholds and trial-batch results are discarded.
@@ -2070,7 +2120,10 @@ export function estimateFromEvidence(db, request, options = {}) {
     } for dispatch days, delivery and payout delay`,
   );
 
-  const carryKg = input.carryKg ?? profileDefaults.carry;
+  // The carry limit entered for this trip (the profile's, or the older
+  // carryKg field). Unknown is never the default profile's limit: the
+  // vehicle label is then left to the load checks, which ask for it.
+  const carryKg = input.profile?.carryKg ?? input.carryKg ?? null;
   const access = {
     needs: accessNeeds(
       {
@@ -2080,11 +2133,19 @@ export function estimateFromEvidence(db, request, options = {}) {
         stockChecked: shelf.at ?? stock.check?.checked_at ?? null,
         storageNeeds: null,
       },
-      { carry: carryKg },
+      { carry: carryKg ?? Infinity },
     ),
     carryKg,
-    carrySource: input.carryKg === null ? "default" : "request",
+    carrySource: input.profile?.carryKg !== null && input.profile?.carryKg !== undefined
+      ? "profile"
+      : input.carryKg !== null
+        ? "request"
+        : "unknown",
   };
+  if (!perMember)
+    assumptions.push(
+      `The load limit is the Planner's rule: by car or van the larger of your carry limit and ${CAR_BOOT_KG} kg, by public transport the smaller of it and ${HAND_CARRY_KG} kg, on foot or by bicycle your carry limit`,
+    );
 
   const { now: _now, ...inputs } = input;
   return {
@@ -2128,6 +2189,17 @@ export function estimateFromEvidence(db, request, options = {}) {
     journey,
     missingInputs,
     access,
+    // Whether the trip fits the person making it (round 5): basis "profile"
+    // with the suitability() result for the profile sent (every value
+    // blank when none was), or basis "per-member" for a bounty's own
+    // estimate, where each member's profile decides.
+    suitability: perMember
+      ? {
+          basis: "per-member",
+          note: "Shared with many members, so each member's own transport, carrying limit, cash and storage are checked when they are alerted and when they claim",
+          cashRequired,
+        }
+      : { basis: "profile", ...fit, cashRequired },
     checked: { price: offer.observed ?? null, stock: stock.check?.checked_at ?? null, locality: stock.locality ?? null },
     mainUncertainty: mainUncertainty({
       sampleData,

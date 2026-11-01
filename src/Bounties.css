@@ -433,3 +433,72 @@ label.inline {
     padding: 6px 14px;
   }
 }
+/* Round five: whether the trip fits the member's transport, carrying limit
+   and storage, and the profile fields that decide it. Same colours as the
+   member's own figures, so muted text keeps its contrast. */
+.fit {
+  display: grid;
+  gap: 2px;
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin: 6px 0;
+  font-size: 14px;
+}
+.fit.ok {
+  background: #e3f0e4;
+}
+.fit.warn {
+  background: #fbeae6;
+}
+.fit .muted {
+  color: #4f6158;
+}
+.fit .checks {
+  margin: 4px 0;
+}
+.fit li,
+.member-summary dd {
+  overflow-wrap: anywhere;
+}
+.member-form .trip-profile button {
+  justify-self: start;
+  white-space: normal;
+  text-align: left;
+}
+/* The cash field carries a hint, so the fields beside it keep their height. */
+.claim-form .form-grid {
+  align-items: start;
+}
+/* The cash a holder can spend, under any live claim of theirs (round 5b). */
+.claim-cash {
+  display: grid;
+  gap: 4px;
+  flex-basis: 100%;
+  max-width: 560px;
+}
+.claim-cash label {
+  display: grid;
+  gap: 2px;
+}
+.claim-cash input {
+  width: 100%;
+  max-width: 200px;
+}
+.claim-cash button {
+  justify-self: start;
+}
+/* A refused value shown next to its own field (round 5b). */
+.field-error {
+  font-weight: normal;
+}
+/* The operator's list of seller names to check (round 5b). */
+.seller-names ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+.seller-names li {
+  margin: 4px 0;
+}
+.seller-names button {
+  margin-left: 8px;
+}

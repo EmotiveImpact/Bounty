@@ -132,6 +132,11 @@
   margin: 4px 0 0;
   padding: 0;
 }
+/* The hint under "Date the item came back", on its own row. */
+.ledger-form .ledger-form-hint {
+  margin: 4px 0 0;
+  font-size: 13px;
+}
 .ledger-form input[type="file"] {
   padding: 6px 0;
   border: 0;
