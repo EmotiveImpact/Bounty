@@ -763,9 +763,87 @@ h3 .badge {
   height: 36px;
   font-size: 14px;
 }
-.planner-cost {
+/* Deal first: the shop price against what the item sells for, then the
+   profit a unit after fees and postage. Travel follows on the card. */
+.planner-deal {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding: 12px 14px;
+  background: var(--info-soft);
+}
+.planner-trip.gain .planner-deal {
+  background: var(--pass-soft);
+}
+.planner-trip.loss .planner-deal {
+  background: var(--fail-soft);
+}
+.planner-deal-prices {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.planner-deal-prices > span:not(.planner-arrow) {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  background: var(--surface);
+  border-radius: 9px;
+  padding: 7px 10px;
+}
+.planner-deal-prices .badge {
+  margin: 0;
+  font-size: 10.5px;
+  padding: 2px 6px;
+}
+.planner-deal-prices b {
+  font: 700 18px/1.1 var(--sans);
+  font-variant-numeric: tabular-nums;
+}
+.planner-arrow {
+  color: var(--muted);
+  font-size: 18px;
+}
+.planner-deal-profit {
+  display: grid;
+  gap: 1px;
+}
+.planner-deal-profit b {
+  font: 750 30px/1.05 var(--sans);
+  letter-spacing: -0.035em;
+  color: var(--info);
+  font-variant-numeric: tabular-nums;
+}
+.planner-trip.gain .planner-deal-profit b {
+  color: var(--pass);
+}
+.planner-trip.loss .planner-deal-profit b {
+  color: var(--fail);
+}
+.planner-deal-profit span {
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--ink-2);
+}
+.planner-deal > .badge {
+  margin: 0;
+  align-self: start;
+}
+.planner-travel {
   font-size: 13px;
   color: var(--ink-2);
+  background: var(--surface-2);
+  border-radius: 9px;
+  padding: 8px 10px;
   font-variant-numeric: tabular-nums;
-  margin-top: -4px;
+}
+.planner-travel b {
+  display: inline;
+  font-weight: 650;
+}
+.planner-travel span {
+  color: var(--muted);
 }

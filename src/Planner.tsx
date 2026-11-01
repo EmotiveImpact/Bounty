@@ -789,7 +789,7 @@ export default function Planner() {
       {error && <p role="alert" className="notice warn">{error}</p>}
 
       <div className="planner-head">
-        <h2>Trips that fit</h2>
+        <h2>Cheap finds near you</h2>
         {result && (
           <span className="muted">
             {trips.length ? `${plural(trips.length, "trip")} shortlisted` : "None shortlisted yet"}
@@ -864,18 +864,18 @@ export default function Planner() {
   );
 }
 
-type SortKey = "best" | "hourly" | "unit" | "near";
+type SortKey = "best" | "unit" | "cheap" | "near";
 const SORTS: [SortKey, string][] = [
   ["best", "Best first"],
-  ["hourly", "Earnings an hour"],
-  ["unit", "Profit a unit"],
+  ["unit", "Biggest profit a unit"],
+  ["cheap", "Cheapest"],
   ["near", "Nearest"],
 ];
 /** The cards in the chosen order. Best first keeps the planner's ranking; an unknown figure sorts last. */
 function sortTrips(list: Trip[], key: SortKey) {
   if (key === "best") return list;
   const value = (t: Trip) =>
-    key === "hourly" ? t.economics.hourly : key === "unit" ? t.economics.unitContribution : -t.miles;
+    key === "unit" ? unitBeforeTravel(t.economics) : key === "cheap" ? -t.buy : -t.miles;
   return [...list].sort((a, b) => (value(b) ?? -Infinity) - (value(a) ?? -Infinity));
 }
 
@@ -910,10 +910,23 @@ export function ItemTile({ sku, category }: { sku: string; category?: string }) 
 }
 
 /** A shortlisted trip as a card: the money first, then the item, then its prices. */
+/**
+ * Display only: profit a unit after fees, postage, packaging and returns,
+ * before travel. It is the planner's own contribution with the journey cost
+ * added back, so it is known even while a public transport fare is blank.
+ */
+export function unitBeforeTravel(e: Economics): number | null {
+  if (!e.units) return null;
+  const c = e.costs;
+  return Math.round((e.proceeds - c.stock - c.packaging - c.postage - c.fees - c.returns) / e.units);
+}
+
+/** A shortlisted find as a card: the deal first, then the item, then travel. */
 function TripCard({ trip: t, active, onChoose }: { trip: Trip; active: boolean; onChoose: () => void }) {
   const e = t.economics;
-  // Display only: tint the money band by its sign; unknown stays neutral.
-  const tone = t.fareMissing || e.contribution == null ? " none" : e.contribution > 0 ? " gain" : " loss";
+  const unit = unitBeforeTravel(e);
+  // Display only: tint the deal band by the sign of the profit; unknown stays neutral.
+  const tone = unit === null ? " none" : unit > 0 ? " gain" : " loss";
   return (
     <button
       type="button"
@@ -921,15 +934,23 @@ function TripCard({ trip: t, active, onChoose }: { trip: Trip; active: boolean; 
       aria-current={active ? "true" : undefined}
       onClick={onChoose}
     >
-      <span className="planner-band">
-        <span>
-          <small>Estimated profit, this trip</small>
-          <b>{t.fareMissing && e.contribution == null ? "Fare needed" : pounds(e.contribution)}</b>
-          <span className="planner-band-sub">
-            {t.fareMissing && e.unitContribution == null
-              ? "Enter your fare to see it"
-              : `${pounds(e.unitContribution)} a unit · ${perHour(e.hourly, t.fareMissing)}`}
+      <span className="planner-deal">
+        <span className="planner-deal-prices">
+          <span>
+            <span className="badge ev-retail">Shop price</span>
+            <b className="p-retail">{money(t.buy)}</b>
           </span>
+          <span className="planner-arrow" aria-hidden="true">
+            →
+          </span>
+          <span>
+            <span className="badge ev-estimate">Sells for about</span>
+            <b className="p-estimate">{pounds(t.salePrice)}</b>
+          </span>
+        </span>
+        <span className="planner-deal-profit">
+          <b>{pounds(unit)}</b>
+          <span>profit a unit after fees and postage</span>
         </span>
         <TierBadge tier={t.opportunity.tier} />
       </span>
@@ -940,28 +961,23 @@ function TripCard({ trip: t, active, onChoose }: { trip: Trip; active: boolean; 
             <b className="planner-name">{t.name}</b>
             <em>{t.variant}</em>
             <em>
-              {t.shop} · {t.miles} mi · {t.area}
+              {t.shop} · {t.miles} mi · {t.area} ·{" "}
+              {t.competingListings === null ? "others listed not known" : `${t.competingListings} other listed`}
             </em>
           </span>
         </span>
-        <span className="planner-prices">
-          <span>
-            <span className="badge ev-retail">Shop price</span>
-            <b className="p-retail">{money(t.buy)}</b>
-          </span>
-          <span>
-            <span className="badge ev-estimate">Sale estimate</span>
-            <b className="p-estimate">{pounds(t.salePrice)}</b>
-          </span>
-          <span>
-            <span className="badge ev-asking">Others listed</span>
-            <b>{t.competingListings ?? "not known"}</b>
-          </span>
-        </span>
-        <span className="planner-cost">
-          {e.journeyPerUnit === null
-            ? "Your share of travel is not known until you enter your fare."
-            : `${money(t.buy)} + ${money(e.journeyPerUnit)} travel = ${money(t.buy + e.journeyPerUnit)} a unit with your journey`}
+        <span className="planner-travel">
+          {t.fareMissing || e.unitContribution === null ? (
+            <>
+              <b>Travel {byMode(t.journey.mode)}:</b> add your fare to include it.
+            </>
+          ) : (
+            <>
+              <b>With your trip {byMode(t.journey.mode)}:</b> {money(e.unitContribution)} a unit,{" "}
+              {pounds(e.contribution)} for {plural(e.units, "unit")}, {perHour(e.hourly)}{" "}
+              <span>(travel {pounds(e.journeyPerUnit)} a unit)</span>
+            </>
+          )}
         </span>
         <span className={"planner-fit " + (t.fits ? "ok" : "warn")}>
           {t.reason}
