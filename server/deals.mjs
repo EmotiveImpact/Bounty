@@ -7,13 +7,30 @@
 // an added layer: it is shown beside the deal when the member has said how
 // they travel, and it never hides, blocks or reorders a deal. Nothing here
 // is a buy alert: the Planner and the alert gate still decide that.
-import { MODES, SAMPLE_ASSUMPTIONS, lowerMedian, tripEconomics } from "./trip.mjs";
-import { OPPORTUNITY_RULES, categoryReturnsRate, hardFilters, meetsReturn } from "./opportunity.mjs";
-import { blankInputs, fareMissing, journeyFor, offers as sampleOffers, unitThresholdFailures } from "./catalog.mjs";
+import {
+  MODES,
+  SAMPLE_ASSUMPTIONS,
+  lowerMedian,
+  tripEconomics,
+} from "./trip.mjs";
+import {
+  OPPORTUNITY_RULES,
+  categoryReturnsRate,
+  hardFilters,
+  meetsReturn,
+} from "./opportunity.mjs";
+import {
+  blankInputs,
+  fareMissing,
+  journeyFor,
+  offers as sampleOffers,
+  unitThresholdFailures,
+} from "./catalog.mjs";
 import { fail } from "./http.mjs";
 import { normaliseBarcode } from "./matching.mjs";
 
-const isObject = (v) => Boolean(v) && typeof v === "object" && !Array.isArray(v);
+const isObject = (v) =>
+  Boolean(v) && typeof v === "object" && !Array.isArray(v);
 
 /**
  * Optional extras a member may send for sharper numbers. Every field is
@@ -34,16 +51,24 @@ export function readDealOptions(input) {
   const num = (key, label, min, max, whole = false) => {
     if (input[key] === undefined || input[key] === null) return;
     const v = input[key];
-    if (typeof v !== "number" || !Number.isFinite(v) || v < min || v > max || (whole && !Number.isSafeInteger(v)))
+    if (
+      typeof v !== "number" ||
+      !Number.isFinite(v) ||
+      v < min ||
+      v > max ||
+      (whole && !Number.isSafeInteger(v))
+    )
       fail(`${label} must be a number from ${min} to ${max}`);
     out[key] = v;
   };
   if (input.transport !== undefined && input.transport !== null) {
-    if (!MODES.includes(input.transport)) fail("Transport must be one of " + MODES.join(", "));
+    if (!MODES.includes(input.transport))
+      fail("Transport must be one of " + MODES.join(", "));
     out.transport = input.transport;
   }
   num("fare", "Public transport fare (in pence)", 0, 100_000, true);
-  if (input.fareFree !== undefined && typeof input.fareFree !== "boolean") fail("fareFree must be true or false");
+  if (input.fareFree !== undefined && typeof input.fareFree !== "boolean")
+    fail("fareFree must be true or false");
   out.fareFree = input.fareFree === true;
   num("perMile", "Car or van cost per mile (in pence)", 0, 1000, true);
   num("extra", "Parking or tolls (in pence)", 0, 100_000, true);
@@ -60,8 +85,13 @@ export function readDealOptions(input) {
  */
 export function dealTravel(offer, options) {
   const miles = Number.isFinite(offer.miles) ? offer.miles : null;
-  if (!options.transport || miles === null) return { added: false, mode: null, miles, cost: null, minutes: null };
-  const fare = options.fareFree ? 0 : Number.isSafeInteger(options.fare) ? options.fare : null;
+  if (!options.transport || miles === null)
+    return { added: false, mode: null, miles, cost: null, minutes: null };
+  const fare = options.fareFree
+    ? 0
+    : Number.isSafeInteger(options.fare)
+      ? options.fare
+      : null;
   const profile = {
     transport: options.transport,
     fare,
@@ -80,11 +110,16 @@ export function dealTravel(offer, options) {
 
 /** One offer as a deal. */
 export function dealFor(offer, options = {}, rules = OPPORTUNITY_RULES) {
-  const completed = Array.isArray(offer.sales) ? offer.sales.filter((s) => Number.isSafeInteger(s) && s > 0) : [];
+  const completed = Array.isArray(offer.sales)
+    ? offer.sales.filter((s) => Number.isSafeInteger(s) && s > 0)
+    : [];
   const salePrice = lowerMedian(completed);
   const feeRate = options.feeRate ?? SAMPLE_ASSUMPTIONS.feeRate;
   const feeFixed = options.feeFixed ?? SAMPLE_ASSUMPTIONS.feeFixed;
-  const returnsRate = categoryReturnsRate(offer.category, options.returnsRate ?? SAMPLE_ASSUMPTIONS.returnsRate);
+  const returnsRate = categoryReturnsRate(
+    offer.category,
+    options.returnsRate ?? SAMPLE_ASSUMPTIONS.returnsRate,
+  );
   const blanks = blankInputs(offer);
   const known = salePrice !== null && blanks.length === 0;
   // One unit, no journey: travel is a separate layer below.
@@ -103,10 +138,15 @@ export function dealFor(offer, options = {}, rules = OPPORTUNITY_RULES) {
     : null;
   const unitProfit = e ? e.contribution : null;
   const notes = [];
-  if (salePrice === null) notes.push("No completed sales yet, so the sale price is not known");
-  if (blanks.length) notes.push("Not known until these are entered: " + blanks.join(", "));
-  notes.push(...hardFilters({ unitPrice: offer.buy, weightKg: offer.weight }, rules));
-  if (unitProfit !== null) notes.push(...unitThresholdFailures(unitProfit, offer.buy, rules));
+  if (salePrice === null)
+    notes.push("No completed sales yet, so the sale price is not known");
+  if (blanks.length)
+    notes.push("Not known until these are entered: " + blanks.join(", "));
+  notes.push(
+    ...hardFilters({ unitPrice: offer.buy, weightKg: offer.weight }, rules),
+  );
+  if (unitProfit !== null)
+    notes.push(...unitThresholdFailures(unitProfit, offer.buy, rules));
   return {
     sku: offer.sku,
     name: offer.name,
@@ -130,23 +170,53 @@ export function dealFor(offer, options = {}, rules = OPPORTUNITY_RULES) {
     feeFixed,
     returnsRate,
     unitProfit,
-    returnOnCost: unitProfit !== null && offer.buy > 0 ? Math.floor((unitProfit / offer.buy) * 1000) / 1000 : null,
-    underSale: salePrice !== null && salePrice > offer.buy ? Math.floor((1 - offer.buy / salePrice) * 100) : null,
+    returnOnCost:
+      unitProfit !== null && offer.buy > 0
+        ? Math.floor((unitProfit / offer.buy) * 1000) / 1000
+        : null,
+    underSale:
+      salePrice !== null && salePrice > offer.buy
+        ? Math.floor((1 - offer.buy / salePrice) * 100)
+        : null,
     weight: offer.weight ?? null,
     stock: Number.isSafeInteger(offer.stock) ? offer.stock : null,
-    competingListings: Number.isSafeInteger(offer.competingListings) ? offer.competingListings : null,
+    competingListings: Number.isSafeInteger(offer.competingListings)
+      ? offer.competingListings
+      : null,
+    // Modelled for sample offers. The client shows them as the sales rate
+    // and leaves them out when unknown.
+    salesPerWeek: Number.isFinite(offer.salesPerWeek)
+      ? offer.salesPerWeek
+      : null,
+    // When the price and the shelf stock were last checked; null when never.
+    priceChecked: offer.priceChecked ?? null,
+    stockChecked: offer.stockChecked ?? null,
     storageNeeds: offer.storageNeeds ?? null,
     meetsThresholds: unitProfit !== null && notes.length === 0,
     notes,
     travel: dealTravel(offer, options),
     sample: offer.sample === true,
-    ...sampleLabel(judge({ salePrice, costs: e?.costs ?? null, unitProfit, sales: completed.length, notes }, rules), offer),
+    ...sampleLabel(
+      judge(
+        {
+          salePrice,
+          costs: e?.costs ?? null,
+          unitProfit,
+          sales: completed.length,
+          notes,
+        },
+        rules,
+      ),
+      offer,
+    ),
   };
 }
 
 // A sample deal's sales are modelled, so its verdict says so in its reason.
 function sampleLabel(j, offer) {
-  return offer.sample === true ? { ...j, reason: j.reason + ". Sample figures, not real sales" } : j;
+  return offer.sample === true
+    ? { ...j, reason: j.reason + ". Sample figures, not real sales" }
+    : j;
 }
 
 /**
@@ -165,13 +235,20 @@ export const VERDICT_MIN_SALES = 3;
  */
 export function walkAwayPrice(salePrice, costs, rules = OPPORTUNITY_RULES) {
   if (!Number.isSafeInteger(salePrice) || !costs) return null;
-  const net = salePrice - costs.fees - costs.returns - costs.postage - costs.packaging;
+  const net =
+    salePrice - costs.fees - costs.returns - costs.postage - costs.packaging;
   let p = Math.min(
     net - rules.minUnitProfit,
     Math.floor((net * 10000) / (10000 + Math.round(rules.minReturn * 10000))),
     rules.maxUnitPrice,
   );
-  while (p >= rules.minUnitPrice && !(net - p >= rules.minUnitProfit && meetsReturn(net - p, p, rules.minReturn))) p--;
+  while (
+    p >= rules.minUnitPrice &&
+    !(
+      net - p >= rules.minUnitProfit && meetsReturn(net - p, p, rules.minReturn)
+    )
+  )
+    p--;
   return p >= rules.minUnitPrice ? p : null;
 }
 
@@ -182,12 +259,24 @@ export function walkAwayPrice(salePrice, costs, rules = OPPORTUNITY_RULES) {
  * threshold reads THINK; a loss reads LEAVE. This is a reading of the
  * evidence, never a buy alert: sample deals stay labelled as samples.
  */
-export function judge({ salePrice, costs, unitProfit, sales, notes }, rules = OPPORTUNITY_RULES) {
+export function judge(
+  { salePrice, costs, unitProfit, sales, notes },
+  rules = OPPORTUNITY_RULES,
+) {
   const walkAway = walkAwayPrice(salePrice, costs, rules);
   if (unitProfit === null)
-    return { verdict: "unknown", reason: "No completed sales of this exact item yet, so there is no proof of what it sells for", walkAway };
+    return {
+      verdict: "unknown",
+      reason:
+        "No completed sales of this exact item yet, so there is no proof of what it sells for",
+      walkAway,
+    };
   if (unitProfit <= 0)
-    return { verdict: "leave", reason: `You would lose ${gbp(-unitProfit)} a unit after fees and postage`, walkAway };
+    return {
+      verdict: "leave",
+      reason: `You would lose ${gbp(-unitProfit)} a unit after fees and postage`,
+      walkAway,
+    };
   if (notes.length === 0 && sales >= VERDICT_MIN_SALES)
     return {
       verdict: "buy",
@@ -198,7 +287,11 @@ export function judge({ salePrice, costs, unitProfit, sales, notes }, rules = OP
     notes.length > 0
       ? notes[0]
       : `Only ${sales} completed ${sales === 1 ? "sale" : "sales"} so far, fewer than the ${VERDICT_MIN_SALES} needed`;
-  return { verdict: "think", reason: `${gbp(unitProfit)} a unit, but: ${why}`, walkAway };
+  return {
+    verdict: "think",
+    reason: `${gbp(unitProfit)} a unit, but: ${why}`,
+    walkAway,
+  };
 }
 
 const gbp = (pence) => "£" + (pence / 100).toFixed(2);
@@ -209,14 +302,21 @@ const gbp = (pence) => "£" + (pence / 100).toFixed(2);
  */
 export function listDeals(options = {}, { offers = sampleOffers } = {}) {
   const deals = offers.map((o) => dealFor(o, options));
-  deals.sort((a, b) => (b.unitProfit ?? -Infinity) - (a.unitProfit ?? -Infinity) || a.name.localeCompare(b.name));
+  deals.sort(
+    (a, b) =>
+      (b.unitProfit ?? -Infinity) - (a.unitProfit ?? -Infinity) ||
+      a.name.localeCompare(b.name),
+  );
   return {
     deals,
     assumptions: {
       feeRate: options.feeRate ?? SAMPLE_ASSUMPTIONS.feeRate,
       feeFixed: options.feeFixed ?? SAMPLE_ASSUMPTIONS.feeFixed,
       returnsRate: options.returnsRate ?? SAMPLE_ASSUMPTIONS.returnsRate,
-      ownFees: options.feeRate !== undefined || options.feeFixed !== undefined || options.returnsRate !== undefined,
+      ownFees:
+        options.feeRate !== undefined ||
+        options.feeFixed !== undefined ||
+        options.returnsRate !== undefined,
     },
     rules: {
       minUnitProfit: OPPORTUNITY_RULES.minUnitProfit,
@@ -235,7 +335,11 @@ export function scan(input, { offers = sampleOffers } = {}) {
   if (!isObject(input)) fail("Send the scan as a JSON object");
   const { sku, barcode, price, ...rest } = input;
   const options = readDealOptions(rest);
-  if (price !== undefined && price !== null && (!Number.isSafeInteger(price) || price < 1 || price > 100_000))
+  if (
+    price !== undefined &&
+    price !== null &&
+    (!Number.isSafeInteger(price) || price < 1 || price > 100_000)
+  )
     fail("The shelf price must be a whole number of pence from 1 to 100000");
   let offer = null;
   let code = null;
@@ -244,16 +348,25 @@ export function scan(input, { offers = sampleOffers } = {}) {
     if (!offer) fail("No deal has that reference");
   } else if (barcode !== undefined) {
     code = normaliseBarcode(barcode);
-    if (!code) fail("That is not a valid barcode. Check the digits and try again");
-    offer = offers.find((o) => o.barcode && normaliseBarcode(o.barcode) === code) ?? null;
+    if (!code)
+      fail("That is not a valid barcode. Check the digits and try again");
+    offer =
+      offers.find((o) => o.barcode && normaliseBarcode(o.barcode) === code) ??
+      null;
   } else fail("Scan a barcode or pick a deal");
   if (!offer)
     return {
       found: false,
       barcode: code,
       verdict: "unknown",
-      reason: "Bounty has no completed sales for this barcode yet. Do not buy on a guess: check it in Research first",
+      reason:
+        "Bounty has no completed sales for this barcode yet. Do not buy on a guess: check it in Research first",
     };
   const shelf = Number.isSafeInteger(price) ? price : offer.buy;
-  return { found: true, barcode: code, shelfPrice: shelf, deal: dealFor({ ...offer, buy: shelf }, options) };
+  return {
+    found: true,
+    barcode: code,
+    shelfPrice: shelf,
+    deal: dealFor({ ...offer, buy: shelf }, options),
+  };
 }

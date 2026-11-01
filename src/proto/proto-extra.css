@@ -1,0 +1,66 @@
+/* Small additions the port needs on top of the mock's own styles. */
+@scope (.bx) to (.legacy) {
+  /* The app's item art fills whichever frame the mock gives it. */
+  .img .planner-tile,
+  .dimg .planner-tile,
+  .big .planner-tile,
+  .mini .planner-tile,
+  .tile .planner-tile {
+    width: 100%;
+    height: 100%;
+    border-radius: inherit;
+    display: grid;
+    place-items: center;
+  }
+  .img .planner-tile svg {
+    width: 42%;
+    height: 42%;
+  }
+  .dimg .planner-tile svg {
+    width: 46%;
+    height: 46%;
+  }
+  .big .planner-tile svg {
+    width: 34%;
+    height: 34%;
+  }
+  .mini .planner-tile svg {
+    width: 70%;
+    height: 70%;
+  }
+  .sample-chip {
+    background: #fff4c2;
+    color: #6b5400;
+    border: 1px solid #f0d870;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 1px 7px;
+    border-radius: 999px;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+  .popnote {
+    display: block;
+    color: var(--mut, #667);
+    font-size: 12px;
+    line-height: 1.4;
+    padding: 8px 14px 12px;
+  }
+  .heart.on {
+    color: #d6336c;
+  }
+  .heart.on svg path {
+    fill: currentColor;
+  }
+}
+
+/* The app has fewer categories than the mock, so keep them at the mock's
+   width each rather than stretching them across the page. */
+@scope (.bx) to (.legacy) {
+  .iconrow {
+    justify-content: flex-start;
+  }
+  .iconrow button {
+    flex: 0 0 108px;
+  }
+}

@@ -50,6 +50,9 @@ export type Deal = {
   weight: number | null;
   stock: number | null;
   competingListings: number | null;
+  salesPerWeek: number | null;
+  priceChecked: string | null;
+  stockChecked: string | null;
   storageNeeds: string | null;
   meetsThresholds: boolean;
   notes: string[];
