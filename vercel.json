@@ -4,12 +4,11 @@
   "installCommand": "npm ci",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
-  "rewrites": [
-    {
-      "source": "/api/:path*",
-      "destination": "https://set-your-api-host.invalid/api/:path*"
-    }
-  ],
+  "regions": ["lhr1"],
+  "functions": {
+    "api/index.mjs": { "maxDuration": 60 }
+  },
+  "rewrites": [{ "source": "/api/:path*", "destination": "/api" }],
   "headers": [
     {
       "source": "/api/:path*",

@@ -1,6 +1,7 @@
 # The Bounty API and its Open Prices import loop, for a small always-on host
 # with a persistent disk mounted at /data (Railway, Fly.io or similar). The
-# React app is built and served separately by Vercel. See docs/DEPLOY.md.
+# React app is built and served separately by Vercel. This is the persistent
+# option; the free demo runs entirely on Vercel. See docs/DEPLOY.md.
 FROM node:24-slim
 ENV NODE_ENV=production \
     BOUNTY_DATA_DIR=/data \

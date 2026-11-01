@@ -9,6 +9,9 @@
 //                        for example bounty.vercel.app,bounty-api.up.railway.app
 //   BOUNTY_PASSWORD      shared password, at least 16 characters; required
 //                        whenever the API listens beyond this machine
+//
+// On Vercel (VERCEL is set) the deployment's own host names, which Vercel
+// provides, are added to the public hosts, so only the password is needed.
 import { createHash, timingSafeEqual } from "node:crypto";
 
 export const MIN_PASSWORD_LENGTH = 16;
@@ -31,6 +34,9 @@ export function publicHosts(value) {
 export function accessConfig(env = process.env) {
   const listenHost = String(env.BOUNTY_LISTEN_HOST || "127.0.0.1").trim();
   const hosts = publicHosts(env.BOUNTY_PUBLIC_HOSTS);
+  if (env.VERCEL)
+    for (const name of ["VERCEL_URL", "VERCEL_BRANCH_URL", "VERCEL_PROJECT_PRODUCTION_URL"])
+      for (const host of publicHosts(env[name])) if (!hosts.includes(host)) hosts.push(host);
   const password = env.BOUNTY_PASSWORD ? String(env.BOUNTY_PASSWORD) : null;
   if (password !== null && password.length < MIN_PASSWORD_LENGTH)
     throw Error(`BOUNTY_PASSWORD must be at least ${MIN_PASSWORD_LENGTH} characters`);

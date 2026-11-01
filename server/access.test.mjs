@@ -103,3 +103,21 @@ test("named public hosts and origins are accepted, others still refused", async 
     await api.close();
   }
 });
+
+test("on Vercel the deployment's own host names are accepted without listing them", () => {
+  const env = {
+    VERCEL: "1",
+    VERCEL_URL: "bounty-abc123.vercel.app",
+    VERCEL_BRANCH_URL: "bounty-git-main.vercel.app",
+    VERCEL_PROJECT_PRODUCTION_URL: "bounty.vercel.app",
+    BOUNTY_PASSWORD: PASSWORD,
+  };
+  assert.deepEqual(accessConfig(env).publicHosts, [
+    "bounty-abc123.vercel.app",
+    "bounty-git-main.vercel.app",
+    "bounty.vercel.app",
+  ]);
+  // Without VERCEL the variables are ignored, and without a password it refuses.
+  assert.deepEqual(accessConfig({ ...env, VERCEL: "" }).publicHosts, []);
+  assert.throws(() => accessConfig({ ...env, BOUNTY_PASSWORD: "" }), /BOUNTY_PASSWORD/);
+});
