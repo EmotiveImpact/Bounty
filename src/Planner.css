@@ -1019,3 +1019,40 @@ h3 .badge {
     font-size: 20px;
   }
 }
+/* Compact cards, as on Kelkoo: the rest is in the trip details. */
+.planner-picture .planner-picture-badges {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  gap: 4px;
+}
+.planner-picture .planner-picture-badges .badge {
+  position: static;
+  margin: 0;
+}
+.planner-picture {
+  height: 140px;
+}
+.planner-trip .planner-trip-body {
+  gap: 10px;
+}
+.planner-trip .planner-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px 10px;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+  font-size: 12.5px;
+  font-style: normal;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.planner-trip .planner-foot span:first-child {
+  color: var(--ink-2);
+  font-weight: 550;
+}
+.planner-trip-body .planner-deal-profit span {
+  font-size: 12px;
+}

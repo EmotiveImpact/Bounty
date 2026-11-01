@@ -980,14 +980,16 @@ function TripCard({ trip: t, active, onChoose }: { trip: Trip; active: boolean; 
             {under}% under<span className="planner-sr"> the sale estimate</span>
           </span>
         )}
-        <TierBadge tier={t.opportunity.tier} />
+        <span className="planner-picture-badges">
+          <span className="badge sample">Sample</span>
+          <TierBadge tier={t.opportunity.tier} />
+        </span>
       </span>
       <span className="planner-trip-body">
         <span className="planner-item">
           <b className="planner-name">{t.name}</b>
-          <em>{t.variant}</em>
           <em>
-            {t.shop} · {t.miles} mi · {t.area}
+            {t.variant} · {t.shop}, {t.miles} mi
           </em>
         </span>
         <span className="planner-deal-prices">
@@ -1007,34 +1009,15 @@ function TripCard({ trip: t, active, onChoose }: { trip: Trip; active: boolean; 
           <b>{pounds(unit)}</b>
           <span>profit a unit after fees and postage</span>
         </span>
-        <span className="planner-travel">
-          {t.fareMissing || e.unitContribution === null ? (
-            <>
-              <b>Travel {byMode(t.journey.mode)}:</b> add your fare to include it.
-            </>
-          ) : (
-            <>
-              <b>With your trip {byMode(t.journey.mode)}:</b> {money(e.unitContribution)} a unit,{" "}
-              {pounds(e.contribution)} for {plural(e.units, "unit")}, {perHour(e.hourly)}{" "}
-              <span>(travel {pounds(e.journeyPerUnit)} a unit)</span>
-            </>
-          )}
+        <span className="planner-foot">
+          <span>
+            {t.fareMissing || e.unitContribution === null
+              ? `Travel ${byMode(t.journey.mode)}: add your fare`
+              : `With travel ${byMode(t.journey.mode)}: ${money(e.unitContribution)} a unit`}
+          </span>
+          <span>{t.competingListings === null ? "others listed not known" : `${t.competingListings} other listed`}</span>
         </span>
-        <span className={"planner-fit " + (t.fits ? "ok" : "warn")}>
-          {t.reason}
-          {t.units ? `: ${plural(t.units, "unit")}` : ""}
-          {t.units && e.cashRequired != null ? `, ${money(e.cashRequired)} to spend` : ""}
-        </span>
-        <span className="planner-badges">
-          <span className="badge sample">Sample</span>
-          <AccessBadges needs={t.accessNeeds} />
-        </span>
-        <em className="planner-foot">
-          {t.competingListings === null ? "Others listed: not known" : `${t.competingListings} other listed`} ·
-          Time until payment:{" "}
-          {t.units ? paymentText(t.timing?.payoutDays, t.timing?.payout.date) : "no trip"}. Price checked:{" "}
-          {checkedText(t.checked.price)}, stock checked: {checkedText(t.checked.stock)}.
-        </em>
+        {!t.fits && <span className="planner-fit warn">{t.reason}</span>}
       </span>
     </button>
   );
