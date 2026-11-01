@@ -1,5 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { api, loadLens, loadProfile, money, percent, saveLens, type Lens } from "./api";
+import {
+  api,
+  loadLens,
+  loadProfile,
+  money,
+  percent,
+  saveLens,
+  type Lens,
+} from "./api";
 import { ItemTile, byMode } from "./Planner";
 import { LensSwitch, VerdictBadge, type Verdict } from "./Verdict";
 import "./Deals.css";
@@ -9,7 +17,13 @@ import "./Deals.css";
 // is an added layer: it shows on a card once the member has said how they
 // travel, and it never hides, blocks or reorders a deal.
 
-type Travel = { added: boolean; mode: string | null; miles: number | null; cost: number | null; minutes: number | null };
+type Travel = {
+  added: boolean;
+  mode: string | null;
+  miles: number | null;
+  cost: number | null;
+  minutes: number | null;
+};
 export type Deal = {
   sku: string;
   name: string;
@@ -21,7 +35,12 @@ export type Deal = {
   buy: number;
   salePrice: number | null;
   sales: number[];
-  costs: { fees: number; returns: number; postage: number; packaging: number } | null;
+  costs: {
+    fees: number;
+    returns: number;
+    postage: number;
+    packaging: number;
+  } | null;
   feeRate: number;
   feeFixed: number;
   returnsRate: number;
@@ -42,7 +61,12 @@ export type Deal = {
 };
 type DealsResponse = {
   deals: Deal[];
-  assumptions: { feeRate: number; feeFixed: number; returnsRate: number; ownFees: boolean };
+  assumptions: {
+    feeRate: number;
+    feeFixed: number;
+    returnsRate: number;
+    ownFees: boolean;
+  };
   rules: { minUnitProfit: number; minReturn: number };
 };
 
@@ -60,7 +84,10 @@ export function savedExtras(): Record<string, unknown> {
   }
   if (!saved) return {};
   const p = loadProfile();
-  const fare = typeof p.fare === "number" && Number.isFinite(p.fare) ? Math.round(p.fare * 100) : null;
+  const fare =
+    typeof p.fare === "number" && Number.isFinite(p.fare)
+      ? Math.round(p.fare * 100)
+      : null;
   return {
     transport: p.transport,
     fare,
@@ -84,33 +111,54 @@ const SORTS: [SortKey, string][] = [
 function sortDeals(list: Deal[], key: SortKey) {
   if (key === "profit") return list;
   const value = (d: Deal) =>
-    key === "discount" ? d.underSale : key === "cheap" ? -d.buy : d.miles === null ? null : -d.miles;
-  return [...list].sort((a, b) => (value(b) ?? -Infinity) - (value(a) ?? -Infinity));
+    key === "discount"
+      ? d.underSale
+      : key === "cheap"
+        ? -d.buy
+        : d.miles === null
+          ? null
+          : -d.miles;
+  return [...list].sort(
+    (a, b) => (value(b) ?? -Infinity) - (value(a) ?? -Infinity),
+  );
 }
-const CATEGORY_LABEL: Record<string, string> = { clothing: "Clothing", general: "Home and general" };
+const CATEGORY_LABEL: Record<string, string> = {
+  clothing: "Clothing",
+  general: "Home and general",
+};
 
 /** One plain line about the trip to the shop, or that travel is not added. */
 function travelText(t: Travel) {
   if (!t.added || !t.mode) return "Travel not added";
   if (t.cost === null) return `Travel ${byMode(t.mode)}: add your fare`;
   const time = t.minutes ? `, ${t.minutes} min` : "";
-  return t.cost === 0 ? `No travel cost ${byMode(t.mode)}${time}` : `Trip ${byMode(t.mode)}: ${money(t.cost)}${time}`;
+  return t.cost === 0
+    ? `No travel cost ${byMode(t.mode)}${time}`
+    : `Trip ${byMode(t.mode)}: ${money(t.cost)}${time}`;
 }
 
 /** Short labels for a card. The full wording is in the deal's own panel. */
 function chips(d: Deal, rules: DealsResponse["rules"]) {
   const out: string[] = [];
-  if (d.unitProfit !== null && d.unitProfit < rules.minUnitProfit) out.push(`Under ${money(rules.minUnitProfit)} a unit`);
+  if (d.unitProfit !== null && d.unitProfit < rules.minUnitProfit)
+    out.push(`Under ${money(rules.minUnitProfit)} a unit`);
   if (d.weight !== null && d.weight >= 2) out.push(`Heavy, ${d.weight} kg`);
   if (d.storageNeeds) out.push("Bulky");
   if (d.stock !== null) out.push(`${d.stock} on the shelf`);
   return out;
 }
 
-export default function Deals() {
+// The site header's search box can drive the search here; on its own the
+// screen keeps its own box.
+export default function Deals(props: {
+  query?: string;
+  onQuery?: (q: string) => void;
+}) {
   const [result, setResult] = useState<DealsResponse | null>(null);
   const [error, setError] = useState("");
-  const [query, setQuery] = useState("");
+  const [ownQuery, setOwnQuery] = useState("");
+  const query = props.query ?? ownQuery;
+  const setQuery = props.onQuery ?? setOwnQuery;
   const [cat, setCat] = useState("");
   const [sort, setSort] = useState<SortKey>("profit");
   const [open, setOpen] = useState<string | null>(null);
@@ -135,7 +183,14 @@ export default function Deals() {
   const cats = [...new Set(all.map((d) => d.category))].sort();
   const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const matches = (d: Deal) => {
-    const text = [d.name, d.variant, d.shop, CATEGORY_LABEL[d.category] ?? d.category].join(" ").toLowerCase();
+    const text = [
+      d.name,
+      d.variant,
+      d.shop,
+      CATEGORY_LABEL[d.category] ?? d.category,
+    ]
+      .join(" ")
+      .toLowerCase();
     return words.every((w) => text.includes(w));
   };
   const deals = sortDeals(
@@ -150,7 +205,20 @@ export default function Deals() {
 
   return (
     <div className="deals">
-      <div className="deals-search" role="search">
+      {result && lens === "simple" && !query.trim() && !cat && (
+        <TopDeals
+          deals={all}
+          onOpen={(el, sku) => {
+            opener.current = el;
+            setOpen(sku);
+          }}
+        />
+      )}
+      <div
+        className="deals-search"
+        role="search"
+        hidden={props.onQuery !== undefined}
+      >
         <label className="deals-sr" htmlFor="deals-q">
           Search deals
         </label>
@@ -165,7 +233,12 @@ export default function Deals() {
       {cats.length > 1 && (
         <div className="deals-cats" role="group" aria-label="Category">
           {["", ...cats].map((c) => (
-            <button key={c || "all"} type="button" aria-pressed={cat === c} onClick={() => setCat(c)}>
+            <button
+              key={c || "all"}
+              type="button"
+              aria-pressed={cat === c}
+              onClick={() => setCat(c)}
+            >
               {c ? (CATEGORY_LABEL[c] ?? c) : "All"}
             </button>
           ))}
@@ -176,7 +249,12 @@ export default function Deals() {
           <div className="deals-sorts" role="group" aria-label="Sort the deals">
             <span className="muted">Sort by</span>
             {SORTS.map(([key, label]) => (
-              <button key={key} type="button" aria-pressed={sort === key} onClick={() => setSort(key)}>
+              <button
+                key={key}
+                type="button"
+                aria-pressed={sort === key}
+                onClick={() => setSort(key)}
+              >
                 {label}
               </button>
             ))}
@@ -188,8 +266,8 @@ export default function Deals() {
       </div>
       {all.some((d) => d.sample) && (
         <p className="notice deals-sample">
-          <strong>Sample data.</strong> Illustrative Leeds offers with modelled sales, so nothing here is a
-          buy alert yet.
+          <strong>Sample data.</strong> Illustrative Leeds offers with modelled
+          sales, so nothing here is a buy alert yet.
         </p>
       )}
       {error && (
@@ -200,7 +278,9 @@ export default function Deals() {
       {!result && !error && <p className="muted">Loading deals…</p>}
       {result && !deals.length && (
         <p className="muted">
-          {all.length ? "No deal matches this search. Clear it or choose All to see the others." : "No deals yet."}
+          {all.length
+            ? "No deal matches this search. Clear it or choose All to see the others."
+            : "No deals yet."}
         </p>
       )}
       {result && lens === "pro" && deals.length > 0 && (
@@ -230,27 +310,119 @@ export default function Deals() {
       </div>
       {result && (
         <p className="muted deals-fees">
-          {result.assumptions.ownFees ? "Profit uses your own selling fees" : "Profit uses sample selling fees"}:{" "}
-          {percent(result.assumptions.feeRate)} plus {money(result.assumptions.feeFixed)} a sale, and a{" "}
-          {percent(result.assumptions.returnsRate)} returns allowance (clothing at least 15%). Change them in the trip
-          planner.
+          {result.assumptions.ownFees
+            ? "Profit uses your own selling fees"
+            : "Profit uses sample selling fees"}
+          : {percent(result.assumptions.feeRate)} plus{" "}
+          {money(result.assumptions.feeFixed)} a sale, and a{" "}
+          {percent(result.assumptions.returnsRate)} returns allowance (clothing
+          at least 15%). Change them in the trip planner.
         </p>
       )}
-      {deal && result && <DealPanel deal={deal} rules={result.rules} onClose={close} />}
+      {deal && result && (
+        <DealPanel deal={deal} rules={result.rules} onClose={close} />
+      )}
     </div>
   );
 }
 
-function DealCard({ deal: d, chips, onOpen }: { deal: Deal; chips: string[]; onOpen: (el: HTMLElement) => void }) {
-  const small = d.unitProfit === null || !d.meetsThresholds;
-  const range = d.sales.length ? `${money(d.sales[0])} to ${money(d.sales[d.sales.length - 1])}` : "";
+/**
+ * The best four deals that meet every rule, in a green band at the top of the
+ * screen. Biggest profit a unit first, as the server orders them.
+ */
+function TopDeals({
+  deals,
+  onOpen,
+}: {
+  deals: Deal[];
+  onOpen: (el: HTMLElement, sku: string) => void;
+}) {
+  const top = deals
+    .filter((d) => d.meetsThresholds && d.unitProfit !== null)
+    .slice(0, 4);
+  if (top.length < 2) return null;
+  const meeting = deals.filter((d) => d.meetsThresholds).length;
+  const total = top.reduce((sum, d) => sum + (d.unitProfit ?? 0), 0);
+  const sample = top.some((d) => d.sample);
   return (
-    <button type="button" className="deals-card" onClick={(e) => onOpen(e.currentTarget)}>
+    <section className="topdeals" aria-label="Top deals">
+      <div className="topdeals-text">
+        {sample && <span className="badge sample">Sample</span>}
+        <h2>
+          Top deals <em>near you.</em>
+        </h2>
+        <p>
+          Cheaper on the shelf than they sell for. Every rule met, biggest
+          profit a unit first.
+        </p>
+        <p className="topdeals-stats">
+          <b>{meeting}</b>
+          <span>meet every rule</span>
+          <b>{money(total)}</b>
+          <span>profit if you buy one of each</span>
+        </p>
+      </div>
+      <div className="topdeals-cards">
+        {top.map((d) => (
+          <button
+            key={d.sku}
+            type="button"
+            className="topdeal"
+            onClick={(e) => onOpen(e.currentTarget, d.sku)}
+          >
+            <span className="topdeal-pic">
+              <ItemTile sku={d.sku} category={d.category} />
+              {d.underSale !== null && (
+                <span className="topdeal-pill">
+                  −{d.underSale}%
+                  <span className="deals-sr"> under what it sells for</span>
+                </span>
+              )}
+            </span>
+            <b className="topdeal-name">{d.name}</b>
+            <span className="topdeal-prices">
+              <b>{money(d.buy)}</b> sells{" "}
+              {d.salePrice === null ? "not known" : money(d.salePrice)}
+            </span>
+            <span className="topdeal-keep">
+              Profit {money(d.unitProfit ?? 0)} a unit
+            </span>
+            <span className="topdeal-shop">
+              {d.shop}
+              {d.miles !== null ? ` · ${d.miles} mi` : ""}
+            </span>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function DealCard({
+  deal: d,
+  chips,
+  onOpen,
+}: {
+  deal: Deal;
+  chips: string[];
+  onOpen: (el: HTMLElement) => void;
+}) {
+  const small = d.unitProfit === null || !d.meetsThresholds;
+  const range = d.sales.length
+    ? `${money(d.sales[0])} to ${money(d.sales[d.sales.length - 1])}`
+    : "";
+  return (
+    <button
+      type="button"
+      className="deals-card"
+      onClick={(e) => onOpen(e.currentTarget)}
+    >
       <span className="deals-picture">
         <ItemTile sku={d.sku} category={d.category} />
         {d.underSale !== null && (
           <span className="deals-ribbon">
-            {d.underSale}% under<span className="deals-sr"> what it sells for</span>
+            {d.underSale}% under
+            <span className="deals-sr"> what it sells for</span>
           </span>
         )}
         {d.sample && <span className="badge sample deals-tag">Sample</span>}
@@ -288,7 +460,9 @@ function DealCard({ deal: d, chips, onOpen }: { deal: Deal; chips: string[]; onO
         </span>
         <span className="deals-verdict">
           <VerdictBadge verdict={d.verdict} />
-          {d.walkAway !== null && <span className="muted">Walk away above {money(d.walkAway)}</span>}
+          {d.walkAway !== null && (
+            <span className="muted">Walk away above {money(d.walkAway)}</span>
+          )}
         </span>
         <span className="deals-chips">
           <span className="deals-chip travel">{travelText(d.travel)}</span>
@@ -309,7 +483,9 @@ function Sharper() {
     <div className="deals-sharper" role="group" aria-label="Optional extras">
       <div>
         <h2>Want sharper numbers?</h2>
-        <p>All optional. Add any of these and the cards take them into account.</p>
+        <p>
+          All optional. Add any of these and the cards take them into account.
+        </p>
       </div>
       <a href="#Planner">
         How you get there <small>bus fare, car or walking</small>
@@ -325,7 +501,15 @@ function Sharper() {
 }
 
 /** The working behind one deal, in a panel over the page. */
-function DealPanel({ deal: d, rules, onClose }: { deal: Deal; rules: DealsResponse["rules"]; onClose: () => void }) {
+function DealPanel({
+  deal: d,
+  rules,
+  onClose,
+}: {
+  deal: Deal;
+  rules: DealsResponse["rules"];
+  onClose: () => void;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     ref.current?.focus();
@@ -340,7 +524,14 @@ function DealPanel({ deal: d, rules, onClose }: { deal: Deal; rules: DealsRespon
   return (
     <>
       <div className="deals-backdrop" onClick={onClose} />
-      <div ref={ref} className="deals-panel" role="dialog" aria-modal="true" aria-label={d.name} tabIndex={-1}>
+      <div
+        ref={ref}
+        className="deals-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-label={d.name}
+        tabIndex={-1}
+      >
         <div className="deals-panel-head">
           <ItemTile sku={d.sku} category={d.category} />
           <div>
@@ -361,14 +552,18 @@ function DealPanel({ deal: d, rules, onClose }: { deal: Deal; rules: DealsRespon
           <p>{d.reason}.</p>
           {d.walkAway !== null && (
             <p>
-              Walk away if the shelf price is above <strong>{money(d.walkAway)}</strong>. Above that it no longer makes{" "}
-              {money(rules.minUnitProfit)} a unit and a {percent(rules.minReturn)} return.
+              Walk away if the shelf price is above{" "}
+              <strong>{money(d.walkAway)}</strong>. Above that it no longer
+              makes {money(rules.minUnitProfit)} a unit and a{" "}
+              {percent(rules.minReturn)} return.
             </p>
           )}
         </div>
         {c && d.salePrice !== null && d.unitProfit !== null ? (
           <table className="deals-sum">
-            <caption className="deals-sr">How the profit a unit is worked out</caption>
+            <caption className="deals-sr">
+              How the profit a unit is worked out
+            </caption>
             <tbody>
               <tr>
                 <th scope="row">Sells for (the lower middle completed sale)</th>
@@ -380,12 +575,15 @@ function DealPanel({ deal: d, rules, onClose }: { deal: Deal; rules: DealsRespon
               </tr>
               <tr>
                 <th scope="row">
-                  Marketplace fees ({percent(d.feeRate)} plus {money(d.feeFixed)})
+                  Marketplace fees ({percent(d.feeRate)} plus{" "}
+                  {money(d.feeFixed)})
                 </th>
                 <td>−{money(c.fees)}</td>
               </tr>
               <tr>
-                <th scope="row">Returns allowance ({percent(d.returnsRate)})</th>
+                <th scope="row">
+                  Returns allowance ({percent(d.returnsRate)})
+                </th>
                 <td>−{money(c.returns)}</td>
               </tr>
               <tr>
@@ -403,12 +601,15 @@ function DealPanel({ deal: d, rules, onClose }: { deal: Deal; rules: DealsRespon
             </tbody>
           </table>
         ) : (
-          <p className="notice">The profit is not known yet: {d.notes.join("; ")}.</p>
+          <p className="notice">
+            The profit is not known yet: {d.notes.join("; ")}.
+          </p>
         )}
         {d.returnOnCost !== null && (
           <p className="muted">
-            That is a {percent(d.returnOnCost)} return on the shop price. The usual bar is {money(rules.minUnitProfit)} a
-            unit and a {percent(rules.minReturn)} return.
+            That is a {percent(d.returnOnCost)} return on the shop price. The
+            usual bar is {money(rules.minUnitProfit)} a unit and a{" "}
+            {percent(rules.minReturn)} return.
           </p>
         )}
 
@@ -423,13 +624,18 @@ function DealPanel({ deal: d, rules, onClose }: { deal: Deal; rules: DealsRespon
           ) : (
             <span>No completed sales yet.</span>
           )}
-          <span>Completed sales of this exact item only. Listings that have not sold are never counted.</span>
+          <span>
+            Completed sales of this exact item only. Listings that have not sold
+            are never counted.
+          </span>
         </div>
 
         <div className="deals-box">
           <h3>Getting there</h3>
           <span>
-            {d.miles !== null ? `${d.miles} miles from the centre of ${d.area ?? "your area"}. ` : ""}
+            {d.miles !== null
+              ? `${d.miles} miles from the centre of ${d.area ?? "your area"}. `
+              : ""}
             {t.added && t.mode
               ? t.cost === null
                 ? `You travel ${byMode(t.mode)}: add your return fare in the trip planner to see the cost.`
@@ -468,11 +674,24 @@ function DealPanel({ deal: d, rules, onClose }: { deal: Deal; rules: DealsRespon
  * Pro view: every deal as one dense row, for people who scan the numbers.
  * The same figures as the cards, plus return on spend and competition.
  */
-function ProTable({ deals, onOpen }: { deals: Deal[]; onOpen: (el: HTMLElement, sku: string) => void }) {
+function ProTable({
+  deals,
+  onOpen,
+}: {
+  deals: Deal[];
+  onOpen: (el: HTMLElement, sku: string) => void;
+}) {
   return (
-    <div className="deals-pro" role="region" aria-label="Deals in detail" tabIndex={0}>
+    <div
+      className="deals-pro"
+      role="region"
+      aria-label="Deals in detail"
+      tabIndex={0}
+    >
       <table>
-        <caption className="deals-sr">Every deal with its figures. Choose a name to see the working.</caption>
+        <caption className="deals-sr">
+          Every deal with its figures. Choose a name to see the working.
+        </caption>
         <thead>
           <tr>
             <th scope="col">Item</th>
@@ -507,7 +726,11 @@ function ProTable({ deals, onOpen }: { deals: Deal[]; onOpen: (el: HTMLElement, 
           {deals.map((d) => (
             <tr key={d.sku}>
               <th scope="row">
-                <button type="button" className="deals-pro-name" onClick={(e) => onOpen(e.currentTarget, d.sku)}>
+                <button
+                  type="button"
+                  className="deals-pro-name"
+                  onClick={(e) => onOpen(e.currentTarget, d.sku)}
+                >
                   {d.name}
                 </button>
                 <small>
@@ -520,12 +743,25 @@ function ProTable({ deals, onOpen }: { deals: Deal[]; onOpen: (el: HTMLElement, 
                 <VerdictBadge verdict={d.verdict} />
               </td>
               <td className="n retail">{money(d.buy)}</td>
-              <td className="n sold">{d.salePrice === null ? "–" : money(d.salePrice)}</td>
-              <td className={"n" + (d.unitProfit !== null && d.unitProfit <= 0 ? " loss" : " gain")}>
+              <td className="n sold">
+                {d.salePrice === null ? "–" : money(d.salePrice)}
+              </td>
+              <td
+                className={
+                  "n" +
+                  (d.unitProfit !== null && d.unitProfit <= 0
+                    ? " loss"
+                    : " gain")
+                }
+              >
                 {d.unitProfit === null ? "–" : money(d.unitProfit)}
               </td>
-              <td className="n">{d.returnOnCost === null ? "–" : percent(d.returnOnCost)}</td>
-              <td className="n">{d.walkAway === null ? "–" : money(d.walkAway)}</td>
+              <td className="n">
+                {d.returnOnCost === null ? "–" : percent(d.returnOnCost)}
+              </td>
+              <td className="n">
+                {d.walkAway === null ? "–" : money(d.walkAway)}
+              </td>
               <td className="n">{d.sales.length}</td>
               <td className="n">{d.competingListings ?? "–"}</td>
               <td className="n">{d.stock ?? "–"}</td>
