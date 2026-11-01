@@ -1116,7 +1116,7 @@ export function ResearchCalculator({
 
   return (
     <article className="research-calculator">
-      <small>RESEARCH DESK / TRIP ESTIMATE</small>
+      <small>Research desk</small>
       <h2>Research a trip from real evidence</h2>
       <p>
         Choose a barcoded retail offer, confirm the completed sales that are the
@@ -1125,11 +1125,16 @@ export function ResearchCalculator({
         not confirm stock and does not send an alert.
       </p>
 
-      <fieldset>
+      <fieldset className="research-search">
         <legend>1. Acquisition offer</legend>
         <label>
           Search offers by title or barcode
-          <input value={query} onChange={(ev) => setQuery(ev.target.value)} />
+          <input
+            type="search"
+            placeholder="For example water bottle, or 5059123400017"
+            value={query}
+            onChange={(ev) => setQuery(ev.target.value)}
+          />
         </label>
         {offerError && <p role="alert">{offerError}</p>}
         {!offerError && offers.total === 0 && (
@@ -1809,7 +1814,7 @@ function PriceComparison({ prices }: { prices: Prices }) {
   );
   return (
     <section className="three-prices" aria-label="Three prices">
-      <small>THREE PRICES, KEPT APART</small>
+      <small>Three prices, kept apart</small>
       <div className="price-columns">
         <div className="price-col ev-col-retail">
           <h3>{prices.claimed?.kind === "rrp" ? "Recommended retail price" : "Claimed previous price"}</h3>
@@ -2120,7 +2125,7 @@ const ONLINE_AVAILABILITY: Record<string, string> = {
 function OfferSummary({ offer }: { offer: Offer }) {
   return (
     <div className="offer-summary">
-      <small>CHOSEN OFFER</small>
+      <small>Chosen offer</small>
       <b>{offer.title}</b>
       <span className="badges">
         {freshnessBadge(offer)}
@@ -2375,7 +2380,7 @@ function Result({ estimate, stale }: { estimate: Estimate; stale: boolean }) {
   const category = estimate.category;
   return (
     <section className={"result" + (stale ? " stale" : "")} aria-live="polite" aria-busy={stale}>
-      <small>6. ESTIMATE</small>
+      <small>6. Estimate</small>
       {stale && (
         <p className="notice" role="status">
           Updating for your latest changes. The figures below are for your previous inputs.

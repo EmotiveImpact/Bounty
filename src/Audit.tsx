@@ -457,7 +457,7 @@ export default function Audit({ draft }: { draft?: AuditHandover | null }) {
   const sampleArea = locality.trim() !== "" && isSampleArea(locality);
   return (
     <article className="audit">
-      <small>VALIDATION / REAL BUYING ALERTS GATE</small>
+      <small>Before real buy alerts</small>
       <h2>Validation audit</h2>
       <p>
         Before buy alerts can be trusted, check 30 barcoded items in the pilot

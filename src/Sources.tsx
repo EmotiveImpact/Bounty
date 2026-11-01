@@ -399,7 +399,7 @@ export default function Sources() {
     <div className="stack sources">
       {error && <p role="alert">{error}</p>}
       <section>
-        <small>01 / SOURCE READINESS</small>
+        <small>Source readiness</small>
         <h2>Sources</h2>
         <p>
           Public observations import on a schedule. Credentialed lookups run only when you start
@@ -419,17 +419,17 @@ export default function Sources() {
         <button onClick={load}>Refresh</button>
       </section>
       <section>
-        <small>02 / IMPORT HISTORY</small>
+        <small>Import history</small>
         <h2>Recent import runs</h2>
         <RunsTable runs={runs} />
       </section>
       <section>
-        <small>03 / DISPLAY PERMISSIONS</small>
+        <small>Display permissions</small>
         <h2>Permission to display</h2>
         <Permissions sources={sources} permissions={permissions} onSaved={load} />
       </section>
       <section>
-        <small>04 / OPEN PRICES</small>
+        <small>Open Prices</small>
         <h2>UK price observations</h2>
         <Observations />
       </section>

@@ -360,3 +360,72 @@
   box-shadow: var(--shadow);
   border-radius: var(--radius);
 }
+
+/* Offer search: a search band in the spirit of a comparison site. */
+.research-calculator fieldset.research-search {
+  background: var(--cta);
+  border: 0;
+  border-radius: var(--radius);
+  padding: 18px 20px 16px;
+  margin-top: 16px;
+  color: var(--cta-ink);
+}
+.research-search legend {
+  float: left;
+  width: 100%;
+  padding: 0;
+  margin-bottom: 8px;
+  color: #c6d0dd;
+  font-size: 12.5px;
+}
+.research-search > label {
+  clear: both;
+  color: #fff;
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+.research-search > label input {
+  height: 48px;
+  font-size: 16px;
+  border: 0;
+  border-radius: 11px;
+  padding-left: 42px;
+  background: var(--surface)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235d6a7d' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='6.5'/%3E%3Cpath d='M20 20l-4.2-4.2'/%3E%3C/svg%3E")
+    no-repeat 13px 50% / 20px 20px;
+}
+.research-search > p.muted,
+.research-search > p {
+  color: #c6d0dd;
+  margin: 10px 0 0;
+}
+.research-search .offer-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+  gap: 10px;
+  margin-top: 12px;
+  max-height: 520px;
+}
+.research-search .offer-list:empty {
+  display: none;
+}
+.research-search .offer-list .card {
+  margin: 0;
+  align-items: stretch;
+  flex-direction: column;
+  color: var(--ink);
+}
+.research-search .offer-list .card > span:last-child {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  text-align: left;
+}
+.research-search .offer-list .card > span:last-child b {
+  font-size: 22px;
+}
+.research-search .offer-list .card > span:last-child small {
+  display: inline;
+}

@@ -883,3 +883,13 @@ code {
 .error {
   color: var(--fail);
 }
+
+/* Section eyebrows ("Research desk", "Your goals"): a short label above a
+   card's heading, in the brand colour. */
+article > small:first-child,
+section > small:first-child,
+aside > small:first-child {
+  font-size: 12.5px;
+  letter-spacing: 0.02em;
+  color: var(--brand);
+}

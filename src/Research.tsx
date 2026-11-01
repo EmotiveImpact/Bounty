@@ -100,7 +100,7 @@ export default function Research() {
       </div>
 
       <article>
-        <small>RESEARCH DESK / EVIDENCE REGISTER</small>
+        <small>Research desk</small>
         <h2>Evidence register</h2>
         <p>
           Imported records by evidence class. Source dates can differ from import

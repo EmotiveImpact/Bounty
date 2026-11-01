@@ -1813,7 +1813,7 @@ function BountyCard({
 
       <div className="pressure">
         <div>
-          <small>SOURCING PRESSURE</small>
+          <small>Sourcing pressure</small>
           <b>
             {sourcing.ratio === null
               ? sourcing.availableUnits === 0
@@ -1827,7 +1827,7 @@ function BountyCard({
           </span>
         </div>
         <div>
-          <small>RESALE COMPETITION</small>
+          <small>Resale competition</small>
           <b>
             {resale.competingListings === 0
               ? "No competing listings found"

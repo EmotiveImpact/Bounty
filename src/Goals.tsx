@@ -332,7 +332,7 @@ export default function Goals() {
   return (
     <div className="planner goals">
       <section>
-        <small>01 / YOUR GOALS</small>
+        <small>Your goals</small>
         <h2>Monthly goal and selling rhythm</h2>
         {!draft ? (
           <p>{goalsNotice || "Loading your goals."}</p>
@@ -456,7 +456,7 @@ export default function Goals() {
       <NamedGoals version={version} />
 
       <section>
-        <small>03 / BASKET PLAN</small>
+        <small>Basket plan</small>
         <h2>One shopping trip, one cash limit</h2>
         <p>
           Everything in a basket is bought on one shopping trip: one shared journey and one cash
@@ -475,7 +475,7 @@ export default function Goals() {
       </section>
 
       <section>
-        <small>04 / THIS MONTH</small>
+        <small>This month</small>
         <h2>Progress this month</h2>
         <label className="planner-month">
           Month
@@ -949,7 +949,7 @@ function NamedGoals({ version }: { version: number }) {
 
   return (
     <section>
-      <small>02 / WHAT THE MONEY IS FOR</small>
+      <small>What the money is for</small>
       <h2>Named goals and deadlines</h2>
       <p>
         Name what the money is for, such as a hobby, fuel or a bill like car insurance. A goal with a
