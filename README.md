@@ -2,7 +2,7 @@
 
 A UK resale and savings planning workbench. It helps one person decide whether a specific shopping trip can save money, or earn enough from resale to be worth their time, using their own budget, transport, carrying limit, storage, cash date and hourly floor. Vite, React and TypeScript serve the interface. A local Node API calculates trips and stores evidence and outcomes in SQLite. Separate workers import price evidence.
 
-This is a single-user pilot that runs on your own computer. Nothing in it guarantees stock or a sale, and the figures it shows are estimates until a trade is reconciled in the Ledger.
+This is a single-user pilot that runs on your own computer, or online behind a shared password: a free demo on Vercel whose data does not last, or Vercel with a small server for a pilot that keeps its data ([DEPLOY.md](docs/DEPLOY.md)). Nothing in it guarantees stock or a sale, and the figures it shows are estimates until a trade is reconciled in the Ledger.
 
 ## Run locally
 
@@ -53,7 +53,7 @@ A buy alert needs every check to pass on positive evidence: live data, an exact 
 
 ## Not built yet
 
-- Accounts and authentication. Members, the operator and visitors are chosen on this computer, so keep the API on localhost.
+- Accounts and authentication. Members, the operator and visitors are chosen on this computer, so keep the API on localhost. A hosted pilot sits behind one shared password instead; see [DEPLOY.md](docs/DEPLOY.md).
 - Membership billing. Paid tiers are recorded by the operator, and tier names, windows and prices are still open decisions.
 - Alert delivery. Alerts and "Don't make the trip" notices are recorded in the app; nothing is sent by email or text.
 - Credentialed sources. Hobnight, Keepa and eBay Browse adapters are built and checked against their published specs and live endpoints, but have not been run with real credentials. There is no automated source of completed eBay sales; they are recorded by hand. See [INTEGRATIONS.md](docs/INTEGRATIONS.md).
@@ -62,4 +62,4 @@ A buy alert needs every check to pass on positive evidence: live data, an exact 
 
 ## Documents
 
-[Product requirements](docs/PRD.md) · [Architecture and module contracts](docs/ARCHITECTURE.md) · [Source register, credentials and import commands](docs/SOURCES.md) · [Integration verification register](docs/INTEGRATIONS.md)
+[Product requirements](docs/PRD.md) · [Architecture and module contracts](docs/ARCHITECTURE.md) · [Source register, credentials and import commands](docs/SOURCES.md) · [Integration verification register](docs/INTEGRATIONS.md) · [Hosting the pilot](docs/DEPLOY.md)

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "installCommand": "npm ci",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "regions": ["lhr1"],
+  "functions": {
+    "api/index.mjs": { "maxDuration": 60 }
+  },
+  "rewrites": [{ "source": "/api/:path*", "destination": "/api" }],
+  "headers": [
+    {
+      "source": "/api/:path*",
+      "headers": [{ "key": "CDN-Cache-Control", "value": "no-store" }]
+    }
+  ]
+}
