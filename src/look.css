@@ -627,3 +627,14 @@ button.primary {
 .topdeals-stats span {
   margin-right: 10px;
 }
+
+/* Big screens: the page fills the width instead of sitting in a narrow column. */
+@media (min-width: 1500px) {
+  .sitehead-in,
+  main,
+  .wrap {
+    max-width: none;
+    padding-left: 40px;
+    padding-right: 40px;
+  }
+}
