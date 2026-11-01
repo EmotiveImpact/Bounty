@@ -742,6 +742,19 @@ a {
   box-shadow: none;
   border: 1.5px solid var(--sold);
 }
+/* A modelled sale estimate (Planner sample figures) is never a completed
+   sale: grey and dotted, with its own words. */
+.badge.ev-estimate {
+  color: var(--ink-2);
+  background: var(--surface);
+  box-shadow: none;
+  border: 1.5px dotted var(--muted);
+  border-radius: 6px;
+  padding: 3px 8px;
+}
+.p-estimate {
+  color: var(--ink-2);
+}
 .p-retail {
   color: var(--retail);
 }

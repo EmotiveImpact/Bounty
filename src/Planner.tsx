@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   api,
   dateTime,
@@ -519,7 +519,7 @@ export default function Planner() {
   const [result, setResult] = useState<PlanResponse | null>(null);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState("");
-  // Display only: on a phone the buying profile folds away behind a button.
+  // Display only: whether the profile editor is open.
   const [profileOpen, setProfileOpen] = useState(false);
   const set = (patch: Partial<PlannerProfile>) => setProfile({ ...profile, ...patch });
   const problem = profileProblem(profile);
@@ -560,47 +560,119 @@ export default function Planner() {
   const hiddenTrips = all.filter(isHidden);
   const trip = trips.find((t) => t.sku === selected) ?? trips[0];
 
+  // Display only: the profile editor slides in over the page, keeps focus
+  // inside while it is open and hands it back to the button that opened it.
+  const editRef = useRef<HTMLButtonElement>(null);
+  const drawerRef = useRef<HTMLElement>(null);
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (profileOpen) {
+      wasOpen.current = true;
+      // Focus the panel itself, so a phone does not open its keyboard at once.
+      drawerRef.current?.focus();
+      const onKey = (e: KeyboardEvent) => {
+        if (e.key === "Escape") setProfileOpen(false);
+      };
+      window.addEventListener("keydown", onKey);
+      return () => window.removeEventListener("keydown", onKey);
+    }
+    if (wasOpen.current) editRef.current?.focus();
+  }, [profileOpen]);
+  const choose = (sku: string) => {
+    setSelected(sku);
+    // Bring the trip details into view, below the cards.
+    requestAnimationFrame(() => {
+      const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+      document
+        .getElementById("planner-trip")
+        ?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+    });
+  };
+  const cash = (v: number) => (Number.isFinite(v) ? money(toPence(v)) : "not set");
+  const hiddenLabels = ACCESS_FILTERS.filter(([id]) => hidden.includes(id)).map(([, label]) => label);
+
   return (
     <div className="planner">
-      <div className="layout">
-        <aside className={"planner-profile" + (profileOpen ? " open" : "")}>
-          <small>01 / PARAMETERS</small>
-          <h2>Your buying profile</h2>
-          <button
-            type="button"
-            className="planner-profile-toggle"
-            aria-expanded={profileOpen}
-            onClick={() => setProfileOpen(!profileOpen)}
-          >
-            {profileOpen ? "Hide profile" : "Edit profile"}
+      <div className="planner-profilebar" aria-label="Your buying profile" role="group">
+        <div className="planner-profilebar-text">
+          <small>Your buying profile</small>
+          <ul className="planner-chips">
+            <li>
+              <b>{profile.area || "No area"}</b>
+            </li>
+            <li>
+              {profile.transport}
+              {profile.transport === "Public transport" &&
+                (profile.fareFree === true ? ", free travel" : fareEntered(profile) ? `, ${cash(profile.fare as number)} fare` : "")}
+            </li>
+            <li>{cash(profile.budget)} to spend</li>
+            <li>{Number.isFinite(profile.carry) ? profile.carry + " kg" : "no"} carry limit</li>
+            <li>Up to {Number.isFinite(profile.quantity) ? plural(profile.quantity, "unit") : "? units"}</li>
+            <li>{cash(profile.target)} an hour target</li>
+            {noFare && <li className="warn">Fare not entered</li>}
+            {hiddenLabels.length > 0 && <li>Hiding: {hiddenLabels.join(", ")}</li>}
+          </ul>
+        </div>
+        <button
+          ref={editRef}
+          type="button"
+          className="planner-edit"
+          aria-expanded={profileOpen}
+          aria-controls="planner-profile"
+          onClick={() => setProfileOpen(true)}
+        >
+          Edit profile
+        </button>
+      </div>
+
+      {profileOpen && <div className="planner-backdrop" onClick={() => setProfileOpen(false)} />}
+      <aside
+        id="planner-profile"
+        ref={drawerRef}
+        className={"planner-profile" + (profileOpen ? " open" : "")}
+        hidden={!profileOpen}
+        tabIndex={-1}
+        aria-label="Edit your buying profile"
+      >
+        <div className="planner-drawer-head">
+          <div>
+            <small>Your buying profile</small>
+            <h2>Edit profile</h2>
+          </div>
+          <button type="button" className="planner-close" onClick={() => setProfileOpen(false)}>
+            Done
           </button>
-          <label>
-            Local area
-            <input value={profile.area ?? ""} onChange={(e) => set({ area: e.target.value })} />
-          </label>
-          <label>
-            Transport
-            <select value={profile.transport} onChange={(e) => set({ transport: e.target.value })}>
-              {MODES.map((m) => (
-                <option key={m}>{m}</option>
-              ))}
-            </select>
-          </label>
+        </div>
+        <p className="muted">Changes apply as you type, and the trips behind this panel update.</p>
+        <label>
+          Local area
+          <input value={profile.area ?? ""} onChange={(e) => set({ area: e.target.value })} />
+        </label>
+        <label>
+          Transport
+          <select value={profile.transport} onChange={(e) => set({ transport: e.target.value })}>
+            {MODES.map((m) => (
+              <option key={m}>{m}</option>
+            ))}
+          </select>
+        </label>
+        <div className="planner-pair">
           <NumberField label="Available cash (£)" value={profile.budget} onChange={(budget) => set({ budget })} />
           <NumberField label="Hourly target (£)" value={profile.target} onChange={(target) => set({ target })} />
-          <NumberField
-            label="Comfortable carry limit (kg)"
-            value={profile.carry}
-            onChange={(carry) => set({ carry })}
-            note={`What you can carry by hand. By car or van the load limit is the larger of this and 25 kg; by public transport, the smaller of this and 10 kg.`}
-          />
+        </div>
+        <NumberField
+          label="Comfortable carry limit (kg)"
+          value={profile.carry}
+          onChange={(carry) => set({ carry })}
+          note={`What you can carry by hand. By car or van the load limit is the larger of this and 25 kg; by public transport, the smaller of this and 10 kg.`}
+        />
+        <div className="planner-pair">
           <NumberField
             label="Maximum units per trip"
             value={profile.quantity}
             step={1}
             min={1}
             onChange={(quantity) => set({ quantity })}
-            note="A first purchase of any item is still a small trial batch."
           />
           <NumberField
             label="Storage at home (units)"
@@ -608,63 +680,66 @@ export default function Planner() {
             step={1}
             onChange={(storage) => set({ storage })}
           />
-          <fieldset>
-            <legend>Travel costs</legend>
-            <OptionalNumberField
-              label="Public transport return fare (£)"
-              value={profile.fare}
-              placeholder="Not entered"
-              disabled={profile.fareFree === true}
-              onChange={(fare) => set({ fare })}
-              note={
-                profile.fareFree === true
-                  ? "Not used: you ticked that your public transport is free."
-                  : "Used when you travel by public transport, and for the public transport comparison when you drive. Leave it empty if you do not know it yet."
-              }
+        </div>
+        <p className="muted">A first purchase of any item is still a small trial batch.</p>
+        <fieldset>
+          <legend>Travel costs</legend>
+          <OptionalNumberField
+            label="Public transport return fare (£)"
+            value={profile.fare}
+            placeholder="Not entered"
+            disabled={profile.fareFree === true}
+            onChange={(fare) => set({ fare })}
+            note={
+              profile.fareFree === true
+                ? "Not used: you ticked that your public transport is free."
+                : "Used when you travel by public transport, and for the public transport comparison when you drive. Leave it empty if you do not know it yet."
+            }
+          />
+          <label className="planner-check">
+            <input
+              type="checkbox"
+              checked={profile.fareFree === true}
+              onChange={(e) => set({ fareFree: e.target.checked })}
             />
-            <label className="planner-check">
-              <input
-                type="checkbox"
-                checked={profile.fareFree === true}
-                onChange={(e) => set({ fareFree: e.target.checked })}
-              />
-              My public transport is free (for example a bus pass)
-            </label>
-            {noFare && (
-              <p className="notice warn" role="status">
-                {profile.fare === 0
-                  ? "A fare of £0 counts only when you tick that your travel is free. "
-                  : "Enter your return fare, or tick the box if your travel is free. "}
-                A blank fare is never counted as free: until then profit per unit, contribution and
-                earnings per hour are not known for any trip, and nothing is shortlisted.
-              </p>
-            )}
-            <NumberField
-              label="Car or van cost per mile (p)"
-              value={profile.perMile}
-              step={1}
-              onChange={(perMile) => set({ perMile })}
-              note="45p is the HMRC mileage rate, covering fuel and wear. Used for car or van trips and the driving comparison."
-            />
-            <NumberField
-              label="Parking or tolls per trip (£)"
-              value={profile.extra}
-              onChange={(extra) => set({ extra })}
-              note="Car or van only."
-            />
-          </fieldset>
-          <fieldset>
-            <legend>Your selling assumptions</legend>
-            <p className="muted">
-              These are your assumptions. The cautious sample defaults are a 13% marketplace fee plus
-              40p per item sold and a 5% returns allowance. Clothing always uses at least 15% for
-              returns. Replace them with your own marketplace's fees.
+            My public transport is free (for example a bus pass)
+          </label>
+          {noFare && (
+            <p className="notice warn" role="status">
+              {profile.fare === 0
+                ? "A fare of £0 counts only when you tick that your travel is free. "
+                : "Enter your return fare, or tick the box if your travel is free. "}
+              A blank fare is never counted as free: until then profit per unit, contribution and
+              earnings per hour are not known for any trip, and nothing is shortlisted.
             </p>
-            <NumberField
-              label="Marketplace fee (% of the sale)"
-              value={asPercent(profile.feeRate)}
-              onChange={(v) => set({ feeRate: v / 100 })}
-            />
+          )}
+          <NumberField
+            label="Car or van cost per mile (p)"
+            value={profile.perMile}
+            step={1}
+            onChange={(perMile) => set({ perMile })}
+            note="45p is the HMRC mileage rate, covering fuel and wear. Used for car or van trips and the driving comparison."
+          />
+          <NumberField
+            label="Parking or tolls per trip (£)"
+            value={profile.extra}
+            onChange={(extra) => set({ extra })}
+            note="Car or van only."
+          />
+        </fieldset>
+        <fieldset>
+          <legend>Your selling assumptions</legend>
+          <p className="muted">
+            These are your assumptions. The cautious sample defaults are a 13% marketplace fee plus
+            40p per item sold and a 5% returns allowance. Clothing always uses at least 15% for
+            returns. Replace them with your own marketplace's fees.
+          </p>
+          <NumberField
+            label="Marketplace fee (% of the sale)"
+            value={asPercent(profile.feeRate)}
+            onChange={(v) => set({ feeRate: v / 100 })}
+          />
+          <div className="planner-pair">
             <NumberField
               label="Fixed fee per item sold (p)"
               value={profile.feeFixed}
@@ -672,116 +747,184 @@ export default function Planner() {
               onChange={(feeFixed) => set({ feeFixed })}
             />
             <NumberField
-              label="Returns allowance (% of the sale)"
+              label="Returns allowance (%)"
               value={asPercent(profile.returnsRate)}
               onChange={(v) => set({ returnsRate: v / 100 })}
             />
-          </fieldset>
-          <fieldset>
-            <legend>Access needs to avoid</legend>
-            <p className="muted">Hide trips with any need you tick.</p>
-            {ACCESS_FILTERS.map(([id, label]) => (
-              <label key={id} className="planner-check">
-                <input
-                  type="checkbox"
-                  checked={hidden.includes(id)}
-                  onChange={(e) =>
-                    setHidden(e.target.checked ? [...hidden, id] : hidden.filter((h) => h !== id))
-                  }
-                />
-                {label}
-              </label>
-            ))}
-          </fieldset>
-        </aside>
-        <section>
-          <small>02 / RANKED OPPORTUNITIES</small>
-          <h2>Local shortlist</h2>
-          <p className="notice">
-            Sample data: illustrative Leeds offers with modelled sale totals. Stock, prices and
-            earnings are simulated, so nothing here is ever a buy alert.
-          </p>
-          {error && <p role="alert">{error}</p>}
-          {result && !all.length && (
-            <p className="warn">
-              {result.rejected.some((r) => r.fareNeeded)
-                ? `Enter your return fare to see whether these trips meet your thresholds: ${result.rejected
-                    .filter((r) => r.fareNeeded)
-                    .map((r) => r.name)
-                    .join(", ")}. Until then nothing is shortlisted. The list of offers not shortlisted says why for each one.`
-                : "No offer is inside your buying thresholds, so nothing is shortlisted. The list of offers not shortlisted says why."}
-            </p>
-          )}
-          {trips.map((t) => (
-            <button
-              key={t.sku}
-              type="button"
-              className={
-                "card" +
-                (t.sku === trip?.sku ? " active" : "") +
-                // Display only: tint the figure by its sign; unknown stays neutral.
-                (t.fareMissing || t.economics.contribution == null
-                  ? ""
-                  : t.economics.contribution > 0
-                    ? " gain"
-                    : " loss")
-              }
-              aria-current={t.sku === trip?.sku ? "true" : undefined}
-              onClick={() => setSelected(t.sku)}
-            >
-              <span>
-                <small>
-                  {t.shop} · {t.miles} mi · {t.area}
-                </small>
-                <b>{t.name}</b>
-                <span className="planner-badges">
-                  <span className="badge sample">Sample</span>
-                  <TierBadge tier={t.opportunity.tier} />
-                  <AccessBadges needs={t.accessNeeds} />
-                </span>
-                <em className={t.fits ? "ok" : "warn"}>
-                  {t.reason}
-                  {t.units ? `: ${plural(t.units, "unit")}` : ""}
-                </em>
-                <em>
-                  Price checked: {checkedText(t.checked.price)}. Stock checked:{" "}
-                  {checkedText(t.checked.stock)}. Main uncertainty: {t.mainUncertainty}.
-                </em>
-                <em>
-                  Time until payment:{" "}
-                  {t.units ? paymentText(t.timing?.payoutDays, t.timing?.payout.date) : "no trip"}
-                </em>
-              </span>
-              <span>
-                <small>Contribution</small>
-                <b>{fareFigure(t.economics.contribution, t.fareMissing)}</b>
-                <small>{perHour(t.economics.hourly, t.fareMissing)}</small>
-              </span>
-            </button>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>Access needs to avoid</legend>
+          <p className="muted">Hide trips with any need you tick.</p>
+          {ACCESS_FILTERS.map(([id, label]) => (
+            <label key={id} className="planner-check">
+              <input
+                type="checkbox"
+                checked={hidden.includes(id)}
+                onChange={(e) =>
+                  setHidden(e.target.checked ? [...hidden, id] : hidden.filter((h) => h !== id))
+                }
+              />
+              {label}
+            </label>
           ))}
-          {hiddenTrips.length > 0 && (
-            <p className="muted">
-              Hidden by your access needs: {hiddenTrips.map((t) => t.name).join(", ")}. Untick a need
-              in the profile to show {hiddenTrips.length === 1 ? "it" : "them"}.
-            </p>
-          )}
-          {result && result.rejected.length > 0 && (
-            <RejectedList rejected={result.rejected} rules={result.rules.effective} />
-          )}
-          {trip && <TripView key={trip.sku} trip={trip} profile={profile} />}
-          {result && <DriveSummary drive={result.drive} />}
-          <BasketsLink />
-          <StricterThresholds
-            rules={rules}
-            info={result?.rules ?? null}
-            onSave={(next) => {
-              saveMemberRules(next);
-              setRules(next);
-            }}
-          />
-        </section>
+        </fieldset>
+        <button type="button" className="planner-done" onClick={() => setProfileOpen(false)}>
+          Show my trips
+        </button>
+      </aside>
+
+      <p className="notice planner-sample">
+        <strong>Sample data.</strong> Illustrative Leeds offers with modelled sale prices. Stock,
+        prices and earnings are simulated, so nothing here is ever a buy alert.
+      </p>
+      {error && <p role="alert" className="notice warn">{error}</p>}
+
+      <div className="planner-head">
+        <h2>Trips that fit</h2>
+        {result && (
+          <span className="muted">
+            {trips.length ? `${plural(trips.length, "trip")} shortlisted, best first` : "None shortlisted yet"}
+            {result.rejected.length ? ` · ${result.rejected.length} not shortlisted` : ""}
+          </span>
+        )}
       </div>
+      {result && !all.length && (
+        <p className="planner-empty">
+          {result.rejected.some((r) => r.fareNeeded)
+            ? `Enter your return fare to see whether these trips meet your thresholds: ${result.rejected
+                .filter((r) => r.fareNeeded)
+                .map((r) => r.name)
+                .join(", ")}. Until then nothing is shortlisted. The list of offers not shortlisted says why for each one.`
+            : "No offer is inside your buying thresholds, so nothing is shortlisted. The list of offers not shortlisted says why."}
+        </p>
+      )}
+      <div className="planner-grid">
+        {trips.map((t) => (
+          <TripCard key={t.sku} trip={t} active={t.sku === trip?.sku} onChoose={() => choose(t.sku)} />
+        ))}
+      </div>
+      {hiddenTrips.length > 0 && (
+        <p className="muted">
+          Hidden by your access needs: {hiddenTrips.map((t) => t.name).join(", ")}. Untick a need in
+          the profile to show {hiddenTrips.length === 1 ? "it" : "them"}.
+        </p>
+      )}
+      {trip && <TripView key={trip.sku} trip={trip} profile={profile} />}
+      {result && result.rejected.length > 0 && (
+        <RejectedList rejected={result.rejected} rules={result.rules.effective} />
+      )}
+      <div className="planner-more">
+        {result && <DriveSummary drive={result.drive} />}
+        <BasketsLink />
+      </div>
+      <StricterThresholds
+        rules={rules}
+        info={result?.rules ?? null}
+        onSave={(next) => {
+          saveMemberRules(next);
+          setRules(next);
+        }}
+      />
     </div>
+  );
+}
+
+// Display only: a simple drawing of each sample item, so a card reads at a
+// glance. Unknown items fall back to a drawing for their category.
+const ITEM_ART: Record<string, { bg: string; d: string[] }> = {
+  knit: { bg: "#dde7f4", d: ["M17 10l-9 5 3 9 5-2v18h16V22l5 2 3-9-9-5c-1 3-4 5-7 5s-6-2-7-5z"] },
+  baby: {
+    bg: "#f4e3ea",
+    d: ["M18 8h12l3 6 6 3-2 7-5-1v8l-3 9h-4l-1-6-1 6h-4l-3-9v-8l-5 1-2-7 6-3z", "M21 8c0 2 1.3 3 3 3s3-1 3-3"],
+  },
+  pot: { bg: "#f6e2d3", d: ["M11 16h26l-3 22a3 3 0 0 1-3 2H17a3 3 0 0 1-3-2z", "M9 11h30v5H9z", "M24 11c0-4 3-6 6-6"] },
+  jacket: {
+    bg: "#f6e8c6",
+    d: ["M17 8l-9 6 2 11 5-1v17h18V24l5 1 2-11-9-6-3 4h-8z", "M24 12v29M20 25h1M27 25h1"],
+  },
+  bottle: { bg: "#dbe7f6", d: ["M20 6h8v5l3 4v25a3 3 0 0 1-3 3h-8a3 3 0 0 1-3-3V15l3-4z", "M17 22h14"] },
+  clothing: { bg: "#e3e8f2", d: ["M17 10l-9 5 3 9 5-2v18h16V22l5 2 3-9-9-5c-1 3-4 5-7 5s-6-2-7-5z"] },
+  general: { bg: "#e6e9ee", d: ["M8 16l16-8 16 8v18l-16 8-16-8z", "M8 16l16 8 16-8M24 24v18"] },
+};
+export function ItemTile({ sku, category }: { sku: string; category?: string }) {
+  const art = ITEM_ART[sku] ?? ITEM_ART[category ?? ""] ?? ITEM_ART.general;
+  return (
+    <span className="planner-tile" style={{ background: art.bg }} aria-hidden="true">
+      <svg viewBox="0 0 48 48" fill="#fff" stroke="#10233a" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round">
+        {art.d.map((d) => (
+          <path key={d} d={d} />
+        ))}
+      </svg>
+    </span>
+  );
+}
+
+/** A shortlisted trip as a card: the money first, then the item, then its prices. */
+function TripCard({ trip: t, active, onChoose }: { trip: Trip; active: boolean; onChoose: () => void }) {
+  const e = t.economics;
+  // Display only: tint the money band by its sign; unknown stays neutral.
+  const tone = t.fareMissing || e.contribution == null ? " none" : e.contribution > 0 ? " gain" : " loss";
+  return (
+    <button
+      type="button"
+      className={"planner-trip" + tone + (active ? " active" : "")}
+      aria-current={active ? "true" : undefined}
+      onClick={onChoose}
+    >
+      <span className="planner-band">
+        <span>
+          <small>Estimated profit, this trip</small>
+          <b>{t.fareMissing && e.contribution == null ? "Fare needed" : pounds(e.contribution)}</b>
+          <span className="planner-band-sub">
+            {t.fareMissing && e.unitContribution == null
+              ? "Enter your fare to see it"
+              : `${pounds(e.unitContribution)} a unit · ${perHour(e.hourly, t.fareMissing)}`}
+          </span>
+        </span>
+        <TierBadge tier={t.opportunity.tier} />
+      </span>
+      <span className="planner-trip-body">
+        <span className="planner-item">
+          <ItemTile sku={t.sku} category={t.category} />
+          <span>
+            <b className="planner-name">{t.name}</b>
+            <em>{t.variant}</em>
+            <em>
+              {t.shop} · {t.miles} mi · {t.area}
+            </em>
+          </span>
+        </span>
+        <span className="planner-prices">
+          <span>
+            <span className="badge ev-retail">Shop price</span>
+            <b className="p-retail">{money(t.buy)}</b>
+          </span>
+          <span>
+            <span className="badge ev-estimate">Sale estimate</span>
+            <b className="p-estimate">{pounds(t.salePrice)}</b>
+          </span>
+          <span>
+            <span className="badge ev-asking">Others listed</span>
+            <b>{t.competingListings ?? "not known"}</b>
+          </span>
+        </span>
+        <span className={"planner-fit " + (t.fits ? "ok" : "warn")}>
+          {t.reason}
+          {t.units ? `: ${plural(t.units, "unit")}` : ""}
+          {t.units && e.cashRequired != null ? `, ${money(e.cashRequired)} to spend` : ""}
+        </span>
+        <span className="planner-badges">
+          <span className="badge sample">Sample</span>
+          <AccessBadges needs={t.accessNeeds} />
+        </span>
+        <em>
+          Time until payment:{" "}
+          {t.units ? paymentText(t.timing?.payoutDays, t.timing?.payout.date) : "no trip"}. Price
+          checked: {checkedText(t.checked.price)}, stock checked: {checkedText(t.checked.stock)}.
+        </em>
+      </span>
+    </button>
   );
 }
 
@@ -793,12 +936,15 @@ export function thresholdsSentence(rules: Record<RuleKey, number>) {
 function RejectedList({ rejected, rules }: { rejected: Rejected[]; rules: Record<RuleKey, number> }) {
   const waiting = rejected.filter((r) => r.fareNeeded).length;
   return (
-    <details className="planner-rejected">
-      <summary>
-        {waiting
-          ? `Not shortlisted: ${plural(rejected.length, "offer")}, ${waiting} waiting for your fare`
-          : `Not shortlisted: ${plural(rejected.length, "offer")} outside your buying thresholds`}
-      </summary>
+    <section className="planner-rejected">
+      <div className="planner-head">
+        <h2>Not shortlisted</h2>
+        <span className="muted">
+          {waiting
+            ? `${plural(rejected.length, "offer")}, ${waiting} waiting for your fare`
+            : `${plural(rejected.length, "offer")} outside your buying thresholds`}
+        </span>
+      </div>
       <p className="muted">
         An offer is shortlisted only when it is inside every buying threshold that applies to you:{" "}
         {thresholdsSentence(rules)}.
@@ -806,18 +952,44 @@ function RejectedList({ rejected, rules }: { rejected: Rejected[]; rules: Record
           ? " By public transport your fare is part of each unit's share of travel, so whether an offer meets these is not known until you enter your return fare (or tick that your travel is free)."
           : ""}
       </p>
-      <ul>
+      <ul className="planner-rejected-grid">
         {rejected.map((r) => (
           <li key={r.sku}>
-            <b>{r.name}</b> at {r.shop} ({money(r.buy)}, {r.weight} kg): {r.reasons.join("; ")}.{" "}
-            <span className="planner-badges">
-              <span className="badge sample">Sample</span>
-              <AccessBadges needs={r.accessNeeds} />
-            </span>
+            <div className={"planner-band small" + (r.fareNeeded ? " none" : " rej")}>
+              <span>
+                <small>{r.fareNeeded ? "Waiting for your fare" : "Why not"}</small>
+                <span className="planner-reason">{r.reasons.join("; ")}.</span>
+              </span>
+            </div>
+            <div className="planner-trip-body">
+              <span className="planner-item">
+                <ItemTile sku={r.sku} />
+                <span>
+                  <b className="planner-name">{r.name}</b>
+                  <em>
+                    {r.shop} · {r.miles} mi · {r.weight} kg
+                  </em>
+                </span>
+              </span>
+              <span className="planner-prices two">
+                <span>
+                  <span className="badge ev-retail">Shop price</span>
+                  <b className="p-retail">{money(r.buy)}</b>
+                </span>
+                <span>
+                  <span className="badge">Profit a unit</span>
+                  <b>{r.fareNeeded && r.unitProfit === null ? "needs fare" : pounds(r.unitProfit)}</b>
+                </span>
+              </span>
+              <span className="planner-badges">
+                <span className="badge sample">Sample</span>
+                <AccessBadges needs={r.accessNeeds} />
+              </span>
+            </div>
           </li>
         ))}
       </ul>
-    </details>
+    </section>
   );
 }
 
@@ -841,6 +1013,10 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile })
   const fig = (pence: number | null | undefined) => fareFigure(pence, t.fareMissing);
   const [ledger, setLedger] = useState({ busy: false, notice: "" });
   const failing = t.alert.checks.filter((c) => !c.ok).length;
+  // Display only: short forms for the headline figures; the fare notice below explains a gap.
+  const short = (pence: number | null | undefined) =>
+    t.fareMissing && (pence === null || pence === undefined) ? "Fare needed" : pounds(pence);
+  const kpiTone = t.fareMissing || e.contribution === null ? "" : e.contribution > 0 ? " gain" : " loss";
 
   async function track() {
     setLedger({ busy: true, notice: "" });
@@ -873,17 +1049,73 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile })
   }
 
   return (
-    <article>
-      <small>03 / TRIP CALCULATION</small>
-      <h2>{t.name}</h2>
-      <p className="planner-badges">
-        <span className="badge sample">Sample</span>
-        <TierBadge tier={t.opportunity.tier} />
-        <span className={t.fits ? "badge ok" : "badge warn"}>{t.reason}</span>
-        <AccessBadges needs={t.accessNeeds} />
-      </p>
+    <article id="planner-trip" className="planner-detail">
+      <div className="planner-detail-head">
+        <ItemTile sku={t.sku} category={t.category} />
+        <div>
+          <small>Trip details</small>
+          <h2>{t.name}</h2>
+          <p className="planner-detail-sub">
+            {t.variant} at {t.shop}, {t.miles} miles from the centre of {t.area}.
+          </p>
+          <p className="planner-badges">
+            <span className="badge sample">Sample</span>
+            <TierBadge tier={t.opportunity.tier} />
+            <span className={t.fits ? "badge ok" : "badge warn"}>{t.reason}</span>
+            <AccessBadges needs={t.accessNeeds} />
+          </p>
+        </div>
+      </div>
+      <div className="planner-kpis">
+        <div className={"planner-kpi" + kpiTone}>
+          <small>Contribution</small>
+          <b>{short(e.contribution)}</b>
+          <span>if every unit sells</span>
+        </div>
+        <div className="planner-kpi">
+          <small>Cash needed before payout</small>
+          <b>{short(e.cashRequired)}</b>
+          <span>
+            {plural(t.units, "unit")}, {t.weightKg} kg
+          </span>
+        </div>
+        <div className="planner-kpi">
+          <small>Earnings an hour</small>
+          <b>{t.fareMissing && e.hourly === null ? "Fare needed" : e.hourly === null ? "no trip" : money(e.hourly)}</b>
+          <span>{hours(e.activeMinutes)} of your time</span>
+        </div>
+        <div className="planner-kpi">
+          <small>Time until payment</small>
+          <b>
+            {!t.units
+              ? "no trip"
+              : t.timing?.payoutDays == null || !t.timing.payout.date
+                ? "not known"
+                : plural(t.timing.payoutDays, "day")}
+          </b>
+          <span>
+            {t.units && t.timing?.payout.date ? "payout " + dateTime(t.timing.payout.date) : "no payout date yet"}
+          </span>
+        </div>
+      </div>
+      <div className="planner-prices wide">
+        <span>
+          <span className="badge ev-retail">Shop price</span>
+          <b className="p-retail">{money(t.buy)}</b>
+          <em>per unit, on the shelf</em>
+        </span>
+        <span>
+          <span className="badge ev-estimate">Sale estimate</span>
+          <b className="p-estimate">{pounds(t.salePrice)}</b>
+          <em>modelled, not a completed sale</em>
+        </span>
+        <span>
+          <span className="badge">Break-even sale</span>
+          <b>{short(e.breakEvenSale)}</b>
+          <em>lowest sale price that covers every cost</em>
+        </span>
+      </div>
       <p>
-        {t.variant} at {t.shop}, {t.miles} miles from the centre of {t.area}.{" "}
         {t.units
           ? `${plural(t.units, "unit")} (${t.weightKg} kg), limited by ${limitText(t)}. Return journey ${byMode(t.journey.mode)}: ${t.journey.miles} miles, ${t.journey.minutes} minutes.`
           : `No units fit: limited by ${limitText(t)}.`}
@@ -1000,13 +1232,18 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile })
         <strong>Sample data: never a buy alert.</strong> {failing} of {t.alert.checks.length}{" "}
         checks fail.
       </p>
-      <ul className="checks">
-        {t.alert.checks.map((c) => (
-          <li key={c.id} className={c.ok ? "pass" : ""}>
-            {c.detail}
-          </li>
-        ))}
-      </ul>
+      <details className="planner-checks">
+        <summary>
+          See all {t.alert.checks.length} checks ({t.alert.checks.length - failing} pass)
+        </summary>
+        <ul className="checks">
+          {t.alert.checks.map((c) => (
+            <li key={c.id} className={c.ok ? "pass" : ""}>
+              {c.detail}
+            </li>
+          ))}
+        </ul>
+      </details>
 
       <DriveComparison compare={t.compare} />
 
@@ -1142,8 +1379,8 @@ function DriveSummary({ drive }: { drive: Drive }) {
     `${o.name} at ${o.shop}: ${plural(o.units, "unit")}, ${o.loadKg} kg, ${pounds(o.contribution)}, ${perHour(o.hourly)}`;
   const waiting = drive.fareNeeded ?? [];
   return (
-    <article>
-      <small>WHAT CHANGES IF I {drive.alternative === "Car" ? "DRIVE" : "TAKE PUBLIC TRANSPORT"}?</small>
+    <article className="planner-card">
+      <small>What changes if I {drive.alternative === "Car" ? "drive" : "take public transport"}?</small>
       <h2>
         {drive.alternative === "Car" ? "Extra opportunities by car" : "Opportunities by public transport"}
       </h2>
@@ -1198,12 +1435,12 @@ function DriveSummary({ drive }: { drive: Drive }) {
 function BasketsLink() {
   const [asked, setAsked] = useState(false);
   return (
-    <article>
-      <small>04 / SEVERAL ITEMS, ONE TRIP</small>
+    <article className="planner-card">
+      <small>Several items, one trip</small>
       <h2>One shopping trip, one cash limit</h2>
       <p>
         Each trip above buys one item. To buy several items on one trip, sharing one journey and one
-        cash limit for the whole basket, use the basket plan in the Goals tab.
+        cash limit for the whole basket, use the basket plan in Goals.
       </p>
       <button
         type="button"
@@ -1217,8 +1454,8 @@ function BasketsLink() {
       </button>
       <p className="muted">
         {asked
-          ? "If the page has not switched, select Goals in the tabs above."
-          : "You can also select Goals in the tabs above."}
+          ? "If the page has not switched, choose Goals in the menu."
+          : "You can also choose Goals in the menu."}
       </p>
     </article>
   );
@@ -1259,8 +1496,8 @@ function StricterThresholds({
   }
 
   return (
-    <article>
-      <small>05 / YOUR THRESHOLDS</small>
+    <article className="planner-card planner-thresholds">
+      <small>Your thresholds</small>
       <h2>Your stricter thresholds</h2>
       <p>
         The agreed buying thresholds apply to everyone. You can make them stricter for yourself, for
