@@ -1,0 +1,66 @@
+/* Sources tab. Shared utilities live in style.css. */
+.sources code {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.source-row {
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) minmax(260px, 1.4fr);
+  gap: 8px 24px;
+  padding: 14px 0;
+  border-bottom: 1px solid #dce0d6;
+}
+.source-badges {
+  margin-top: 6px;
+}
+.source-badges .badge {
+  margin-bottom: 4px;
+}
+.source-facts {
+  grid-template-columns: max-content 1fr;
+  column-gap: 12px;
+  margin: 0;
+  font-size: 14px;
+}
+.source-facts dt {
+  text-transform: none;
+  color: #5f7268;
+}
+.source-facts dd {
+  overflow-wrap: anywhere;
+}
+.permission-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0 14px;
+  align-items: end;
+}
+.permission-form button {
+  margin: 12px 0;
+}
+.observation {
+  flex-wrap: wrap;
+}
+.observation > span:first-child {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.observation-price {
+  text-align: right;
+}
+.observation-price small .badge {
+  margin-right: 6px;
+}
+.pager {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+@media (max-width: 740px) {
+  .source-row {
+    grid-template-columns: 1fr;
+  }
+  .observation-price {
+    text-align: left;
+  }
+}

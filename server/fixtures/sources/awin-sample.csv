@@ -1,0 +1,5 @@
+aw_product_id,product_name,currency,search_price,ean,product_GTIN,merchant_name,merchant_deep_link,aw_deep_link,last_updated,condition,in_stock,stock_quantity,delivery_cost,Fashion:size,colour,model_number,mpn,promotional_text
+1001,"Cotton crew-neck jumper, navy",GBP,12.00,5012345678900,,Example Outfitters,https://merchant.example/jumper,https://www.awin1.com/pclick.php?p=1001,2026-10-30 14:05:00,New,1,6,3.99,M,Navy,CJ-200,,
+2002,Steel kettle 1.7 litre,GBP,24.50,,4006381333931,Example Homeware,,https://www.awin1.com/pclick.php?p=2002,2026-10-29,new,yes,0,0.00,,,,KX-1,
+3003,Stoneware mug,GBP,3.25,5012345678901,,Example Homeware,https://merchant.example/mug,,not a date,,,,,,,,,2 for £10 with loyalty card
+4004,Euro jumper,EUR,10.00,5012345678900,,Example EU,https://merchant.example/eu,,2026-10-30,new,1,3,0,M,Navy,CJ-200,,

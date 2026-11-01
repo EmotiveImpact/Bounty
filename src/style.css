@@ -53,6 +53,7 @@ p {
 }
 nav {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   margin: 28px 0;
 }
@@ -188,4 +189,108 @@ a {
   nav button {
     padding: 7px 10px;
   }
+}
+
+/* Shared utilities. Components may add their own stylesheet for anything
+   specific; keep these generic. */
+.muted {
+  color: #5f7268;
+  font-size: 13px;
+}
+.stack > * + * {
+  margin-top: 12px;
+}
+.grid2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+}
+.badge {
+  display: inline-block;
+  font: 600 11px/1.6 monospace;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-radius: 4px;
+  padding: 1px 6px;
+  background: #e3e8de;
+  color: #29453a;
+  margin-right: 6px;
+}
+.badge.sample {
+  background: #f1efce;
+  color: #5b4f10;
+}
+.badge.sponsored {
+  background: #fde3c8;
+  color: #7a3b00;
+}
+.badge.ok {
+  background: #d9efdc;
+  color: #1d5a2e;
+}
+.badge.warn {
+  background: #f8dcd6;
+  color: #8a2716;
+}
+.badge.paid {
+  background: #e4ddf3;
+  color: #45307a;
+}
+.ok {
+  color: #1d5a2e;
+}
+.warn {
+  color: #8a2716;
+}
+.checks {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0;
+}
+.checks li {
+  padding: 3px 0;
+  font-size: 14px;
+}
+.checks li::before {
+  content: "✕ ";
+  color: #8a2716;
+  font-weight: 700;
+}
+.checks li.pass::before {
+  content: "✓ ";
+  color: #1d5a2e;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+th,
+td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid #dce0d6;
+  vertical-align: top;
+}
+td.num,
+th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.scroll {
+  overflow-x: auto;
+}
+fieldset {
+  border: 1px solid #c7d0c4;
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 12px 0;
+}
+legend {
+  font-size: 13px;
+  font-weight: 600;
+}
+[role="alert"],
+.error {
+  color: #8a2716;
 }

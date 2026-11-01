@@ -1,0 +1,67 @@
+{
+  "href": "https://api.ebay.com/buy/browse/v1/item_summary/search?gtin=5000112637922&limit=200",
+  "total": 5,
+  "limit": 200,
+  "offset": 0,
+  "itemSummaries": [
+    {
+      "itemId": "v1|111|0",
+      "title": "Cotton crew-neck jumper navy M",
+      "price": { "value": "12.99", "currency": "GBP" },
+      "condition": "New",
+      "conditionId": "1000",
+      "seller": { "username": "jumper_seller", "feedbackPercentage": "99.5", "feedbackScore": 1200 },
+      "shippingOptions": [
+        { "shippingCostType": "FIXED", "shippingCost": { "value": "3.20", "currency": "GBP" } },
+        { "shippingCostType": "FIXED", "shippingCost": { "value": "1.55", "currency": "GBP" } }
+      ],
+      "buyingOptions": ["FIXED_PRICE"],
+      "itemCreationDate": "2026-10-20T09:15:00.000Z",
+      "itemWebUrl": "https://www.ebay.co.uk/itm/111",
+      "itemLocation": { "postalCode": "LS1****", "country": "GB" }
+    },
+    {
+      "itemId": "v1|112|0",
+      "title": "Jumper navy medium",
+      "price": { "value": "9.50", "currency": "GBP" },
+      "condition": "Used",
+      "seller": { "username": "second_seller" },
+      "buyingOptions": ["FIXED_PRICE", "BEST_OFFER"],
+      "itemCreationDate": "2026-10-18T10:00:00.000Z",
+      "itemWebUrl": "https://www.ebay.co.uk/itm/112"
+    },
+    {
+      "itemId": "v1|113|0",
+      "title": "Jumper auction",
+      "price": { "value": "1.00", "currency": "GBP" },
+      "condition": "New",
+      "seller": { "username": "auction_seller" },
+      "buyingOptions": ["AUCTION"],
+      "itemCreationDate": "2026-10-25T10:00:00.000Z",
+      "itemWebUrl": "https://www.ebay.co.uk/itm/113"
+    },
+    {
+      "itemId": "v1|114|0",
+      "title": "Jumper priced in dollars",
+      "price": { "value": "14.00", "currency": "USD" },
+      "condition": "New",
+      "seller": { "username": "us_seller" },
+      "buyingOptions": ["FIXED_PRICE"],
+      "itemWebUrl": "https://www.ebay.co.uk/itm/114"
+    },
+    {
+      "itemId": "v1|115|0",
+      "title": "Jumper free postage",
+      "price": { "value": "14.00", "currency": "GBP" },
+      "condition": "New with tags",
+      "seller": { "username": "third_seller" },
+      "shippingOptions": [
+        { "shippingCostType": "CALCULATED" },
+        { "shippingCostType": "FIXED", "shippingCost": { "value": "0.00", "currency": "GBP" } }
+      ],
+      "buyingOptions": ["FIXED_PRICE"],
+      "itemCreationDate": "2026-10-10T10:00:00.000Z",
+      "itemWebUrl": "https://www.ebay.co.uk/itm/115"
+    }
+  ]
+}
