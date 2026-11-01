@@ -1,0 +1,296 @@
+:root {
+  font:
+    16px/1.5 system-ui,
+    sans-serif;
+  color: #19372f;
+  background: #f0f2eb;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+header {
+  background: #163b31;
+  color: #f6f7ea;
+  padding: 16px max(5vw, 20px);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+header strong {
+  font:
+    bold 30px Georgia,
+    serif;
+}
+header span,
+small {
+  font: 600 11px/1.6 monospace;
+  letter-spacing: 0.08em;
+}
+main {
+  max-width: 1160px;
+  margin: auto;
+  padding: 42px 24px;
+}
+h1,
+h2 {
+  font-family: Georgia, serif;
+  font-weight: normal;
+  line-height: 1.12;
+}
+h1 {
+  font-size: clamp(42px, 6vw, 68px);
+  margin: 12px 0;
+}
+h2 {
+  font-size: 27px;
+  margin: 10px 0 20px;
+}
+p {
+  color: #4b6056;
+}
+nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 28px 0;
+}
+button,
+input,
+select {
+  font: inherit;
+}
+button {
+  cursor: pointer;
+  background: white;
+  color: inherit;
+  border: 1px solid #abb9af;
+  border-radius: 6px;
+  padding: 8px 16px;
+}
+button[aria-pressed="true"],
+form button {
+  background: #1d4939;
+  color: white;
+}
+.layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) 1fr;
+  gap: 24px;
+}
+aside,
+section,
+article {
+  background: #fffef9;
+  border: 1px solid #c7d0c4;
+  border-radius: 12px;
+  padding: 22px;
+  align-self: start;
+}
+article {
+  margin-top: 22px;
+  background: #f7f8ef;
+}
+label {
+  display: grid;
+  font-size: 13px;
+  gap: 4px;
+  margin: 12px 0;
+}
+input,
+select {
+  padding: 8px;
+  border: 1px solid #b9c6b8;
+  border-radius: 4px;
+  min-width: 0;
+}
+.notice {
+  background: #f1efce;
+  padding: 10px;
+  font-size: 14px;
+}
+.card,
+.row {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  text-align: left;
+  margin: 8px 0;
+  padding: 12px;
+  gap: 10px;
+}
+.card.active {
+  border: 2px solid #34714f;
+  background: #f0f6e9;
+}
+.card span:last-child {
+  text-align: right;
+}
+small,
+b,
+em {
+  display: block;
+}
+em {
+  font: 12px system-ui;
+  color: #4c6654;
+}
+dl {
+  display: grid;
+  grid-template-columns: 1fr auto;
+}
+dt,
+dd {
+  margin: 0;
+  padding: 5px 0;
+  border-bottom: 1px solid #dce0d6;
+}
+dt {
+  text-transform: capitalize;
+}
+dd {
+  font-variant-numeric: tabular-nums;
+}
+details {
+  margin: 16px 0;
+}
+summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+a {
+  color: #245c43;
+}
+.row {
+  border-bottom: 1px solid #dce0d6;
+}
+@media (max-width: 740px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+  main {
+    padding: 24px 14px;
+  }
+  aside {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 12px;
+  }
+  aside h2,
+  aside small {
+    grid-column: 1/-1;
+  }
+  label {
+    margin: 4px 0;
+  }
+  nav button {
+    padding: 7px 10px;
+  }
+}
+
+/* Shared utilities. Components may add their own stylesheet for anything
+   specific; keep these generic. */
+.muted {
+  color: #5f7268;
+  font-size: 13px;
+}
+.stack > * + * {
+  margin-top: 12px;
+}
+.grid2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+}
+.badge {
+  display: inline-block;
+  font: 600 11px/1.6 monospace;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-radius: 4px;
+  padding: 1px 6px;
+  background: #e3e8de;
+  color: #29453a;
+  margin-right: 6px;
+}
+.badge.sample {
+  background: #f1efce;
+  color: #5b4f10;
+}
+.badge.sponsored {
+  background: #fde3c8;
+  color: #7a3b00;
+}
+.badge.ok {
+  background: #d9efdc;
+  color: #1d5a2e;
+}
+.badge.warn {
+  background: #f8dcd6;
+  color: #8a2716;
+}
+.badge.paid {
+  background: #e4ddf3;
+  color: #45307a;
+}
+.ok {
+  color: #1d5a2e;
+}
+.warn {
+  color: #8a2716;
+}
+.checks {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0;
+}
+.checks li {
+  padding: 3px 0;
+  font-size: 14px;
+}
+.checks li::before {
+  content: "✕ ";
+  color: #8a2716;
+  font-weight: 700;
+}
+.checks li.pass::before {
+  content: "✓ ";
+  color: #1d5a2e;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+th,
+td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid #dce0d6;
+  vertical-align: top;
+}
+td.num,
+th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.scroll {
+  overflow-x: auto;
+}
+fieldset {
+  border: 1px solid #c7d0c4;
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 12px 0;
+}
+legend {
+  font-size: 13px;
+  font-weight: 600;
+}
+[role="alert"],
+.error {
+  color: #8a2716;
+}

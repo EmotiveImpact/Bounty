@@ -1,0 +1,384 @@
+/* Bounties tab. Shared utilities live in style.css. */
+/* Notes use the body font; the shared small style is for labels. */
+.bounties small.muted {
+  font: 13px/1.5 system-ui, sans-serif;
+  letter-spacing: 0;
+  margin-top: 4px;
+}
+.bounties h3 {
+  font-family: Georgia, serif;
+  font-weight: normal;
+  font-size: 21px;
+  margin: 0 0 8px;
+}
+.terms-box {
+  display: grid;
+  gap: 4px;
+  border-left: 4px solid #1d4939;
+  padding: 8px 12px;
+  margin: 12px 0;
+  font-size: 14px;
+}
+.badge.earned {
+  background: #d6ecef;
+  color: #134a55;
+}
+.badge.paid.lapsed {
+  background: #ecebf0;
+  color: #5c5770;
+}
+.member-badges .badge {
+  margin-bottom: 4px;
+}
+.acting {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px 12px;
+  margin: 16px 0;
+}
+.acting label {
+  flex: 1 1 260px;
+  margin: 0;
+}
+.member-area article {
+  margin-top: 0;
+}
+.member-form,
+.create-bounty {
+  max-width: 720px;
+}
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0 14px;
+}
+label.inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.facts {
+  grid-template-columns: max-content 1fr;
+  column-gap: 14px;
+  font-size: 14px;
+  margin: 8px 0;
+}
+.facts dt {
+  text-transform: none;
+  color: #5f7268;
+}
+.facts dd {
+  overflow-wrap: anywhere;
+}
+.bounty.closed {
+  opacity: 0.75;
+}
+.bounty-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px 12px;
+}
+.bounty-head .badge {
+  margin-bottom: 4px;
+}
+.bounty .terms {
+  font-size: 13px;
+  margin: 4px 0 8px;
+}
+.cap-notes {
+  margin: 0 0 8px;
+  padding-left: 18px;
+}
+.pressure {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+.pressure > div {
+  border: 1px solid #c7d0c4;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #fffef9;
+}
+.pressure b {
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+.opportunity ul {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+.actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.actions input {
+  width: 72px;
+}
+.actions button,
+.bounty td button {
+  padding: 4px 10px;
+}
+.claim-panel,
+.operator {
+  border-top: 1px solid #dce0d6;
+  margin-top: 12px;
+  padding-top: 8px;
+}
+.claim-panel .row {
+  flex-wrap: wrap;
+}
+.report-form fieldset {
+  max-width: 560px;
+}
+.dispatch {
+  margin-top: 8px;
+}
+.dispatch ul.muted {
+  padding-left: 18px;
+}
+.alert-list {
+  list-style: none;
+  padding: 0;
+}
+.alert-list li {
+  padding: 6px 0;
+  border-bottom: 1px solid #dce0d6;
+}
+.alert-list .badge {
+  margin-left: 6px;
+}
+/* "Don't make the trip" lines and notices. */
+.stop {
+  display: block;
+  border-left: 4px solid #8a2716;
+  background: #f8dcd6;
+  color: #6e1d10;
+  padding: 8px 12px;
+  margin: 8px 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.stop-notices {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0;
+}
+.stop-notices li {
+  border-left: 4px solid #8a2716;
+  background: #fbeae6;
+  padding: 6px 10px;
+  margin: 4px 0;
+}
+.stop-notices b {
+  font-size: 14px;
+  color: #6e1d10;
+}
+.alert-list .stop {
+  margin: 6px 0;
+}
+/* "Your claim stands": why a holder among the first claims may still go.
+   The same green as a reopen notice (#1d4939 on #e3f0e4). */
+.go-note {
+  display: block;
+  border-left: 4px solid #1d4939;
+  background: #e3f0e4;
+  color: #1d4939;
+  padding: 8px 12px;
+  margin: 8px 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.alert-list .go-note {
+  margin: 6px 0;
+}
+/* The pilot audit line while it is a caution (not validated, or not yet
+   signed off). */
+.prevalidation {
+  border-left: 4px solid #8a6d10;
+}
+/* After a sign-off that stands, the same line is a plain result: neutral,
+   neither a caution nor a go (#19372f on #eceee8). */
+.validation-result {
+  border-left: 4px solid #8d9a92;
+  background: #eceee8;
+  padding: 8px 12px;
+  margin: 8px 0;
+  font-size: 14px;
+}
+.claim-form {
+  display: grid;
+  gap: 4px;
+  max-width: 560px;
+}
+.claim-form button {
+  justify-self: start;
+}
+.promotion {
+  border: 1px solid #c7d0c4;
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+/* Stock reports: one card per report, so the operator's verify buttons are
+   always on screen, including at phone width. */
+.reports {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0;
+}
+.report {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(0, 2fr) auto;
+  gap: 4px 12px;
+  align-items: start;
+  border-bottom: 1px solid #dce0d6;
+  padding: 6px 0;
+  font-size: 14px;
+}
+.report-main {
+  display: grid;
+  gap: 2px;
+}
+.report-main b {
+  font-size: 14px;
+}
+.report-note {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 640px) {
+  .report {
+    grid-template-columns: 1fr;
+  }
+  .report-verify .actions button {
+    min-height: 40px;
+    padding: 6px 14px;
+  }
+}
+@media (max-width: 740px) {
+  .facts {
+    grid-template-columns: 1fr;
+  }
+  .facts dt {
+    border-bottom: 0;
+    padding-bottom: 0;
+  }
+}
+/* Round two: access needs, reopen notices, figures, eligibility. */
+.bounties .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.access-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  margin: 2px 0 6px;
+}
+.access-needs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.badge.access {
+  background: #f1e6c8;
+  color: #5b4510;
+}
+.badge.access.open {
+  background: #dcebd9;
+  color: #1d4939;
+}
+.stop-notices li.reopen {
+  border-left-color: #1d4939;
+  background: #e3f0e4;
+}
+.stop-notices li.reopen b {
+  color: #1d4939;
+}
+.category-warning {
+  border-left: 4px solid #8a6d10;
+}
+.match-notes {
+  margin: 0;
+  padding-left: 18px;
+}
+.figures-label {
+  font-size: 13px;
+  margin: 4px 0;
+}
+.eligibility {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #c7d0c4;
+  border-left: 4px solid #8a6d10;
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 8px 0;
+  max-width: 640px;
+}
+.eligibility p {
+  margin: 0;
+}
+.eligibility .actions button {
+  white-space: normal;
+  text-align: left;
+}
+.own-figures {
+  display: grid;
+  gap: 2px;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 14px;
+}
+.own-figures.ok {
+  background: #e3f0e4;
+}
+.own-figures.warn {
+  background: #fbeae6;
+}
+.alert-list li > small.muted {
+  display: block;
+}
+/* Round three. Muted text inside the red and green notices is darker than
+   the shared muted colour, so it keeps at least 4.5:1 contrast there
+   (#4f6158: 5.7:1 on #fbeae6, 5.6:1 on #e3f0e4, 5.1:1 on #f8dcd6). */
+.stop-notices .muted,
+.own-figures .muted,
+.stop .muted,
+.eligibility.declined .muted {
+  color: #4f6158;
+}
+.own-figures .checks {
+  margin: 4px 0;
+}
+/* "This bounty is not for you", with the small undo link. */
+.eligibility.declined {
+  border-left-color: #5f7268;
+}
+.link-button {
+  justify-self: start;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: #1d4939;
+  font: inherit;
+  font-size: 13px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.link-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.alert-list li.declined > b {
+  font-weight: 600;
+}

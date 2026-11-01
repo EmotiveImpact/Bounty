@@ -1,0 +1,334 @@
+/* Research desk, trip estimate and validation audit. Shared utilities live in
+   style.css; only layout specific to these views is here. */
+/* The tab is a stack of articles; the outer section adds no frame. */
+.research {
+  background: none;
+  border: 0;
+  padding: 0;
+}
+.research > article:first-child {
+  margin-top: 0;
+}
+/* An offer card stays readable when chosen (the shared pressed-button style
+   would turn its text white). */
+.research-calculator .card.active {
+  color: inherit;
+}
+.research-calculator .card > span:last-child {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+/* A fieldset's default minimum width is its content, which lets a wide
+   table push the page sideways on a phone. */
+.research fieldset {
+  min-width: 0;
+}
+.research-calculator .offer-list {
+  max-height: 460px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.research-calculator .card b,
+.research-calculator .card em {
+  overflow-wrap: anywhere;
+}
+.badges {
+  display: block;
+  margin: 4px 0;
+}
+.offer-summary {
+  border: 1px solid #c7d0c4;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 12px 0;
+  background: #fffef9;
+}
+.offer-summary dl,
+.result dl.figures {
+  margin: 8px 0;
+}
+/* Long figures (a value with its note) wrap in their own column instead of
+   squeezing the label to a word per line. */
+.result dl.figures {
+  grid-template-columns: minmax(160px, 1fr) minmax(0, 2fr);
+  column-gap: 12px;
+}
+.offer-summary dt,
+.result dl.figures dt {
+  text-transform: none;
+}
+.offer-summary dd,
+.result dl.figures dd {
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.evidence-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 180px) 1fr auto;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid #dce0d6;
+  align-items: start;
+}
+.evidence-row > div:only-child,
+.audit-items .evidence-row {
+  grid-template-columns: 1fr;
+}
+.evidence-row:has(> div:nth-child(2)):not(:has(> label)) {
+  grid-template-columns: 1fr auto;
+}
+.evidence-row b {
+  overflow-wrap: anywhere;
+}
+.evidence-row .amount {
+  text-align: right;
+}
+.evidence-row.status-exact {
+  border-left: 3px solid #34714f;
+  padding-left: 10px;
+}
+.evidence-row.status-research {
+  border-left: 3px solid #c9b74a;
+  padding-left: 10px;
+}
+.confirm {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 0;
+  font-size: 13px;
+}
+.confirm input {
+  margin-top: 3px;
+  /* Never squeezed by a long wrapped label beside it. */
+  flex: none;
+}
+.reasons {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: #4b6056;
+}
+.result {
+  margin: 16px 0;
+}
+.result h3 {
+  font: 600 15px system-ui, sans-serif;
+  margin: 16px 0 4px;
+}
+.warnings {
+  color: #8a2716;
+  font-size: 14px;
+  padding-left: 18px;
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0 8px;
+}
+.actions button {
+  background: #1d4939;
+  color: white;
+}
+.actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.kind-tabs {
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 12px;
+}
+.audit-progress progress {
+  width: 100%;
+  height: 14px;
+}
+.stock-check table {
+  margin-top: 12px;
+}
+@media (max-width: 740px) {
+  .evidence-row,
+  .evidence-row:has(> div:nth-child(2)):not(:has(> label)) {
+    grid-template-columns: 1fr;
+  }
+  .evidence-row .amount {
+    text-align: left;
+  }
+  .offer-summary dd,
+  .result dl.figures dd {
+    text-align: left;
+  }
+  .offer-summary dl,
+  .result dl.figures {
+    grid-template-columns: 1fr;
+  }
+  .offer-summary dt,
+  .result dl.figures dt {
+    border-bottom: none;
+    padding-bottom: 0;
+    font-size: 13px;
+    color: #4b6056;
+  }
+}
+/* Opportunity tier and buying thresholds. */
+.tier {
+  border: 1px solid #c7d0c4;
+  border-left-width: 4px;
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 8px 0 16px;
+  background: #fffef9;
+}
+.tier-priority-1,
+.tier-priority-2 {
+  border-left-color: #34714f;
+}
+.tier-watch,
+.tier-review {
+  border-left-color: #c9b74a;
+}
+.tier-reject {
+  border-left-color: #8a2716;
+}
+.tier-head {
+  margin: 0 0 4px;
+}
+.tier-head b,
+.tier b.inline {
+  display: inline;
+}
+.tier-head b {
+  font-size: 15px;
+}
+.threshold-list {
+  margin: 6px 0;
+  padding-left: 18px;
+  font-size: 14px;
+}
+.threshold-list li {
+  padding: 2px 0;
+}
+.threshold-list .badge {
+  margin-left: 4px;
+}
+.thresholds .inputs label > span {
+  display: block;
+}
+.thresholds button {
+  margin-top: 8px;
+}
+/* A required field left blank, such as the journey cost or locality. */
+.research-calculator input[aria-invalid="true"] {
+  border-color: #c9b74a;
+  background: #fffdf0;
+}
+.research-calculator .inputs label > span {
+  display: block;
+}
+/* Three prices side by side; one column on a phone. */
+.three-prices {
+  border: 1px solid #c7d0c4;
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 12px 0;
+}
+.price-columns {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 6px;
+}
+.price-col {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.price-col h3 {
+  font: 600 14px system-ui, sans-serif;
+  margin: 0 0 4px;
+}
+.price-col .figure {
+  font-size: 18px;
+  margin: 4px 0 2px;
+}
+.price-points {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  font-size: 13px;
+}
+.price-points b.inline {
+  display: inline;
+}
+.price-col details {
+  margin: 6px 0;
+}
+.payout {
+  border-top: 1px solid #dce0d6;
+  margin-top: 12px;
+}
+.result.stale > :not(small):not(.notice) {
+  opacity: 0.55;
+}
+.attributes .confirm,
+.category .confirm {
+  margin-top: 8px;
+}
+@media (max-width: 740px) {
+  .price-columns {
+    grid-template-columns: 1fr;
+  }
+}
+.research-calculator .note {
+  display: block;
+  font-size: 14px;
+  margin: 4px 0;
+}
+/* The model input with its "no model number" box beneath it. */
+.attributes .model-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.attributes .model-field .confirm {
+  margin-top: 0;
+}
+/* Access needs, labelled as the Planner labels them. */
+.research-calculator .badge.access {
+  background: #ece4f5;
+  color: #45307a;
+  margin: 0 4px 4px 0;
+}
+.research-calculator .badge.access.open {
+  background: #e3e8de;
+  color: #29453a;
+}
+/* Text for screen readers only (the access-need detail). */
+.research-calculator .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.research-calculator .badge.access {
+  position: relative;
+}
+.research-calculator .checked-line {
+  font-size: 14px;
+  margin: 4px 0 8px;
+  overflow-wrap: anywhere;
+}
+.research-calculator .checked-line b.inline {
+  display: inline;
+}
+.research-calculator .notice.warn {
+  color: #8a2716;
+}
