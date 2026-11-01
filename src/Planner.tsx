@@ -559,10 +559,12 @@ export default function Planner() {
   // Display only: the member's sort order and shop filter for the cards.
   const [sort, setSort] = useState<SortKey>("best");
   const [shop, setShop] = useState("");
+  const [cat, setCat] = useState("");
+  const cats = [...new Set(all.map((t) => t.category))].sort();
   const shops = [...new Set(all.map((t) => t.shop))].sort();
   const shown = all.filter((t) => !isHidden(t));
   const trips = sortTrips(
-    shown.filter((t) => !shop || t.shop === shop),
+    shown.filter((t) => (!shop || t.shop === shop) && (!cat || t.category === cat)),
     sort,
   );
   const hiddenTrips = all.filter(isHidden);
@@ -788,8 +790,11 @@ export default function Planner() {
       </p>
       {error && <p role="alert" className="notice warn">{error}</p>}
 
+      <div className="planner-finds">
       <div className="planner-head">
-        <h2>Cheap finds near you</h2>
+        <h2>
+          Today's <span>best finds</span> near you
+        </h2>
         {result && (
           <span className="muted">
             {trips.length ? `${plural(trips.length, "trip")} shortlisted` : "None shortlisted yet"}
@@ -806,6 +811,16 @@ export default function Planner() {
                 .join(", ")}. Until then nothing is shortlisted. The list of offers not shortlisted says why for each one.`
             : "No offer is inside your buying thresholds, so nothing is shortlisted. The list of offers not shortlisted says why."}
         </p>
+      )}
+      {cats.length > 1 && (
+        <div className="planner-cats" role="group" aria-label="Category">
+          {["", ...cats].map((c) => (
+            <button key={c || "all"} type="button" aria-pressed={cat === c} onClick={() => setCat(c)}>
+              <CategoryIcon category={c} />
+              {c ? (CATEGORY_LABEL[c] ?? c) : "All"}
+            </button>
+          ))}
+        </div>
       )}
       {all.length > 1 && (
         <div className="planner-sortbar" role="group" aria-label="Sort and filter the trips">
@@ -830,13 +845,14 @@ export default function Planner() {
           )}
         </div>
       )}
-      {shop && !trips.length && shown.length > 0 && (
-        <p className="muted">No shortlisted trip at {shop}. Choose All shops to see the others.</p>
+      {(shop || cat) && !trips.length && shown.length > 0 && (
+        <p className="muted">Nothing shortlisted matches this filter. Choose All to see the others.</p>
       )}
       <div className="planner-grid">
         {trips.map((t) => (
           <TripCard key={t.sku} trip={t} active={t.sku === trip?.sku} onChoose={() => choose(t.sku)} />
         ))}
+      </div>
       </div>
       {hiddenTrips.length > 0 && (
         <p className="muted">
@@ -921,11 +937,34 @@ export function unitBeforeTravel(e: Economics): number | null {
   return Math.round((e.proceeds - c.stock - c.packaging - c.postage - c.fees - c.returns) / e.units);
 }
 
-/** A shortlisted find as a card: the deal first, then the item, then travel. */
+const CATEGORY_LABEL: Record<string, string> = { clothing: "Clothing", general: "Home and general" };
+const CATEGORY_ICON: Record<string, string[]> = {
+  "": ["M4 4h7v7H4z", "M13 4h7v7h-7z", "M4 13h7v7H4z", "M13 13h7v7h-7z"],
+  clothing: ["M12 6a2 2 0 1 1 2 2c-1 0-2 .8-2 2v.5", "M12 10.5 3.5 17h17z"],
+  general: ["M4 8l8-4 8 4v8l-8 4-8-4z", "M4 8l8 4 8-4M12 12v8"],
+};
+function CategoryIcon({ category }: { category: string }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      {(CATEGORY_ICON[category] ?? CATEGORY_ICON.general).map((d) => (
+        <path key={d} d={d} />
+      ))}
+    </svg>
+  );
+}
+
+/** Display only: how far the shop price sits under the sale estimate, as a whole percentage. */
+function underSale(buy: number, sale: number | null) {
+  if (sale === null || !Number.isFinite(sale) || sale <= buy) return null;
+  return Math.floor((1 - buy / sale) * 100);
+}
+
+/** A shortlisted find as a card: the picture, the prices, then the profit and travel. */
 function TripCard({ trip: t, active, onChoose }: { trip: Trip; active: boolean; onChoose: () => void }) {
   const e = t.economics;
   const unit = unitBeforeTravel(e);
-  // Display only: tint the deal band by the sign of the profit; unknown stays neutral.
+  const under = underSale(t.buy, t.salePrice);
+  // Display only: tint the profit by its sign; unknown stays neutral.
   const tone = unit === null ? " none" : unit > 0 ? " gain" : " loss";
   return (
     <button
@@ -934,7 +973,23 @@ function TripCard({ trip: t, active, onChoose }: { trip: Trip; active: boolean; 
       aria-current={active ? "true" : undefined}
       onClick={onChoose}
     >
-      <span className="planner-deal">
+      <span className="planner-picture">
+        <ItemTile sku={t.sku} category={t.category} />
+        {under !== null && (
+          <span className="planner-ribbon" title={`Shop price ${under}% under the sale estimate`}>
+            {under}% under<span className="planner-sr"> the sale estimate</span>
+          </span>
+        )}
+        <TierBadge tier={t.opportunity.tier} />
+      </span>
+      <span className="planner-trip-body">
+        <span className="planner-item">
+          <b className="planner-name">{t.name}</b>
+          <em>{t.variant}</em>
+          <em>
+            {t.shop} · {t.miles} mi · {t.area}
+          </em>
+        </span>
         <span className="planner-deal-prices">
           <span>
             <span className="badge ev-retail">Shop price</span>
@@ -951,20 +1006,6 @@ function TripCard({ trip: t, active, onChoose }: { trip: Trip; active: boolean; 
         <span className="planner-deal-profit">
           <b>{pounds(unit)}</b>
           <span>profit a unit after fees and postage</span>
-        </span>
-        <TierBadge tier={t.opportunity.tier} />
-      </span>
-      <span className="planner-trip-body">
-        <span className="planner-item">
-          <ItemTile sku={t.sku} category={t.category} />
-          <span>
-            <b className="planner-name">{t.name}</b>
-            <em>{t.variant}</em>
-            <em>
-              {t.shop} · {t.miles} mi · {t.area} ·{" "}
-              {t.competingListings === null ? "others listed not known" : `${t.competingListings} other listed`}
-            </em>
-          </span>
         </span>
         <span className="planner-travel">
           {t.fareMissing || e.unitContribution === null ? (
@@ -988,10 +1029,11 @@ function TripCard({ trip: t, active, onChoose }: { trip: Trip; active: boolean; 
           <span className="badge sample">Sample</span>
           <AccessBadges needs={t.accessNeeds} />
         </span>
-        <em>
+        <em className="planner-foot">
+          {t.competingListings === null ? "Others listed: not known" : `${t.competingListings} other listed`} ·
           Time until payment:{" "}
-          {t.units ? paymentText(t.timing?.payoutDays, t.timing?.payout.date) : "no trip"}. Price
-          checked: {checkedText(t.checked.price)}, stock checked: {checkedText(t.checked.stock)}.
+          {t.units ? paymentText(t.timing?.payoutDays, t.timing?.payout.date) : "no trip"}. Price checked:{" "}
+          {checkedText(t.checked.price)}, stock checked: {checkedText(t.checked.stock)}.
         </em>
       </span>
     </button>
