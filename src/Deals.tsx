@@ -173,9 +173,10 @@ export default function Deals() {
         </div>
       )}
       {all.some((d) => d.sample) && (
-        <p className="notice deals-sample">
-          <strong>Sample data.</strong> Illustrative Leeds offers with modelled sales, so nothing here is a
-          buy alert yet.
+        <p className="notice deals-sample" role="note">
+          <strong>{all.every((d) => d.sample) ? "These are made-up examples, not real deals." : "Some of these are made-up examples."}</strong>{" "}
+          Cards marked Example use invented shop prices, sale prices and shelf counts to show how the screen
+          works. Only the sums are real. Real deals will appear here once real sold prices are connected.
         </p>
       )}
       {error && (
@@ -221,7 +222,7 @@ function DealCard({ deal: d, chips, onOpen }: { deal: Deal; chips: string[]; onO
   const small = d.unitProfit === null || !d.meetsThresholds;
   const range = d.sales.length ? `${money(d.sales[0])} to ${money(d.sales[d.sales.length - 1])}` : "";
   return (
-    <button type="button" className="deals-card" onClick={(e) => onOpen(e.currentTarget)}>
+    <button type="button" className={"deals-card" + (d.sample ? " example" : "")} onClick={(e) => onOpen(e.currentTarget)}>
       <span className="deals-picture">
         <ItemTile sku={d.sku} category={d.category} />
         {d.underSale !== null && (
@@ -229,7 +230,7 @@ function DealCard({ deal: d, chips, onOpen }: { deal: Deal; chips: string[]; onO
             {d.underSale}% under<span className="deals-sr"> what it sells for</span>
           </span>
         )}
-        {d.sample && <span className="badge sample deals-tag">Sample</span>}
+        {d.sample && <span className="badge sample deals-tag">Example</span>}
       </span>
       <span className="deals-body">
         <span className="deals-item">
@@ -242,19 +243,21 @@ function DealCard({ deal: d, chips, onOpen }: { deal: Deal; chips: string[]; onO
         </span>
         <span className="deals-prices">
           <span className="deals-shop">
-            <small>Shop price</small>
+            <small>{d.sample ? "Example shop price" : "Shop price"}</small>
             <b>{money(d.buy)}</b>
           </span>
           <span className="deals-arrow" aria-hidden="true">
             →
           </span>
           <span className="deals-sold">
-            <small>Sells for</small>
+            <small>{d.sample ? "Example sale price" : "Sells for"}</small>
             <b>{d.salePrice === null ? "not known" : money(d.salePrice)}</b>
           </span>
         </span>
         <span className="deals-evidence">
-          {d.sales.length
+          {d.sample
+            ? `Made up for this example: ${d.sales.length} pretend sales, not real eBay data`
+            : d.sales.length
             ? `From ${d.sales.length} completed ${d.sales.length === 1 ? "sale" : "sales"}${d.sales.length > 1 ? ", " + range : ""}`
             : "No completed sales yet"}
         </span>
@@ -317,6 +320,7 @@ function DealPanel({ deal: d, rules, onClose }: { deal: Deal; rules: DealsRespon
           <ItemTile sku={d.sku} category={d.category} />
           <div>
             <h2>{d.name}</h2>
+            {d.sample && <span className="badge sample">Example, not a real deal</span>}
             <span className="muted">
               {d.variant ? d.variant + " · " : ""}
               {d.shop}
@@ -333,11 +337,11 @@ function DealPanel({ deal: d, rules, onClose }: { deal: Deal; rules: DealsRespon
             <caption className="deals-sr">How the profit a unit is worked out</caption>
             <tbody>
               <tr>
-                <th scope="row">Sells for (the lower middle completed sale)</th>
+                <th scope="row">{d.sample ? "Example sale price (made up)" : "Sells for (the lower middle completed sale)"}</th>
                 <td>{money(d.salePrice)}</td>
               </tr>
               <tr>
-                <th scope="row">Shop price</th>
+                <th scope="row">{d.sample ? "Example shop price (made up)" : "Shop price"}</th>
                 <td>−{money(d.buy)}</td>
               </tr>
               <tr>
@@ -375,7 +379,7 @@ function DealPanel({ deal: d, rules, onClose }: { deal: Deal; rules: DealsRespon
         )}
 
         <div className="deals-box">
-          <h3>What it sold for</h3>
+          <h3>{d.sample ? "Pretend sale prices (made up for this example)" : "What it sold for"}</h3>
           {d.sales.length ? (
             <span className="deals-sales">
               {d.sales.map((s, i) => (
@@ -385,7 +389,11 @@ function DealPanel({ deal: d, rules, onClose }: { deal: Deal; rules: DealsRespon
           ) : (
             <span>No completed sales yet.</span>
           )}
-          <span>Completed sales of this exact item only. Listings that have not sold are never counted.</span>
+          <span>
+            {d.sample
+              ? "These are not real sales. Once real sold prices are connected, only completed sales of the exact item will count."
+              : "Completed sales of this exact item only. Listings that have not sold are never counted."}
+          </span>
         </div>
 
         <div className="deals-box">

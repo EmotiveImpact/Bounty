@@ -66,8 +66,15 @@
 }
 .deals-sample {
   margin: 0;
-  font-size: 13.5px;
+  font-size: 14.5px;
+  padding: 12px 16px;
+  border-width: 2px;
 }
+.deals-sample strong {
+  display: block;
+  font-size: 16px;
+}
+
 
 .deals-grid {
   display: grid;
@@ -440,7 +447,12 @@
     padding: 2px 7px 2px 5px;
   }
   .deals-tag {
-    display: none;
+    top: auto;
+    right: auto;
+    left: 6px;
+    bottom: 8px;
+    font-size: 10.5px;
+    padding: 2px 7px;
   }
   .deals-body {
     padding: 10px 12px 12px;
@@ -459,4 +471,8 @@
     padding-left: max(16px, env(safe-area-inset-left, 0px));
     padding-right: max(16px, env(safe-area-inset-right, 0px));
   }
+}
+.deals-panel-head .badge {
+  display: table;
+  margin: 3px 0 4px;
 }
