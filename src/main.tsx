@@ -98,32 +98,60 @@ function App() {
   const View = TABS[tab].view;
   return (
     <>
-      <header>
-        <strong>◈ &nbsp; Bounty</strong>
-        <span>FIELD DESK &nbsp; / &nbsp; UK</span>
+      <div className="strip">
+        <div className="wrap">
+          <span>
+            <b>Three prices, kept apart:</b> what the shop charges, what sellers are asking and
+            what the same item really sold for.
+          </span>
+        </div>
+      </div>
+      <header className="site">
+        <div className="wrap site-top">
+          <a className="logo" href="#Planner" aria-label="Bounty, back to the planner">
+            <span className="logo-mark" aria-hidden="true">B</span>
+            <strong>bounty</strong>
+            <span className="logo-tag">UK</span>
+          </a>
+          <div className="site-meta">
+            <span>Personal workspace</span>
+          </div>
+        </div>
+        <div className="site-tabs">
+          <nav className="wrap" aria-label="Sections">
+            {(Object.keys(TABS) as Tab[]).map((t) => (
+              <button
+                key={t}
+                aria-pressed={t === tab}
+                onClick={() => {
+                  setTab(t);
+                  history.replaceState(null, "", "#" + t);
+                }}
+              >
+                {t}
+              </button>
+            ))}
+          </nav>
+        </div>
       </header>
       <main>
-        <small>OPERATIONS &nbsp; / &nbsp; PERSONAL WORKSPACE</small>
-        <h1>{TABS[tab].title}</h1>
-        <p>{TABS[tab].lead}</p>
-        <nav>
-          {(Object.keys(TABS) as Tab[]).map((t) => (
-            <button
-              key={t}
-              aria-pressed={t === tab}
-              onClick={() => {
-                setTab(t);
-                history.replaceState(null, "", "#" + t);
-              }}
-            >
-              {t}
-            </button>
-          ))}
-        </nav>
+        <div className="page-head">
+          <span className="crumbs">Bounty › {tab}</span>
+          <h1>{TABS[tab].title}</h1>
+          <p>{TABS[tab].lead}</p>
+        </div>
         <TabBoundary key={tab} onError={ON_ERROR[tab]}>
           <View />
         </TabBoundary>
       </main>
+      <footer className="site-foot">
+        <div className="wrap">
+          <span>
+            <strong>Bounty</strong> · trip planning for UK resellers
+          </span>
+          <span>Times are UK time. Sample figures are always labelled.</span>
+        </div>
+      </footer>
     </>
   );
 }

@@ -38,23 +38,25 @@
   display: grid;
   align-content: start;
   gap: 2px;
-  border: 1px solid #c7d0c4;
-  border-radius: 8px;
-  padding: 10px 12px;
-  background: #fffef9;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: var(--surface);
 }
 /* Figures that are not realised cash get a dashed frame. */
 .ledger-stat.pending,
 .ledger-stat.estimate {
   border-style: dashed;
-  background: #fbfaf1;
+  background: var(--surface-2);
 }
 .ledger-stat-label {
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--muted);
 }
 .ledger-stat-value {
-  font: 26px/1.2 Georgia, serif;
+  font: 700 24px/1.2 var(--sans);
+  letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
 }
 .ledger-layout {
@@ -155,7 +157,7 @@
   gap: 4px 14px;
   align-items: start;
   padding: 8px 0;
-  border-bottom: 1px solid #dce0d6;
+  border-bottom: 1px solid var(--line);
 }
 .ledger-proof-file {
   min-width: 0;
@@ -178,4 +180,14 @@
     margin-top: 0;
     justify-self: start;
   }
+}
+/* The tab's own articles are full cards, not panels inside a card. */
+.ledger {
+  box-shadow: none;
+}
+.ledger > article,
+.ledger > div > article {
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  border-radius: var(--radius);
 }

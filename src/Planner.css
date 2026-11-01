@@ -1,7 +1,8 @@
 /* Planner, goals and baskets. Shared utilities live in style.css; only what
    these views need is here. */
 .planner h3 {
-  font: 600 16px/1.3 system-ui, sans-serif;
+  font: 600 16px/1.3 var(--sans);
+  letter-spacing: -0.01em;
   margin: 22px 0 8px;
 }
 /* The chosen card keeps readable text (the shared pressed style is dark). */
@@ -55,20 +56,20 @@
 /* Opportunity tiers. */
 .badge.planner-tier-priority-1,
 .badge.planner-tier-priority-2 {
-  background: #d9efdc;
-  color: #1d5a2e;
+  background: var(--pass-soft);
+  color: var(--pass);
 }
 .badge.planner-tier-watch {
-  background: #e4ecf6;
-  color: #234a72;
+  background: var(--info-soft);
+  color: var(--info);
 }
 .badge.planner-tier-review {
-  background: #fbe3c4;
-  color: #6b3f00;
+  background: var(--note);
+  color: var(--note-ink);
 }
 .badge.planner-tier-reject {
-  background: #f8dcd6;
-  color: #8a2716;
+  background: var(--fail-soft);
+  color: var(--fail);
 }
 h3 .badge {
   vertical-align: middle;
@@ -81,8 +82,9 @@ h3 .badge {
   display: block;
 }
 .planner-basket.recommended {
-  border: 2px solid #34714f;
-  background: #f0f6e9;
+  border: 1px solid var(--brand);
+  box-shadow: 0 0 0 1px var(--brand);
+  background: var(--surface);
 }
 .planner-days {
   display: flex;
@@ -104,16 +106,16 @@ h3 .badge {
   height: 14px;
 }
 .notice.warn {
-  color: #8a2716;
+  color: var(--fail);
 }
 /* Access needs. */
 .badge.planner-access {
-  background: #ece4f5;
-  color: #45307a;
+  background: var(--paid-soft);
+  color: var(--paid);
 }
 .badge.planner-access.open {
-  background: #e3e8de;
-  color: #29453a;
+  background: var(--info-soft);
+  color: var(--info);
 }
 .planner-badges .badge {
   margin-bottom: 4px;

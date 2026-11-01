@@ -8,7 +8,7 @@
   grid-template-columns: minmax(200px, 1fr) minmax(260px, 1.4fr);
   gap: 8px 24px;
   padding: 14px 0;
-  border-bottom: 1px solid #dce0d6;
+  border-bottom: 1px solid var(--line);
 }
 .source-badges {
   margin-top: 6px;
@@ -24,7 +24,7 @@
 }
 .source-facts dt {
   text-transform: none;
-  color: #5f7268;
+  color: var(--muted);
 }
 .source-facts dd {
   overflow-wrap: anywhere;

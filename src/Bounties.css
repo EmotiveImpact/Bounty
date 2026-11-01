@@ -1,31 +1,35 @@
 /* Bounties tab. Shared utilities live in style.css. */
 /* Notes use the body font; the shared small style is for labels. */
 .bounties small.muted {
-  font: 13px/1.5 system-ui, sans-serif;
+  font: 400 13px/1.5 var(--sans);
   letter-spacing: 0;
   margin-top: 4px;
 }
 .bounties h3 {
-  font-family: Georgia, serif;
-  font-weight: normal;
-  font-size: 21px;
+  font-family: var(--sans);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  font-size: 19px;
   margin: 0 0 8px;
 }
 .terms-box {
   display: grid;
   gap: 4px;
-  border-left: 4px solid #1d4939;
-  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--brand);
+  border-radius: 10px;
+  background: var(--surface-2);
+  padding: 10px 14px;
   margin: 12px 0;
   font-size: 14px;
 }
 .badge.earned {
-  background: #d6ecef;
-  color: #134a55;
+  background: var(--brand-soft);
+  color: var(--brand-2);
 }
 .badge.paid.lapsed {
-  background: #ecebf0;
-  color: #5c5770;
+  background: var(--info-soft);
+  color: var(--info);
 }
 .member-badges .badge {
   margin-bottom: 4px;
@@ -66,7 +70,7 @@ label.inline {
 }
 .facts dt {
   text-transform: none;
-  color: #5f7268;
+  color: var(--muted);
 }
 .facts dd {
   overflow-wrap: anywhere;
@@ -98,13 +102,15 @@ label.inline {
   margin: 12px 0;
 }
 .pressure > div {
-  border: 1px solid #c7d0c4;
-  border-radius: 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
   padding: 10px 12px;
-  background: #fffef9;
+  background: var(--surface);
 }
 .pressure b {
-  font-size: 20px;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
 }
 .opportunity ul {
@@ -126,7 +132,7 @@ label.inline {
 }
 .claim-panel,
 .operator {
-  border-top: 1px solid #dce0d6;
+  border-top: 1px solid var(--line);
   margin-top: 12px;
   padding-top: 8px;
 }
@@ -148,7 +154,7 @@ label.inline {
 }
 .alert-list li {
   padding: 6px 0;
-  border-bottom: 1px solid #dce0d6;
+  border-bottom: 1px solid var(--line);
 }
 .alert-list .badge {
   margin-left: 6px;
@@ -156,13 +162,14 @@ label.inline {
 /* "Don't make the trip" lines and notices. */
 .stop {
   display: block;
-  border-left: 4px solid #8a2716;
-  background: #f8dcd6;
-  color: #6e1d10;
+  border-left: 4px solid var(--fail);
+  background: var(--fail-soft);
+  color: var(--fail-ink);
   padding: 8px 12px;
   margin: 8px 0;
   font-size: 14px;
   font-weight: 600;
+  border-radius: 8px;
 }
 .stop-notices {
   list-style: none;
@@ -170,25 +177,27 @@ label.inline {
   margin: 8px 0;
 }
 .stop-notices li {
-  border-left: 4px solid #8a2716;
-  background: #fbeae6;
-  padding: 6px 10px;
+  border-left: 4px solid var(--fail);
+  background: var(--fail-soft);
+  border-radius: 8px;
+  padding: 8px 12px;
   margin: 4px 0;
 }
 .stop-notices b {
   font-size: 14px;
-  color: #6e1d10;
+  color: var(--fail-ink);
 }
 .alert-list .stop {
   margin: 6px 0;
 }
 /* "Your claim stands": why a holder among the first claims may still go.
-   The same green as a reopen notice (#1d4939 on #e3f0e4). */
+   The same green as a reopen notice (var(--brand) on var(--pass-soft)). */
 .go-note {
   display: block;
-  border-left: 4px solid #1d4939;
-  background: #e3f0e4;
-  color: #1d4939;
+  border-left: 4px solid var(--brand);
+  background: var(--pass-soft);
+  color: var(--brand);
+  border-radius: 8px;
   padding: 8px 12px;
   margin: 8px 0;
   font-size: 14px;
@@ -200,13 +209,14 @@ label.inline {
 /* The pilot audit line while it is a caution (not validated, or not yet
    signed off). */
 .prevalidation {
-  border-left: 4px solid #8a6d10;
+  border-left: 4px solid var(--note-line);
 }
 /* After a sign-off that stands, the same line is a plain result: neutral,
-   neither a caution nor a go (#19372f on #eceee8). */
+   neither a caution nor a go (var(--ink) on var(--info-soft)). */
 .validation-result {
-  border-left: 4px solid #8d9a92;
-  background: #eceee8;
+  border-left: 4px solid var(--line-2);
+  border-radius: 8px;
+  background: var(--info-soft);
   padding: 8px 12px;
   margin: 8px 0;
   font-size: 14px;
@@ -220,8 +230,8 @@ label.inline {
   justify-self: start;
 }
 .promotion {
-  border: 1px solid #c7d0c4;
-  border-radius: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
   padding: 6px 10px;
 }
 /* Stock reports: one card per report, so the operator's verify buttons are
@@ -236,7 +246,7 @@ label.inline {
   grid-template-columns: minmax(150px, 1fr) minmax(0, 2fr) auto;
   gap: 4px 12px;
   align-items: start;
-  border-bottom: 1px solid #dce0d6;
+  border-bottom: 1px solid var(--line);
   padding: 6px 0;
   font-size: 14px;
 }
@@ -290,22 +300,22 @@ label.inline {
   gap: 4px;
 }
 .badge.access {
-  background: #f1e6c8;
-  color: #5b4510;
+  background: var(--paid-soft);
+  color: var(--paid);
 }
 .badge.access.open {
-  background: #dcebd9;
-  color: #1d4939;
+  background: var(--pass-soft);
+  color: var(--brand);
 }
 .stop-notices li.reopen {
-  border-left-color: #1d4939;
-  background: #e3f0e4;
+  border-left-color: var(--brand);
+  background: var(--pass-soft);
 }
 .stop-notices li.reopen b {
-  color: #1d4939;
+  color: var(--brand);
 }
 .category-warning {
-  border-left: 4px solid #8a6d10;
+  border-left: 4px solid var(--note-line);
 }
 .match-notes {
   margin: 0;
@@ -318,8 +328,8 @@ label.inline {
 .eligibility {
   display: grid;
   gap: 6px;
-  border: 1px solid #c7d0c4;
-  border-left: 4px solid #8a6d10;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--note-line);
   border-radius: 8px;
   padding: 8px 12px;
   margin: 8px 0;
@@ -340,36 +350,36 @@ label.inline {
   font-size: 14px;
 }
 .own-figures.ok {
-  background: #e3f0e4;
+  background: var(--pass-soft);
 }
 .own-figures.warn {
-  background: #fbeae6;
+  background: var(--fail-soft);
 }
 .alert-list li > small.muted {
   display: block;
 }
 /* Round three. Muted text inside the red and green notices is darker than
    the shared muted colour, so it keeps at least 4.5:1 contrast there
-   (#4f6158: 5.7:1 on #fbeae6, 5.6:1 on #e3f0e4, 5.1:1 on #f8dcd6). */
+   (var(--ink-2): 5.7:1 on var(--fail-soft), 5.6:1 on var(--pass-soft), 5.1:1 on var(--fail-soft)). */
 .stop-notices .muted,
 .own-figures .muted,
 .stop .muted,
 .eligibility.declined .muted {
-  color: #4f6158;
+  color: var(--ink-2);
 }
 .own-figures .checks {
   margin: 4px 0;
 }
 /* "This bounty is not for you", with the small undo link. */
 .eligibility.declined {
-  border-left-color: #5f7268;
+  border-left-color: var(--muted);
 }
 .link-button {
   justify-self: start;
   background: none;
   border: 0;
   padding: 0;
-  color: #1d4939;
+  color: var(--brand);
   font: inherit;
   font-size: 13px;
   text-decoration: underline;

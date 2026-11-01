@@ -1220,7 +1220,7 @@ export function ResearchCalculator({
             {candidates?.sales.map((c) => {
               const k = key(c.row.provider, c.row.source_id);
               return (
-                <div className={"evidence-row status-" + c.status} key={k}>
+                <div className={"evidence-row ev-row-sold status-" + c.status} key={k}>
                   <label className="confirm">
                     <input
                       type="checkbox"
@@ -1272,9 +1272,9 @@ export function ResearchCalculator({
               </p>
               <CompetitionLine competition={candidates.competition} />
               {candidates.listings.map((c) => (
-                <div className="evidence-row" key={key(c.row.provider, c.row.source_id)}>
+                <div className="evidence-row ev-row-asking" key={key(c.row.provider, c.row.source_id)}>
                   <div>
-                    <span className="badge">Asking price</span>
+                    <span className="badge ev-asking">Asking price</span>
                     <span className="badge">{LISTING_LABEL[c.status]}</span>
                     <b>{c.row.title}</b>
                     <small>
@@ -1811,9 +1811,9 @@ function PriceComparison({ prices }: { prices: Prices }) {
     <section className="three-prices" aria-label="Three prices">
       <small>THREE PRICES, KEPT APART</small>
       <div className="price-columns">
-        <div className="price-col">
+        <div className="price-col ev-col-retail">
           <h3>{prices.claimed?.kind === "rrp" ? "Recommended retail price" : "Claimed previous price"}</h3>
-          <span className="badge">{prices.claimed?.evidenceClass ?? "Retail offer"}</span>
+          <span className="badge ev-retail">{prices.claimed?.evidenceClass ?? "Retail offer"}</span>
           {prices.claimed ? (
             <>
               <b className="figure">{money(prices.claimed.price)}</b>
@@ -1828,9 +1828,9 @@ function PriceComparison({ prices }: { prices: Prices }) {
             </p>
           )}
         </div>
-        <div className="price-col">
+        <div className="price-col ev-col-retail">
           <h3>Price observed over time</h3>
-          <span className="badge">{o.evidenceClass}</span>
+          <span className="badge ev-retail">{o.evidenceClass}</span>
           {o.count ? (
             <>
               <b className="figure">{span(o)}</b>
@@ -1855,9 +1855,9 @@ function PriceComparison({ prices }: { prices: Prices }) {
             </p>
           )}
         </div>
-        <div className="price-col">
+        <div className="price-col ev-col-sold">
           <h3>Completed resale prices</h3>
-          <span className="badge">{s.evidenceClass}</span>
+          <span className="badge ev-sold">{s.evidenceClass}</span>
           {s.count ? (
             <>
               <b className="figure">{money(s.lowerMedian)} lower median</b>

@@ -10,6 +10,14 @@ import {
 import Audit from "./Audit";
 import "./Research.css";
 
+// Display only: the colour each evidence class is drawn in (style.css).
+const EV_ROW: Record<string, string> = {
+  "Retail offer": "ev-row-retail",
+  "Reported completed sale": "ev-row-sold",
+  "Active asking price": "ev-row-asking",
+  "Amazon offer history": "ev-row-retail",
+};
+
 // Evidence classes from server/contract.mjs. Each is shown on its own tab and
 // never pooled: they answer different questions.
 const KINDS = [
@@ -133,7 +141,7 @@ export default function Research() {
           </p>
         )}
         {data.rows.map((r) => (
-          <div className="row" key={r.provider + "|" + r.source_id}>
+          <div className={"row " + (EV_ROW[r.kind] ?? "")} key={r.provider + "|" + r.source_id}>
             <span>
               <small>
                 {isSampleRow(r) && <span className="badge sample">Sample</span>}
