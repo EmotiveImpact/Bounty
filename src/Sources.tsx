@@ -75,7 +75,7 @@ function SourceRow({ source }: { source: Source }) {
   const errorResolved = later(source.lastSuccess, source.lastErrorAt);
   return (
     <div className="source-row">
-      <div>
+      <div className="source-head">
         <b>{source.name}</b>
         <small className="muted">
           {source.kind} · {source.licence}
@@ -407,15 +407,20 @@ export default function Sources() {
           "Credential configured" means a value is set on the server, not that the provider
           accepted it. A feed or online catalogue never confirms that a branch has stock.
         </p>
-        <p className="muted">
-          eBay asking prices count as current competition for 7 days after the lookup that saw
-          them. After that, competition is shown as not known until you run the lookup again. A
-          copy of one of the repository's sample files is refused on import, so example data
-          never becomes evidence.
-        </p>
-        {sources.map((s) => (
-          <SourceRow key={s.provider} source={s} />
-        ))}
+        <details className="source-more">
+          <summary>How long lookups count</summary>
+          <p className="muted">
+            eBay asking prices count as current competition for 7 days after the lookup that saw
+            them. After that, competition is shown as not known until you run the lookup again. A
+            copy of one of the repository's sample files is refused on import, so example data
+            never becomes evidence.
+          </p>
+        </details>
+        <div className="source-grid">
+          {sources.map((s) => (
+            <SourceRow key={s.provider} source={s} />
+          ))}
+        </div>
         <button onClick={load}>Refresh</button>
       </section>
       <section>

@@ -257,9 +257,8 @@ export default function Ledger() {
   return (
     <section className="ledger">
       <SummaryPanel version={version} />
-      <TaxNote />
       <div className="ledger-layout">
-        <article>
+        <article className="ledger-list">
           <h2>Trips</h2>
           <NewTripForm
             onCreated={(id) => {
@@ -272,7 +271,7 @@ export default function Ledger() {
         </article>
         <article>
           {selected === null ? (
-            <p className="muted">
+            <p className="muted ledger-empty">
               Choose a trip to record its receipt, sold listing, payout, expenses, returns and work
               time, and to see how it compares with the prediction.
             </p>
@@ -282,6 +281,7 @@ export default function Ledger() {
         </article>
       </div>
       <MetricsPanel version={version} />
+      <TaxNote />
     </section>
   );
 }
@@ -293,6 +293,16 @@ function Stat({ label, value, note, tone }: { label: string; value: string; note
       <span className="ledger-stat-value">{value}</span>
       <span className="muted">{note}</span>
     </div>
+  );
+}
+
+function HourlyStat({ data }: { data: Summary }) {
+  return (
+    <Stat
+      label="Realised hourly"
+      value={data.realisedHourly === null ? BLANK : money(data.realisedHourly)}
+      note={hourlyNote(data)}
+    />
   );
 }
 
@@ -327,7 +337,8 @@ function SummaryPanel({ version }: { version: number }) {
       {error && <p role="alert">{error}</p>}
       {data && (
         <>
-          <div className="ledger-stats">
+          <h3 className="ledger-group">This month</h3>
+          <div className="ledger-stats ledger-stats-main">
             <Stat
               label="Realised earnings"
               value={signed(data.realisedEarnings)}
@@ -349,6 +360,10 @@ function SummaryPanel({ version }: { version: number }) {
                 " Not earnings."
               }
             />
+            <HourlyStat data={data} />
+          </div>
+          <h3 className="ledger-group">Open trips today</h3>
+          <div className="ledger-stats">
             <Stat
               label="Pending payouts"
               value={money(data.pendingPayouts)}
@@ -374,13 +389,15 @@ function SummaryPanel({ version }: { version: number }) {
               value={data.unsoldUnits.toLocaleString("en-GB")}
               note="Bought on open trips and not yet sold. You carry the risk if they do not sell."
             />
-            <Stat
-              label="Realised hourly"
-              value={data.realisedHourly === null ? BLANK : money(data.realisedHourly)}
-              note={hourlyNote(data)}
-            />
           </div>
-          <p className="muted">
+          {data.verifiedTrips + data.unverifiedTrips > 0 && (
+            <p className="muted">
+              {`This month: ${data.verifiedTrips} verified and ${data.unverifiedTrips} unverified resale trips. Verified earnings: ${signed(data.verifiedEarnings)}.`}
+            </p>
+          )}
+          <details className="ledger-basis">
+            <summary>How these figures are worked out</summary>
+            <p className="muted">
             Basis: cash in the month. Realised earnings are payouts dated this month minus receipts,
             expenses and refunds dated this month, so stock bought in one month and paid out in the
             next shows as a cost first and income later. Only payouts count as earned. Pending
@@ -388,10 +405,9 @@ function SummaryPanel({ version }: { version: number }) {
             stand today, whatever the month. Potential proceeds count a prediction only when it came
             from live evidence and stock has been bought, scaled to the units bought. Household
             savings are net of those trips&apos; own costs. Realised hourly counts only the trips with
-            work time recorded this month, so money is never divided by another trip&apos;s hours.{" "}
-            {data.verifiedTrips + data.unverifiedTrips > 0 &&
-              `This month: ${data.verifiedTrips} verified and ${data.unverifiedTrips} unverified resale trips. Verified earnings: ${signed(data.verifiedEarnings)}.`}
-          </p>
+            work time recorded this month, so money is never divided by another trip&apos;s hours.
+            </p>
+          </details>
         </>
       )}
     </article>

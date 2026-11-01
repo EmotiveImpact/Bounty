@@ -3,12 +3,38 @@
   font-size: 12px;
   overflow-wrap: anywhere;
 }
+.source-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
+  gap: 14px;
+  margin: 16px 0;
+}
 .source-row {
   display: grid;
-  grid-template-columns: minmax(200px, 1fr) minmax(260px, 1.4fr);
-  gap: 8px 24px;
-  padding: 14px 0;
-  border-bottom: 1px solid var(--line);
+  grid-template-rows: auto 1fr;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgba(13, 23, 38, 0.04);
+}
+.source-head {
+  display: grid;
+  gap: 2px;
+}
+.source-head b {
+  font-size: 16px;
+}
+.source-more {
+  margin-top: 4px;
+}
+.source-more summary {
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--brand);
 }
 .source-badges {
   margin-top: 6px;
@@ -19,8 +45,22 @@
 .source-facts {
   grid-template-columns: max-content 1fr;
   column-gap: 12px;
+  align-self: end;
   margin: 0;
-  font-size: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  font-size: 13.5px;
+}
+.source-facts dt,
+.source-facts dd {
+  padding: 4px 0;
+  border-bottom: 0;
+}
+.source-facts code {
+  display: block;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--tile);
 }
 .source-facts dt {
   text-transform: none;
@@ -57,9 +97,6 @@
   margin-top: 12px;
 }
 @media (max-width: 740px) {
-  .source-row {
-    grid-template-columns: 1fr;
-  }
   .observation-price {
     text-align: left;
   }

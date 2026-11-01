@@ -502,31 +502,45 @@ function BasketPlan({ plan }: { plan: BasketResponse }) {
   const singleShown = plan.bestSingle && plan.baskets.some((b) => b.id === plan.bestSingle!.id);
   return (
     <>
-      <dl className="planner-figures">
-        <dt>Cash limit for the whole basket</dt>
-        <dd>{money(c.budget)}</dd>
-        <dt>Load limit</dt>
-        <dd>
-          {c.carry} kg
-          {c.carry !== c.carryEntered ? ` (your ${c.carryEntered} kg, ${byMode(c.transport)})` : ""}
-        </dd>
-        <dt>Units on one trip</dt>
-        <dd>
-          up to {c.unitCap} (maximum units {c.quantity}, storage {c.storage})
-        </dd>
-        <dt>Each item, first purchase</dt>
-        <dd>
-          at most {plural(c.trialUnits, "unit")} (trial batch), and no more than its sales rate
-          supports in {plural(c.sellWindowWeeks, "week")}
-        </dd>
-        <dt>Storage limit</dt>
-        <dd>
-          {plural(c.storage, "unit")}, the smaller of Planner {c.profileStorage} and goals {c.goalsStorage}
-        </dd>
-        <dt>Transport</dt>
-        <dd>{c.transport}</dd>
-        <dt>Hourly target</dt>
-        <dd>{money(c.hourlyTarget)} an hour</dd>
+      <dl className="planner-figures goals-limits">
+        <div>
+          <dt>Cash limit for the whole basket</dt>
+          <dd>{money(c.budget)}</dd>
+        </div>
+        <div>
+          <dt>Load limit</dt>
+          <dd>
+            {c.carry} kg
+            {c.carry !== c.carryEntered ? ` (your ${c.carryEntered} kg, ${byMode(c.transport)})` : ""}
+          </dd>
+        </div>
+        <div>
+          <dt>Units on one trip</dt>
+          <dd>
+            up to {c.unitCap} (maximum units {c.quantity}, storage {c.storage})
+          </dd>
+        </div>
+        <div>
+          <dt>Each item, first purchase</dt>
+          <dd>
+            at most {plural(c.trialUnits, "unit")} (trial batch), and no more than its sales rate
+            supports in {plural(c.sellWindowWeeks, "week")}
+          </dd>
+        </div>
+        <div>
+          <dt>Storage limit</dt>
+          <dd>
+            {plural(c.storage, "unit")}, the smaller of Planner {c.profileStorage} and goals {c.goalsStorage}
+          </dd>
+        </div>
+        <div>
+          <dt>Transport</dt>
+          <dd>{c.transport}</dd>
+        </div>
+        <div>
+          <dt>Hourly target</dt>
+          <dd>{money(c.hourlyTarget)} an hour</dd>
+        </div>
       </dl>
       <p className="muted">{plan.approximation}</p>
       {plan.rules.ignored.length > 0 && (
@@ -689,6 +703,28 @@ function BasketCard({ basket: b, rank }: { basket: Basket; rank?: number }) {
         . {plural(b.units, "unit")}, {b.weightKg} kg. Storage used: {b.storage.used} of{" "}
         {plural(b.storage.limit, "unit")}.
       </p>
+      <div className="planner-kpis">
+        <div className="planner-kpi">
+          <small>Cash needed</small>
+          <b>{money(e.cashRequired)}</b>
+          <span>before any payout</span>
+        </div>
+        <div className={"planner-kpi" + (e.contribution > 0 ? " gain" : e.contribution < 0 ? " loss" : "")}>
+          <small>If every unit sells</small>
+          <b>{money(e.contribution)}</b>
+          <span>{e.hourly === null ? "earnings an hour not known" : money(e.hourly) + " an hour"}</span>
+        </div>
+        <div className="planner-kpi">
+          <small>If nothing sells</small>
+          <b>{money(b.downside.nothingSells)}</b>
+          <span>the most you could lose</span>
+        </div>
+        <div className={"planner-kpi" + (late ? " loss" : "")}>
+          <small>Cash back</small>
+          <b>{b.timing.payout.date ? dateTime(b.timing.payout.date) : "Not scheduled"}</b>
+          <span>{late ? `${plural(b.timing.cash.daysLate ?? 0, "day")} late` : paymentText(b.timing.payoutDays, b.timing.payout.date)}</span>
+        </div>
+      </div>
       <div className="scroll">
         <table>
           <thead>
@@ -742,6 +778,8 @@ function BasketCard({ basket: b, rank }: { basket: Basket; rank?: number }) {
       <p className="muted">
         Main uncertainty: {[...new Set(b.items.map((it) => it.mainUncertainty))].join("; ")}.
       </p>
+      <details className="basket-breakdown">
+        <summary>Full costs, downside and timing</summary>
       <div className="grid2">
         <dl className="planner-figures">
           <dt>Cash required before payout</dt>
@@ -802,6 +840,7 @@ function BasketCard({ basket: b, rank }: { basket: Basket; rank?: number }) {
           </dd>
         </dl>
       </div>
+      </details>
       {b.reasons.length > 0 && (
         <ul className="checks">
           {b.reasons.map((r) => (
