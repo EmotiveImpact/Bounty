@@ -185,3 +185,72 @@ h3 .badge {
   color: inherit;
   opacity: 0.6;
 }
+/* Shortlist cards lead with the money: the contribution sits in a band
+   across the top, tinted by its sign (neutral when it is not known). */
+.planner .card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  padding: 0;
+  overflow: hidden;
+  align-items: stretch;
+}
+.planner .card > span:first-child {
+  padding: 0 16px 14px;
+}
+.planner .card > span:last-child {
+  order: -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 2px 12px;
+  text-align: left;
+  white-space: normal;
+  padding: 12px 16px;
+  background: var(--surface-2);
+}
+.planner .card > span:last-child small:first-child {
+  grid-column: 1 / -1;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--ink-2);
+}
+.planner .card > span:last-child b {
+  font-size: 26px;
+  line-height: 1.1;
+  font-weight: 750;
+  letter-spacing: -0.03em;
+}
+.planner .card > span:last-child small:last-child {
+  text-align: right;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--ink-2);
+}
+.planner .card.gain > span:last-child {
+  background: var(--pass-soft);
+}
+.planner .card.gain > span:last-child b {
+  color: var(--pass);
+}
+.planner .card.loss > span:last-child {
+  background: var(--fail-soft);
+}
+.planner .card.loss > span:last-child b {
+  color: var(--fail);
+}
+/* On a phone the buying profile folds away behind a button. */
+.planner-profile-toggle {
+  display: none;
+}
+@media (max-width: 740px) {
+  .planner-profile-toggle {
+    display: inline-flex;
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+  .planner-profile:not(.open) > :not(small):not(h2):not(.planner-profile-toggle) {
+    display: none;
+  }
+}

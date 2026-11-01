@@ -96,63 +96,145 @@ function App() {
     return () => window.removeEventListener("hashchange", follow);
   }, []);
   const View = TABS[tab].view;
+  // Display only: whether the side menu shows names, remembered per browser.
+  const [railOpen, setRailOpen] = useState(() => {
+    try {
+      return localStorage.getItem("bounty-rail") === "open";
+    } catch {
+      return false;
+    }
+  });
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const toggleRail = () => {
+    const next = !railOpen;
+    setRailOpen(next);
+    try {
+      localStorage.setItem("bounty-rail", next ? "open" : "closed");
+    } catch {
+      // Private windows may refuse storage; the menu still works.
+    }
+  };
+  const go = (t: Tab) => {
+    setTab(t);
+    setToolsOpen(false);
+    history.replaceState(null, "", "#" + t);
+  };
+  const navButton = (t: Tab, cls?: string) => (
+    <button key={t} className={cls} aria-pressed={t === tab} title={t} onClick={() => go(t)}>
+      <Icon name={t} />
+      <span className="rail-label">{t}</span>
+    </button>
+  );
+  const toolActive = TOOLS.includes(tab);
   return (
-    <>
-      <div className="strip">
-        <div className="wrap">
-          <span>
-            <b>Three prices, kept apart:</b> what the shop charges, what sellers are asking and
-            what the same item really sold for.
-          </span>
-        </div>
-      </div>
-      <header className="site">
-        <div className="wrap site-top">
+    <div className={"shell" + (railOpen ? " rail-open" : "")}>
+      <div className="rail">
+        <div className="rail-top">
           <a className="logo" href="#Planner" aria-label="Bounty, back to the planner">
-            <span className="logo-mark" aria-hidden="true">B</span>
-            <strong>bounty</strong>
-            <span className="logo-tag">UK</span>
+            <span className="logo-mark" aria-hidden="true">
+              B
+            </span>
+            <strong className="rail-label">bounty</strong>
           </a>
-          <div className="site-meta">
-            <span>Personal workspace</span>
+          <button
+            type="button"
+            className="rail-toggle"
+            aria-expanded={railOpen}
+            aria-label={railOpen ? "Close the menu" : "Open the menu"}
+            onClick={toggleRail}
+          >
+            <Icon name={railOpen ? "close" : "open"} />
+          </button>
+        </div>
+        <nav className="rail-nav" aria-label="Sections">
+          {MEMBER.map((t) => navButton(t))}
+          <span className="rail-group">Tools</span>
+          {TOOLS.map((t) => navButton(t))}
+        </nav>
+      </div>
+      <div className="maincol">
+        <div className="topbar">
+          <div className="wrap">
+            <span className="topbar-title">Three prices, never mixed:</span>
+            <span className="badge ev-retail">Retail offer</span>
+            <span className="topbar-note">what you pay</span>
+            <span className="badge ev-sold">Completed sale</span>
+            <span className="topbar-note">what it really sold for</span>
+            <span className="badge ev-asking">Asking price</span>
+            <span className="topbar-note">listings, not sales</span>
           </div>
         </div>
-        <div className="site-tabs">
-          <nav className="wrap" aria-label="Sections">
-            {(Object.keys(TABS) as Tab[]).map((t) => (
-              <button
-                key={t}
-                aria-pressed={t === tab}
-                onClick={() => {
-                  setTab(t);
-                  history.replaceState(null, "", "#" + t);
-                }}
-              >
-                {t}
-              </button>
-            ))}
-          </nav>
+        <main>
+          <div className="page-head">
+            <span className="crumbs">Bounty › {tab}</span>
+            <h1>{TABS[tab].title}</h1>
+            <p>{TABS[tab].lead}</p>
+          </div>
+          <TabBoundary key={tab} onError={ON_ERROR[tab]}>
+            <View />
+          </TabBoundary>
+        </main>
+        <footer className="site-foot">
+          <div className="wrap">
+            <span>
+              <strong>Bounty</strong> · trip planning for UK resellers
+            </span>
+            <span>Times are UK time. Sample figures are always labelled.</span>
+          </div>
+        </footer>
+      </div>
+      <nav className="bottombar" aria-label="Sections">
+        {MEMBER.map((t) => navButton(t))}
+        <button aria-pressed={toolActive} aria-expanded={toolsOpen} onClick={() => setToolsOpen(!toolsOpen)}>
+          <Icon name="tools" />
+          <span className="rail-label">Tools</span>
+        </button>
+      </nav>
+      {toolsOpen && (
+        <div className="tools-sheet" role="menu" aria-label="Tools">
+          {TOOLS.map((t) => (
+            <button key={t} role="menuitem" aria-pressed={t === tab} onClick={() => go(t)}>
+              <Icon name={t} />
+              {TABS[t].title}
+            </button>
+          ))}
         </div>
-      </header>
-      <main>
-        <div className="page-head">
-          <span className="crumbs">Bounty › {tab}</span>
-          <h1>{TABS[tab].title}</h1>
-          <p>{TABS[tab].lead}</p>
-        </div>
-        <TabBoundary key={tab} onError={ON_ERROR[tab]}>
-          <View />
-        </TabBoundary>
-      </main>
-      <footer className="site-foot">
-        <div className="wrap">
-          <span>
-            <strong>Bounty</strong> · trip planning for UK resellers
-          </span>
-          <span>Times are UK time. Sample figures are always labelled.</span>
-        </div>
-      </footer>
-    </>
+      )}
+    </div>
+  );
+}
+
+// Members' sections first; the research desk and source admin are tools.
+const MEMBER: Tab[] = ["Planner", "Bounties", "Goals", "Ledger"];
+const TOOLS: Tab[] = ["Research", "Sources"];
+
+// Line icons for the menu, drawn on a 24-unit grid.
+const ICON_PATHS: Record<string, string[]> = {
+  Planner: ["M12 21s-6-5.3-6-10a6 6 0 0 1 12 0c0 4.7-6 10-6 10z", "M12 13.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4z"],
+  Goals: ["M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16z", "M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M12 12.5v-1"],
+  Research: ["M11 17.5a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13z", "M20 20l-4.2-4.2"],
+  Bounties: ["M3.5 12V4h8l9 9-8 8z", "M7.8 9.6a1.4 1.4 0 1 0 0-2.8 1.4 1.4 0 0 0 0 2.8z"],
+  Ledger: ["M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3z", "M5 17a3 3 0 0 1 3-3h11"],
+  Sources: ["M12 9c3.9 0 7-1.3 7-3s-3.1-3-7-3-7 1.3-7 3 3.1 3 7 3z", "M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6", "M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3"],
+  tools: ["M4 7h16", "M4 12h16", "M4 17h16"],
+  open: ["M9 6l6 6-6 6"],
+  close: ["M15 6l-6 6 6 6"],
+};
+function Icon({ name }: { name: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {ICON_PATHS[name].map((d) => (
+        <path key={d} d={d} />
+      ))}
+    </svg>
   );
 }
 createRoot(document.getElementById("root")!).render(<App />);

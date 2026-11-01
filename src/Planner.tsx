@@ -519,6 +519,8 @@ export default function Planner() {
   const [result, setResult] = useState<PlanResponse | null>(null);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState("");
+  // Display only: on a phone the buying profile folds away behind a button.
+  const [profileOpen, setProfileOpen] = useState(false);
   const set = (patch: Partial<PlannerProfile>) => setProfile({ ...profile, ...patch });
   const problem = profileProblem(profile);
   const noFare = fareNotEntered(profile);
@@ -561,9 +563,17 @@ export default function Planner() {
   return (
     <div className="planner">
       <div className="layout">
-        <aside>
+        <aside className={"planner-profile" + (profileOpen ? " open" : "")}>
           <small>01 / PARAMETERS</small>
           <h2>Your buying profile</h2>
+          <button
+            type="button"
+            className="planner-profile-toggle"
+            aria-expanded={profileOpen}
+            onClick={() => setProfileOpen(!profileOpen)}
+          >
+            {profileOpen ? "Hide profile" : "Edit profile"}
+          </button>
           <label>
             Local area
             <input value={profile.area ?? ""} onChange={(e) => set({ area: e.target.value })} />
@@ -706,7 +716,16 @@ export default function Planner() {
             <button
               key={t.sku}
               type="button"
-              className={"card" + (t.sku === trip?.sku ? " active" : "")}
+              className={
+                "card" +
+                (t.sku === trip?.sku ? " active" : "") +
+                // Display only: tint the figure by its sign; unknown stays neutral.
+                (t.fareMissing || t.economics.contribution == null
+                  ? ""
+                  : t.economics.contribution > 0
+                    ? " gain"
+                    : " loss")
+              }
               aria-current={t.sku === trip?.sku ? "true" : undefined}
               onClick={() => setSelected(t.sku)}
             >
@@ -734,6 +753,7 @@ export default function Planner() {
                 </em>
               </span>
               <span>
+                <small>Contribution</small>
                 <b>{fareFigure(t.economics.contribution, t.fareMissing)}</b>
                 <small>{perHour(t.economics.hourly, t.fareMissing)}</small>
               </span>
