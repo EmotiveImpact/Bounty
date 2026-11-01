@@ -1,5 +1,8 @@
 // Shared client helpers. All money from the API is integer pence.
 
+/** Fired when the API needs a signed-in member; main.tsx opens sign-in. */
+export const SIGN_IN_EVENT = "bounty:sign-in";
+
 export async function api<T>(
   route: string,
   body?: unknown,
@@ -22,11 +25,10 @@ export async function api<T>(
   } catch {
     throw Error("The API returned an unreadable response");
   }
-  // The session ended (signed out elsewhere or expired): reloading shows
-  // the sign-in page.
+  // Changes need a signed-in member: open the sign-in window.
   if (res.status === 401 && (data as { signIn?: boolean } | null)?.signIn) {
-    window.location.reload();
-    throw Error("Sign in to Bounty");
+    window.dispatchEvent(new Event(SIGN_IN_EVENT));
+    throw Error("Sign in to save changes");
   }
   if (!res.ok)
     throw Error(

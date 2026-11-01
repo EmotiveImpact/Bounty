@@ -8,7 +8,7 @@ import { listDeals, readDealOptions, scan } from "./deals.mjs";
 export function routes() {
   return [
     ["GET", "/api/deals", () => listDeals()],
-    ["POST", "/api/deals", ({ body }) => listDeals(readDealOptions(body))],
-    ["POST", "/api/scan", ({ body }) => scan(body)],
+    ["POST", "/api/deals", ({ body }) => listDeals(readDealOptions(body)), { read: true }],
+    ["POST", "/api/scan", ({ body }) => scan(body), { read: true }],
   ];
 }

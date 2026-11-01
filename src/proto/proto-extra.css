@@ -64,3 +64,35 @@
     flex: 0 0 108px;
   }
 }
+
+/* Sign in button in the top bar, shown while signed out. */
+@scope (.bx) to (.legacy) {
+  .signin-top {
+    height: 36px;
+    padding: 0 14px;
+    background: var(--brand);
+    white-space: nowrap;
+  }
+}
+@media (max-width: 600px) {
+  @scope (.bx) to (.legacy) {
+    .signin-top {
+      height: 32px;
+      padding: 0 9px;
+      font-size: 13px;
+    }
+    /* Room for Sign in beside the logo on a phone. */
+    .tools.picons:has(.signin-top) .avatarbtn > :not(.avatar) {
+      display: none;
+    }
+  }
+}
+/* On the smallest phones, signed-out visitors (who have no alerts yet) see
+   Sign in where the alerts bell would be. */
+@media (max-width: 385px) {
+  @scope (.bx) to (.legacy) {
+    .tools.picons:has(.signin-top) > .popwrap {
+      display: none;
+    }
+  }
+}

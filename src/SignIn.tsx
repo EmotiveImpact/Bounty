@@ -1,7 +1,7 @@
-// Sign-in and sign-up for a hosted pilot with member accounts. Shown instead
-// of the app until /api/auth/me finds a session. On your own computer, where
-// accounts are off, the app opens straight away.
-import { useState } from "react";
+// Sign-in and sign-up window for a hosted pilot with member accounts. The
+// site itself is open to look around; this opens from the Sign in button at
+// the top, or when someone tries to save a change while signed out.
+import { useEffect, useState } from "react";
 import "./SignIn.css";
 
 export type Member = { email: string; name: string | null };
@@ -9,9 +9,11 @@ export type Member = { email: string; name: string | null };
 export default function SignIn({
   inviteOpen,
   onSignedIn,
+  onClose,
 }: {
   inviteOpen: boolean;
   onSignedIn: (member: Member) => void;
+  onClose: () => void;
 }) {
   const [mode, setMode] = useState<"in" | "up">("in");
   const [email, setEmail] = useState("");
@@ -20,6 +22,11 @@ export default function SignIn({
   const [invite, setInvite] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -42,11 +49,22 @@ export default function SignIn({
   }
 
   return (
-    <main className="signin">
-      <form className="signin-card" onSubmit={submit}>
-        <h1>Bounty</h1>
+    <div className="signin" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <form
+        className="signin-card"
+        onSubmit={submit}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="signin-title"
+      >
+        <button type="button" className="signin-close" aria-label="Close" onClick={onClose}>
+          ×
+        </button>
+        <h1 id="signin-title">{mode === "in" ? "Sign in" : "Create account"}</h1>
         <p className="signin-sub">
-          {mode === "in" ? "Sign in to your account." : "Create your account with the invite code you were given."}
+          {mode === "in"
+            ? "Sign in to save finds, trips and your stock."
+            : "Create your account with the invite code you were given."}
         </p>
         {mode === "up" && (
           <label>
@@ -59,6 +77,7 @@ export default function SignIn({
           <input
             type="email"
             required
+            autoFocus
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             autoComplete="email"
@@ -101,6 +120,6 @@ export default function SignIn({
           </button>
         )}
       </form>
-    </main>
+    </div>
   );
 }

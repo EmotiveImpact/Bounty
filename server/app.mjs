@@ -1,7 +1,8 @@
 // Local HTTP API. Route modules export routes(db) returning
 // [method, pattern, handler, options?] tuples. Patterns use :name segments.
 // Handlers receive { req, url, params, body } and return a JSON value or
-// reply(status, value). Throw HttpError (or call fail) for client errors.
+// reply(status, value). Options: limit (body bytes) and read (a POST that
+// changes nothing, open to signed-out visitors when accounts are on). Throw HttpError (or call fail) for client errors.
 import { HttpError, isReply, readJson } from "./http.mjs";
 import { authorised } from "./access.mjs";
 import * as evidenceRoutes from "./routes-evidence.mjs";
@@ -38,8 +39,8 @@ const originHost = (value) => {
 
 // publicHosts and password come from accessConfig() in access.mjs. Without
 // them the API answers only requests addressed to this machine. members is
-// accounts() from accounts.mjs: when given, every route except the sign-in
-// ones needs a signed-in member, and the shared password is not used.
+// accounts() from accounts.mjs: when given, anyone may read, every change
+// needs a signed-in member, and the shared password is not used.
 export function createApi(db, { modules = routeModules, publicHosts = [], password = null, members = null } = {}) {
   const allowedHosts = new Set([...LOCAL_HOSTS, ...publicHosts]);
   const table = modules
@@ -112,9 +113,11 @@ export function createApi(db, { modules = routeModules, publicHosts = [], passwo
       if (url.pathname === "/api/auth/me" && method === "GET") {
         if (!members) return send(200, { required: false, user: null });
         const user = await members.user(req);
-        return user
-          ? send(200, { required: true, user: members.publicUser(user) })
-          : send(401, { required: true, signIn: true, inviteOpen: members.inviteOpen, error: "Sign in to Bounty" });
+        return send(200, {
+          required: true,
+          user: user ? members.publicUser(user) : null,
+          inviteOpen: members.inviteOpen,
+        });
       }
       if (members) {
         // Cookies marked Secure are dropped over plain http, which only
@@ -130,14 +133,18 @@ export function createApi(db, { modules = routeModules, publicHosts = [], passwo
           res.setHeader("Set-Cookie", await members.signOut(req, secure));
           return send(200, { ok: true });
         }
-        if (!(await members.user(req)))
-          return send(401, { signIn: true, error: "Sign in to Bounty" });
       }
       const found = find(method, url.pathname);
       if (!found.route)
         return found.allowed
           ? send(405, { error: "Method not allowed" })
           : send(404, { error: "Unknown route" });
+      // With member accounts anyone may look around: reads, and POST
+      // routes marked { read: true } that only work something out, are open.
+      // Saving or changing anything needs a signed-in member.
+      const reading = method === "GET" || method === "HEAD" || found.route.options.read === true;
+      if (members && !reading && !(await members.user(req)))
+        return send(401, { signIn: true, error: "Sign in to save changes" });
       const body =
         method === "GET" || method === "HEAD"
           ? undefined

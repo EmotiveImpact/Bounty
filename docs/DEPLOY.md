@@ -12,7 +12,7 @@ There are two ways to put Bounty online. Both need either member sign-in (accoun
 
 ## Member sign-in (Neon)
 
-With `DATABASE_URL` set to a Postgres connection string (the dev demo uses a free Neon project in London), the app opens on a sign-in page instead of the browser's password pop-up. A session cookie keeps each device signed in for 30 days. Each Vercel address (production and every preview) has its own cookie, so a new preview link asks once.
+With `DATABASE_URL` set to a Postgres connection string (the dev demo uses a free Neon project in London), the site opens for everyone with a **Sign in** button at the top, instead of the browser's password pop-up. Visitors can look around (every read, and POST routes marked `{ read: true }` that only work something out, such as deals, scan, plan, baskets and research estimates). Saving or changing anything needs a signed-in member, and trying it while signed out opens the sign-in window. A session cookie keeps each device signed in for 30 days. Each Vercel address (production and every preview) has its own cookie, so a new preview link asks once.
 
 - New members sign up with `BOUNTY_INVITE_CODE` (at least 8 characters). Without it, sign-up is closed and only existing members can sign in.
 - Accounts and sessions are the only things kept in Postgres (`server/accounts.mjs` creates the `bounty_users` and `bounty_sessions` tables on first use). Everything else stays in SQLite, so on the free demo it can still reset.

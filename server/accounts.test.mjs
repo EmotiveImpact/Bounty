@@ -5,7 +5,13 @@ import { accounts, checkPassword, hashPassword, readCookie } from "./accounts.mj
 import { accessConfig } from "./access.mjs";
 
 const INVITE = "flip-together-2026";
-const echo = { routes: () => [["GET", "/api/ping", () => ({ ok: true })]] };
+const echo = {
+  routes: () => [
+    ["GET", "/api/ping", () => ({ ok: true })],
+    ["POST", "/api/echo", ({ body }) => body],
+    ["POST", "/api/work-out", ({ body }) => ({ sum: body.a + body.b }), { read: true }],
+  ],
+};
 
 // The same shape as postgresStore, kept in memory.
 function memoryStore() {
@@ -74,19 +80,22 @@ test("cookies are read by exact name", () => {
   assert.equal(readCookie({ headers: {} }), null);
 });
 
-test("without a session every route asks to sign in, with no browser pop-up", async () => {
+test("signed out, anyone can look around but every change asks to sign in", async () => {
   const { api, call } = await start();
   try {
-    const ping = await call("GET", "/api/ping");
-    assert.equal(ping.status, 401);
-    assert.equal(ping.body.signIn, true);
+    assert.deepEqual((await call("GET", "/api/ping")).body, { ok: true });
+    assert.deepEqual((await call("POST", "/api/work-out", { a: 1, b: 2 })).body, { sum: 3 }, "a read-only POST is open");
+    const write = await call("POST", "/api/echo", { a: 1 });
+    assert.equal(write.status, 401);
+    assert.equal(write.body.signIn, true);
     const me = await call("GET", "/api/auth/me");
-    assert.equal(me.status, 401);
-    assert.deepEqual({ required: me.body.required, inviteOpen: me.body.inviteOpen }, { required: true, inviteOpen: true });
-    const unknown = await call("GET", "/api/none");
-    assert.equal(unknown.status, 401, "unknown routes are not revealed before sign-in");
-    const res = await fetch(api.base + "/api/ping");
-    assert.equal(res.headers.get("www-authenticate"), null);
+    assert.deepEqual(me, { status: 200, body: { required: true, user: null, inviteOpen: true }, setCookie: null });
+    const res = await fetch(api.base + "/api/echo", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(res.headers.get("www-authenticate"), null, "no browser pop-up");
   } finally {
     await api.close();
   }
@@ -111,9 +120,9 @@ test("sign up with the invite code, stay signed in, then sign out", async () => 
     const cookie = sessionCookie(up.setCookie);
     assert.ok(![...store.sessions.keys()].includes(cookie.split("=")[1]), "only a hash of the token is stored");
 
-    assert.deepEqual((await call("GET", "/api/ping", undefined, cookie)).body, { ok: true });
+    assert.deepEqual((await call("POST", "/api/echo", { a: 1 }, cookie)).body, { a: 1 });
     const me = await call("GET", "/api/auth/me", undefined, cookie);
-    assert.deepEqual(me.body, { required: true, user: { email: "edem@example.co.uk", name: "Edem" } });
+    assert.deepEqual(me.body, { required: true, user: { email: "edem@example.co.uk", name: "Edem" }, inviteOpen: true });
 
     const again = await call("POST", "/api/auth/signup", { email: "edem@example.co.uk", password: "0123456789", invite: INVITE });
     assert.equal(again.status, 409);
@@ -121,7 +130,7 @@ test("sign up with the invite code, stay signed in, then sign out", async () => 
     const out = await call("POST", "/api/auth/signout", {}, cookie);
     assert.equal(out.status, 200);
     assert.match(out.setCookie, /^bounty_session=; .*Max-Age=0/);
-    assert.equal((await call("GET", "/api/ping", undefined, cookie)).status, 401);
+    assert.equal((await call("POST", "/api/echo", { a: 1 }, cookie)).status, 401);
   } finally {
     await api.close();
   }
@@ -138,7 +147,7 @@ test("sign in checks the password and slows down repeated guesses", async () => 
     assert.equal(unknown.body.error, wrong.body.error, "an unknown email reads the same as a wrong password");
     const right = await call("POST", "/api/auth/signin", { email: "M@B.co.uk", password: "0123456789" });
     assert.equal(right.status, 200);
-    assert.deepEqual((await call("GET", "/api/ping", undefined, sessionCookie(right.setCookie))).body, { ok: true });
+    assert.deepEqual((await call("POST", "/api/echo", { b: 2 }, sessionCookie(right.setCookie))).body, { b: 2 });
 
     for (let i = 0; i < 8; i++) await call("POST", "/api/auth/signin", { email: "m@b.co.uk", password: "wrong-guess" });
     const locked = await call("POST", "/api/auth/signin", { email: "m@b.co.uk", password: "0123456789" });

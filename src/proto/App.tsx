@@ -125,8 +125,9 @@ export default function ProtoApp({
   account,
 }: {
   legacy: (view: View) => React.ReactNode;
-  // The signed-in member on a hosted pilot; absent on your own computer.
-  account?: { email: string; signOut: () => void };
+  // Member sign-in on a hosted pilot; absent on your own computer, where
+  // there are no accounts. email is null while signed out.
+  account?: { email: string | null; signIn: () => void; signOut: () => void };
 }) {
   const first = fromHash();
   const [view, setView] = useState<View>(first.view);
@@ -833,6 +834,11 @@ export default function ProtoApp({
               </div>
             )}
           </span>
+          {account && !account.email && (
+            <button type="button" className="bt signin-top" onClick={account.signIn}>
+              Sign in
+            </button>
+          )}
           <div className="profwrap">
             <button
               type="button"
@@ -899,7 +905,12 @@ export default function ProtoApp({
                   <button type="button" onClick={() => go("watching")}>
                     Saved finds
                   </button>
-                  {account && (
+                  {account && !account.email && (
+                    <button type="button" onClick={account.signIn}>
+                      Sign in
+                    </button>
+                  )}
+                  {account?.email && (
                     <button type="button" onClick={account.signOut}>
                       Sign out ({account.email})
                     </button>

@@ -12,6 +12,7 @@ import Ledger from "./Ledger";
 import Sources from "./Sources";
 import ProtoApp, { type View } from "./proto/App";
 import SignIn, { type Member } from "./SignIn";
+import { SIGN_IN_EVENT } from "./api";
 
 // The older screens, shown inside the new shell until each is ported.
 const LEGACY: Partial<Record<View, React.ComponentType>> = {
@@ -65,55 +66,56 @@ function legacy(view: View) {
   );
 }
 
-// Hosted pilots with member accounts open on the sign-in page until a
-// session is found; on your own computer the app opens straight away.
-type Gate =
-  | { state: "checking" }
-  | { state: "signin"; inviteOpen: boolean }
-  | { state: "open"; member: Member | null }
-  | { state: "error"; message: string };
+// On a hosted pilot with member accounts the site opens for everyone, with a
+// Sign in button at the top. Saving a change while signed out opens the
+// sign-in window too. On your own computer there are no accounts.
+type Auth = { required: boolean; inviteOpen: boolean; member: Member | null };
 
 function Root() {
-  const [gate, setGate] = React.useState<Gate>({ state: "checking" });
+  const [auth, setAuth] = React.useState<Auth>({ required: false, inviteOpen: false, member: null });
+  const [signingIn, setSigningIn] = React.useState(false);
   React.useEffect(() => {
     fetch("/api/auth/me")
-      .then(async (res) => {
-        const data = await res.json().catch(() => null);
-        if (res.ok) setGate({ state: "open", member: data?.user ?? null });
-        else if (data?.signIn) setGate({ state: "signin", inviteOpen: Boolean(data.inviteOpen) });
-        else setGate({ state: "error", message: data?.error || "HTTP " + res.status });
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.required)
+          setAuth({ required: true, inviteOpen: Boolean(data.inviteOpen), member: data.user ?? null });
       })
-      .catch((error) => setGate({ state: "error", message: String(error) }));
+      .catch(() => undefined);
+    const open = () => setSigningIn(true);
+    window.addEventListener(SIGN_IN_EVENT, open);
+    return () => window.removeEventListener(SIGN_IN_EVENT, open);
   }, []);
-  if (gate.state === "checking") return null;
-  if (gate.state === "error")
-    return (
-      <p role="alert" style={{ padding: 24 }}>
-        Bounty could not start ({gate.message}). Reload the page to try again.
-      </p>
-    );
-  if (gate.state === "signin")
-    return <SignIn inviteOpen={gate.inviteOpen} onSignedIn={(member) => setGate({ state: "open", member })} />;
-  const member = gate.member;
+  const close = React.useCallback(() => setSigningIn(false), []);
   return (
-    <ProtoApp
-      legacy={legacy}
-      account={
-        member
-          ? {
-              email: member.email,
-              signOut: async () => {
-                await fetch("/api/auth/signout", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: "{}",
-                }).catch(() => undefined);
-                window.location.reload();
-              },
-            }
-          : undefined
-      }
-    />
+    <>
+      <ProtoApp
+        legacy={legacy}
+        account={
+          auth.required
+            ? {
+                email: auth.member?.email ?? null,
+                signIn: () => setSigningIn(true),
+                signOut: async () => {
+                  await fetch("/api/auth/signout", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: "{}",
+                  }).catch(() => undefined);
+                  setAuth({ ...auth, member: null });
+                },
+              }
+            : undefined
+        }
+      />
+      {signingIn && (
+        <SignIn
+          inviteOpen={auth.inviteOpen}
+          onClose={close}
+          onSignedIn={(member) => (setAuth({ ...auth, required: true, member }), setSigningIn(false))}
+        />
+      )}
+    </>
   );
 }
 
