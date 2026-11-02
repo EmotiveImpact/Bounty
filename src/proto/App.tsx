@@ -1784,7 +1784,7 @@ export default function ProtoApp({
         </div>
       </div>
       <div className="legacy" style={{ marginTop: 20 }}>
-        <div className="planner goals">
+        <div className="planner goals prof-forms">
           <GoalsSettings />
           <BuyingRules />
         </div>
