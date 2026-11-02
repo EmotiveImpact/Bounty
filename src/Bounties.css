@@ -1,31 +1,35 @@
 /* Bounties tab. Shared utilities live in style.css. */
 /* Notes use the body font; the shared small style is for labels. */
 .bounties small.muted {
-  font: 13px/1.5 system-ui, sans-serif;
+  font: 400 13px/1.5 var(--sans);
   letter-spacing: 0;
   margin-top: 4px;
 }
 .bounties h3 {
-  font-family: Georgia, serif;
-  font-weight: normal;
-  font-size: 21px;
+  font-family: var(--sans);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  font-size: 19px;
   margin: 0 0 8px;
 }
 .terms-box {
   display: grid;
   gap: 4px;
-  border-left: 4px solid #1d4939;
-  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border: 1px solid var(--brand);
+  border-radius: 10px;
+  background: var(--surface-2);
+  padding: 10px 14px;
   margin: 12px 0;
   font-size: 14px;
 }
 .badge.earned {
-  background: #d6ecef;
-  color: #134a55;
+  background: var(--brand-soft);
+  color: var(--brand-2);
 }
 .badge.paid.lapsed {
-  background: #ecebf0;
-  color: #5c5770;
+  background: var(--info-soft);
+  color: var(--info);
 }
 .member-badges .badge {
   margin-bottom: 4px;
@@ -66,7 +70,7 @@ label.inline {
 }
 .facts dt {
   text-transform: none;
-  color: #5f7268;
+  color: var(--muted);
 }
 .facts dd {
   overflow-wrap: anywhere;
@@ -98,13 +102,15 @@ label.inline {
   margin: 12px 0;
 }
 .pressure > div {
-  border: 1px solid #c7d0c4;
-  border-radius: 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
   padding: 10px 12px;
-  background: #fffef9;
+  background: var(--surface);
 }
 .pressure b {
-  font-size: 20px;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
   font-variant-numeric: tabular-nums;
 }
 .opportunity ul {
@@ -126,7 +132,7 @@ label.inline {
 }
 .claim-panel,
 .operator {
-  border-top: 1px solid #dce0d6;
+  border-top: 1px solid var(--line);
   margin-top: 12px;
   padding-top: 8px;
 }
@@ -148,7 +154,7 @@ label.inline {
 }
 .alert-list li {
   padding: 6px 0;
-  border-bottom: 1px solid #dce0d6;
+  border-bottom: 1px solid var(--line);
 }
 .alert-list .badge {
   margin-left: 6px;
@@ -156,13 +162,14 @@ label.inline {
 /* "Don't make the trip" lines and notices. */
 .stop {
   display: block;
-  border-left: 4px solid #8a2716;
-  background: #f8dcd6;
-  color: #6e1d10;
+  border: 1px solid var(--fail);
+  background: var(--fail-soft);
+  color: var(--fail-ink);
   padding: 8px 12px;
   margin: 8px 0;
   font-size: 14px;
   font-weight: 600;
+  border-radius: 8px;
 }
 .stop-notices {
   list-style: none;
@@ -170,25 +177,27 @@ label.inline {
   margin: 8px 0;
 }
 .stop-notices li {
-  border-left: 4px solid #8a2716;
-  background: #fbeae6;
-  padding: 6px 10px;
+  border: 1px solid var(--fail);
+  background: var(--fail-soft);
+  border-radius: 8px;
+  padding: 8px 12px;
   margin: 4px 0;
 }
 .stop-notices b {
   font-size: 14px;
-  color: #6e1d10;
+  color: var(--fail-ink);
 }
 .alert-list .stop {
   margin: 6px 0;
 }
 /* "Your claim stands": why a holder among the first claims may still go.
-   The same green as a reopen notice (#1d4939 on #e3f0e4). */
+   The same green as a reopen notice (var(--brand) on var(--pass-soft)). */
 .go-note {
   display: block;
-  border-left: 4px solid #1d4939;
-  background: #e3f0e4;
-  color: #1d4939;
+  border: 1px solid var(--brand);
+  background: var(--pass-soft);
+  color: var(--brand);
+  border-radius: 8px;
   padding: 8px 12px;
   margin: 8px 0;
   font-size: 14px;
@@ -200,13 +209,14 @@ label.inline {
 /* The pilot audit line while it is a caution (not validated, or not yet
    signed off). */
 .prevalidation {
-  border-left: 4px solid #8a6d10;
+  border: 1px solid var(--note-line);
 }
 /* After a sign-off that stands, the same line is a plain result: neutral,
-   neither a caution nor a go (#19372f on #eceee8). */
+   neither a caution nor a go (var(--ink) on var(--info-soft)). */
 .validation-result {
-  border-left: 4px solid #8d9a92;
-  background: #eceee8;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: var(--info-soft);
   padding: 8px 12px;
   margin: 8px 0;
   font-size: 14px;
@@ -220,8 +230,8 @@ label.inline {
   justify-self: start;
 }
 .promotion {
-  border: 1px solid #c7d0c4;
-  border-radius: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
   padding: 6px 10px;
 }
 /* Stock reports: one card per report, so the operator's verify buttons are
@@ -236,7 +246,7 @@ label.inline {
   grid-template-columns: minmax(150px, 1fr) minmax(0, 2fr) auto;
   gap: 4px 12px;
   align-items: start;
-  border-bottom: 1px solid #dce0d6;
+  border-bottom: 1px solid var(--line);
   padding: 6px 0;
   font-size: 14px;
 }
@@ -290,22 +300,22 @@ label.inline {
   gap: 4px;
 }
 .badge.access {
-  background: #f1e6c8;
-  color: #5b4510;
+  background: var(--paid-soft);
+  color: var(--paid);
 }
 .badge.access.open {
-  background: #dcebd9;
-  color: #1d4939;
+  background: var(--pass-soft);
+  color: var(--brand);
 }
 .stop-notices li.reopen {
-  border-left-color: #1d4939;
-  background: #e3f0e4;
+  border-left-color: var(--brand);
+  background: var(--pass-soft);
 }
 .stop-notices li.reopen b {
-  color: #1d4939;
+  color: var(--brand);
 }
 .category-warning {
-  border-left: 4px solid #8a6d10;
+  border: 1px solid var(--note-line);
 }
 .match-notes {
   margin: 0;
@@ -318,8 +328,8 @@ label.inline {
 .eligibility {
   display: grid;
   gap: 6px;
-  border: 1px solid #c7d0c4;
-  border-left: 4px solid #8a6d10;
+  border: 1px solid var(--line);
+  border: 1px solid var(--note-line);
   border-radius: 8px;
   padding: 8px 12px;
   margin: 8px 0;
@@ -340,36 +350,36 @@ label.inline {
   font-size: 14px;
 }
 .own-figures.ok {
-  background: #e3f0e4;
+  background: var(--pass-soft);
 }
 .own-figures.warn {
-  background: #fbeae6;
+  background: var(--fail-soft);
 }
 .alert-list li > small.muted {
   display: block;
 }
 /* Round three. Muted text inside the red and green notices is darker than
    the shared muted colour, so it keeps at least 4.5:1 contrast there
-   (#4f6158: 5.7:1 on #fbeae6, 5.6:1 on #e3f0e4, 5.1:1 on #f8dcd6). */
+   (var(--ink-2): 5.7:1 on var(--fail-soft), 5.6:1 on var(--pass-soft), 5.1:1 on var(--fail-soft)). */
 .stop-notices .muted,
 .own-figures .muted,
 .stop .muted,
 .eligibility.declined .muted {
-  color: #4f6158;
+  color: var(--ink-2);
 }
 .own-figures .checks {
   margin: 4px 0;
 }
 /* "This bounty is not for you", with the small undo link. */
 .eligibility.declined {
-  border-left-color: #5f7268;
+  border-left-color: var(--muted);
 }
 .link-button {
   justify-self: start;
   background: none;
   border: 0;
   padding: 0;
-  color: #1d4939;
+  color: var(--brand);
   font: inherit;
   font-size: 13px;
   text-decoration: underline;
@@ -381,4 +391,415 @@ label.inline {
 }
 .alert-list li.declined > b {
   font-weight: 600;
+}
+
+/* Page layout (Blend C): the page itself is not a card; each part is. */
+.bounties {
+  display: grid;
+  gap: 16px;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+}
+.bounties > * {
+  margin: 0;
+  min-width: 0;
+}
+.bounties > article {
+  margin: 0;
+}
+.bounties-privacy {
+  font-size: 13px;
+}
+.bounties .terms-box {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 16px 20px;
+  margin: 0;
+  gap: 8px;
+}
+.terms-box h2 {
+  font-size: 17px;
+  margin: 0;
+}
+.terms-box ul {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  gap: 8px 20px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.terms-box li {
+  position: relative;
+  padding-left: 18px;
+  color: var(--ink-2);
+}
+.terms-box li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.55em;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--brand);
+}
+.terms-box li b {
+  display: inline;
+  color: var(--ink);
+}
+.bounties .acting {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 12px 16px 14px;
+  margin: 0;
+}
+.bounties-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 16px;
+  margin-top: 6px;
+}
+.bounties-head h2 {
+  margin: 0;
+}
+
+/* Bounty cards */
+.bounties article.bounty {
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  border-radius: var(--radius);
+  padding: 0 0 18px;
+  overflow: hidden;
+}
+.bounty > :not(.bounty-hero):not(.bounty-deal) {
+  margin-left: 20px;
+  margin-right: 20px;
+}
+.bounty-hero {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(220px, 300px);
+  gap: 14px 18px;
+  align-items: start;
+  padding: 18px 20px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.bounty-hero .planner-tile {
+  width: 60px;
+  height: 60px;
+  border-radius: 14px;
+}
+.bounty-title {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.bounty-title h3 {
+  margin: 0;
+  font-size: 20px;
+}
+.bounty-meta {
+  font-size: 13.5px;
+  color: var(--muted);
+}
+.bounty-places {
+  display: grid;
+  gap: 7px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+.bounty-places-label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.bounty-places-label b {
+  display: inline;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.bounty-bar {
+  display: flex;
+  gap: 3px;
+  height: 10px;
+}
+.bounty-bar i,
+.bounty-key i {
+  flex: 1;
+  border-radius: 3px;
+  background: var(--brand-soft);
+  box-shadow: inset 0 0 0 1.5px var(--brand);
+}
+.bounty-bar i.claimed,
+.bounty-key i.claimed {
+  background: var(--asking-soft);
+  box-shadow: inset 0 0 0 1.5px var(--asking);
+}
+.bounty-bar i.bought,
+.bounty-key i.bought {
+  background: var(--ink-2);
+  box-shadow: none;
+}
+.bounty-bar.solid {
+  gap: 0;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.bounty-bar.solid i {
+  border-radius: 0;
+}
+.bounty-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.bounty-key i {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  vertical-align: -1px;
+}
+.bounty-shelf {
+  font-size: 12.5px;
+  font-weight: 600;
+  border-radius: 8px;
+  padding: 4px 8px;
+  justify-self: start;
+  background: var(--info-soft);
+  color: var(--info);
+}
+.bounty-shelf.ok {
+  background: var(--pass-soft);
+  color: var(--pass);
+}
+.bounty-shelf.warn {
+  background: var(--fail-soft);
+  color: var(--fail);
+}
+.bounty-deal {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  padding: 12px 20px;
+  background: var(--pass-soft);
+  border-bottom: 1px solid var(--line);
+}
+.bounty-deal > span:not(.bounty-arrow):not(.bounty-deal-profit) {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  background: var(--surface);
+  border-radius: 9px;
+  padding: 7px 10px;
+}
+.bounty-deal .badge {
+  margin: 0;
+  font-size: 10.5px;
+  padding: 2px 6px;
+}
+.bounty-deal b {
+  font: 700 18px/1.1 var(--sans);
+  font-variant-numeric: tabular-nums;
+}
+.bounty-arrow {
+  color: var(--muted);
+  font-size: 18px;
+}
+.bounty-deal-profit {
+  margin-left: auto;
+  display: grid;
+  justify-items: end;
+}
+.bounty-deal-profit b {
+  font-size: 26px;
+  font-weight: 750;
+  color: var(--pass);
+  letter-spacing: -0.03em;
+}
+.bounty-deal-profit span {
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+.bounty-title .bounty-head {
+  margin-top: 4px;
+}
+.bounty-hero + .bounty-deal + *,
+.bounty-hero + :not(.bounty-deal) {
+  margin-top: 14px;
+}
+.bounty .facts {
+  grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr);
+  column-gap: 16px;
+}
+@media (max-width: 900px) {
+  .bounty-hero {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .bounty-places {
+    grid-column: 1 / -1;
+  }
+  .bounty .facts {
+    grid-template-columns: max-content minmax(0, 1fr);
+  }
+}
+@media (max-width: 560px) {
+  .bounty-hero {
+    padding: 14px;
+  }
+  .bounty > :not(.bounty-hero):not(.bounty-deal) {
+    margin-left: 14px;
+    margin-right: 14px;
+  }
+  .bounty-deal {
+    padding: 12px 14px;
+  }
+  .bounty-deal-profit {
+    margin-left: 0;
+    justify-items: start;
+    flex-basis: 100%;
+  }
+  .bounty-hero .planner-tile {
+    width: 48px;
+    height: 48px;
+  }
+  .bounty .facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .bounty .facts dt {
+    border-bottom: 0;
+    padding-bottom: 0;
+  }
+/* Round five: units from earlier bounties for the item, and purchases whose
+   units still count against its demand, with the forms that release them. */
+.earlier {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #c7d0c4;
+  border-left: 4px solid #8a6d10;
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 8px 0;
+  font-size: 14px;
+}
+.earlier p {
+  margin: 0;
+}
+.purchase-release {
+  display: grid;
+  gap: 4px;
+  border-top: 1px solid #dce0d6;
+  padding-top: 6px;
+}
+.release-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 4px 12px;
+}
+.release-form label {
+  flex: 0 1 200px;
+  margin: 0;
+}
+.release-form label.wide {
+  flex: 1 1 240px;
+}
+.release-form input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.release-form button {
+  padding: 4px 10px;
+}
+@media (max-width: 640px) {
+  .release-form label,
+  .release-form label.wide {
+    flex: 1 1 100%;
+  }
+  .release-form button {
+    min-height: 40px;
+    padding: 6px 14px;
+  }
+}
+/* Round five: whether the trip fits the member's transport, carrying limit
+   and storage, and the profile fields that decide it. Same colours as the
+   member's own figures, so muted text keeps its contrast. */
+.fit {
+  display: grid;
+  gap: 2px;
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin: 6px 0;
+  font-size: 14px;
+}
+.fit.ok {
+  background: #e3f0e4;
+}
+.fit.warn {
+  background: #fbeae6;
+}
+.fit .muted {
+  color: #4f6158;
+}
+.fit .checks {
+  margin: 4px 0;
+}
+.fit li,
+.member-summary dd {
+  overflow-wrap: anywhere;
+}
+.member-form .trip-profile button {
+  justify-self: start;
+  white-space: normal;
+  text-align: left;
+}
+/* The cash field carries a hint, so the fields beside it keep their height. */
+.claim-form .form-grid {
+  align-items: start;
+}
+/* The cash a holder can spend, under any live claim of theirs (round 5b). */
+.claim-cash {
+  display: grid;
+  gap: 4px;
+  flex-basis: 100%;
+  max-width: 560px;
+}
+.claim-cash label {
+  display: grid;
+  gap: 2px;
+}
+.claim-cash input {
+  width: 100%;
+  max-width: 200px;
+}
+.claim-cash button {
+  justify-self: start;
+}
+/* A refused value shown next to its own field (round 5b). */
+.field-error {
+  font-weight: normal;
+}
+/* The operator's list of seller names to check (round 5b). */
+.seller-names ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+.seller-names li {
+  margin: 4px 0;
+}
+.seller-names button {
+  margin-left: 8px;
 }

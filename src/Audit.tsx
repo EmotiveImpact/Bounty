@@ -81,6 +81,18 @@ type Evidence = {
   offerCopy?: { price: number; observed: string | null; retailer: string | null; copiedAt: string; migrated: boolean } | null;
   // How the live offer differs from that copy, or null.
   offerChange?: { changed: string[]; note: string | null } | null;
+  // Whether the price applies at the branch the stock check covers: a branch
+  // check recorded the shelf price ("check"), or the offer is an Open Prices
+  // price from the shop the check names ("same-shop"). reason says why not.
+  priceAtBranch?: {
+    confirmed: boolean;
+    basis: "check" | "same-shop" | null;
+    price: number | null;
+    at: string | null;
+    check: { id: number; checkedAt: string; branch: string | null; locality: string; price: number } | null;
+    seen: { price: number; observed: string | null; where: string; online: boolean } | null;
+    reason: string | null;
+  } | null;
 };
 type AuditItem = {
   id: number;
@@ -270,6 +282,36 @@ const shown = (value: unknown) =>
         ? "no"
         : String(value);
 
+// Whether the price the item is judged on applies at the branch checked.
+function BranchPrice({ ev }: { ev: Evidence }) {
+  const p = ev.priceAtBranch;
+  if (p === undefined) return null;
+  if (!p)
+    return (
+      <p className="warn" data-price-at-branch="no">
+        Price not confirmed at the branch: the stored evidence does not say where the price applies.
+      </p>
+    );
+  if (!p.confirmed)
+    return (
+      <p className="warn" data-price-at-branch="no">
+        Price not confirmed at the branch: {p.reason ?? "no branch check recorded the shelf price"}.
+      </p>
+    );
+  const seen = p.seen && p.price !== null && p.seen.price !== p.price
+    ? ` The offer listed ${money(p.seen.price)} ${p.seen.online ? "online" : "at " + p.seen.where}.`
+    : "";
+  return (
+    <p data-price-at-branch="yes">
+      Price confirmed at the branch:{" "}
+      {p.basis === "check" && p.check
+        ? `shelf price ${money(p.check.price)} recorded on the branch check in ${p.check.locality}${p.check.branch ? " (" + p.check.branch + ")" : ""} at ${dateTime(p.check.checkedAt)}.`
+        : `${p.price === null ? "the" : money(p.price)} price was seen at ${p.seen?.where ?? "the shop"}, the shop the branch check names.`}
+      {seen}
+    </p>
+  );
+}
+
 function EvidenceSummary({ item }: { item: AuditItem }) {
   const ev = item.evidence;
   if (!ev) return null;
@@ -283,7 +325,8 @@ function EvidenceSummary({ item }: { item: AuditItem }) {
   return (
     <div className="muted">
       <p>
-        Stored evidence at {dateTime(ev.evaluatedAt)}: {ev.offer.source} offer at{" "}
+        Stored evidence at {dateTime(ev.evaluatedAt)}: {ev.offer.source} offer
+        {ev.priceAtBranch?.basis === "check" ? ", costed at the branch shelf price of " : " at "}
         {money(ev.offer.unitCost)}
         {ev.offer.sample ? " (sample data)" : ""}.{" "}
         {s
@@ -293,6 +336,7 @@ function EvidenceSummary({ item }: { item: AuditItem }) {
         {s ? ` · days to sell ${shown(s.daysToSell)}` : ""} · match {shown(ev.match)} · display{" "}
         {ev.permission?.permitted ? "permitted" : "not permitted"} · estimate {ev.tier ?? "not run"}.
       </p>
+      <BranchPrice ev={ev} />
       {ev.offerChange?.note && <p className="notice">{ev.offerChange.note}</p>}
       {ev.offerCopy?.migrated && (
         <p className="muted">
@@ -457,7 +501,7 @@ export default function Audit({ draft }: { draft?: AuditHandover | null }) {
   const sampleArea = locality.trim() !== "" && isSampleArea(locality);
   return (
     <article className="audit">
-      <small>VALIDATION / REAL BUYING ALERTS GATE</small>
+      <small>Before real buy alerts</small>
       <h2>Validation audit</h2>
       <p>
         Before buy alerts can be trusted, check 30 barcoded items in the pilot

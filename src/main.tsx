@@ -1,60 +1,48 @@
-import React, { useEffect, useState } from "react";
+import React from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
+import "./look.css";
+import Scan from "./Scan";
 import Planner from "./Planner";
-import Goals from "./Goals";
+import { BasketSection } from "./Goals";
 import Research from "./Research";
 import { clearResearchDraft } from "./ResearchCalculator";
 import Bounties from "./Bounties";
 import Ledger from "./Ledger";
 import Sources from "./Sources";
+import ProtoApp, { type View } from "./proto/App";
+import SignIn, { type Member } from "./SignIn";
+import { reloadPlans } from "./plans";
+import { SIGN_IN_EVENT } from "./api";
 
-const TABS = {
-  Planner: {
-    title: "Bounty planner",
-    lead: "Find the trips that fit your cash, time and carrying capacity.",
-    view: Planner,
-  },
-  Goals: {
-    title: "Goals and baskets",
-    lead: "Plan against your dispatch days, storage, cash date and monthly target.",
-    view: Goals,
-  },
-  Research: {
-    title: "Source research",
-    lead: "Match an acquisition offer to exact sold evidence before planning a purchase.",
-    view: Research,
-  },
-  Bounties: {
-    title: "Bounties",
-    lead: "Share checked opportunities without flooding the store or the market.",
-    view: Bounties,
-  },
-  Ledger: {
-    title: "Outcome ledger",
-    lead: "Reconcile receipts, sales, payouts, costs and time against the prediction.",
-    view: Ledger,
-  },
-  Sources: {
-    title: "Sources and observations",
-    lead: "Source readiness, import history and dated UK price observations.",
-    view: Sources,
-  },
-} as const;
-type Tab = keyof typeof TABS;
-
-// The tab named in the address, or null. Only the tabs themselves count
-// (never inherited names such as "constructor"), and a malformed escape in
-// the hash is ignored rather than breaking the page.
-function tabFromHash(): Tab | null {
-  let hash: string;
-  try {
-    hash = decodeURIComponent(location.hash.slice(1));
-  } catch {
-    return null;
-  }
-  return Object.hasOwn(TABS, hash) ? (hash as Tab) : null;
+// The trip planner, with the several-items basket plan under it. Money has
+// its own screen in the new shell (proto/Money.tsx).
+function PlannerPage() {
+  return (
+    <>
+      <Planner />
+      <div className="planner goals">
+        <BasketSection />
+      </div>
+    </>
+  );
 }
+
+// Stock's full records, without the month summary and tax note that the
+// new Stock and Money screens already show.
+function StockRecords() {
+  return <Ledger bare />;
+}
+
+// The older screens, shown inside the new shell until each is ported.
+const LEGACY: Partial<Record<View, React.ComponentType>> = {
+  scan: Scan,
+  planner: PlannerPage,
+  research: Research,
+  tips: Bounties,
+  stock: StockRecords,
+  sources: Sources,
+};
 
 // Keeps a failure in one tab from blanking the whole page. onError lets a
 // tab forget state it saved for the session (the Research draft), so a
@@ -74,7 +62,8 @@ class TabBoundary extends React.Component<
     if (this.state.error)
       return (
         <p role="alert">
-          This tab hit an error and stopped ({this.state.error}). Reload the page, or choose another tab.
+          This tab hit an error and stopped ({this.state.error}). Reload the
+          page, or choose another tab.
         </p>
       );
     return this.props.children;
@@ -82,49 +71,72 @@ class TabBoundary extends React.Component<
 }
 
 // Tabs that keep a session draft to forget when they fail.
-const ON_ERROR: Partial<Record<string, () => void>> = { Research: clearResearchDraft };
+const ON_ERROR: Partial<Record<string, () => void>> = {
+  research: clearResearchDraft,
+};
 
-function App() {
-  const [tab, setTab] = useState<Tab>(() => tabFromHash() ?? "Planner");
-  // Follow in-page links such as the Planner's "Open the basket plan in Goals".
-  useEffect(() => {
-    const follow = () => {
-      const next = tabFromHash();
-      if (next) setTab(next);
-    };
-    window.addEventListener("hashchange", follow);
-    return () => window.removeEventListener("hashchange", follow);
+function legacy(view: View) {
+  const Screen = LEGACY[view];
+  if (!Screen) return null;
+  return (
+    <TabBoundary key={view} onError={ON_ERROR[view]}>
+      <Screen />
+    </TabBoundary>
+  );
+}
+
+// On a hosted pilot with member accounts the site opens for everyone, with a
+// Sign in button at the top. Saving a change while signed out opens the
+// sign-in window too. On your own computer there are no accounts.
+type Auth = { required: boolean; inviteOpen: boolean; member: Member | null };
+
+function Root() {
+  const [auth, setAuth] = React.useState<Auth>({ required: false, inviteOpen: false, member: null });
+  const [signingIn, setSigningIn] = React.useState(false);
+  React.useEffect(() => {
+    fetch("/api/auth/me")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.required)
+          setAuth({ required: true, inviteOpen: Boolean(data.inviteOpen), member: data.user ?? null });
+      })
+      .catch(() => undefined);
+    const open = () => setSigningIn(true);
+    window.addEventListener(SIGN_IN_EVENT, open);
+    return () => window.removeEventListener(SIGN_IN_EVENT, open);
   }, []);
-  const View = TABS[tab].view;
+  const close = React.useCallback(() => setSigningIn(false), []);
   return (
     <>
-      <header>
-        <strong>◈ &nbsp; Bounty</strong>
-        <span>FIELD DESK &nbsp; / &nbsp; UK</span>
-      </header>
-      <main>
-        <small>OPERATIONS &nbsp; / &nbsp; PERSONAL WORKSPACE</small>
-        <h1>{TABS[tab].title}</h1>
-        <p>{TABS[tab].lead}</p>
-        <nav>
-          {(Object.keys(TABS) as Tab[]).map((t) => (
-            <button
-              key={t}
-              aria-pressed={t === tab}
-              onClick={() => {
-                setTab(t);
-                history.replaceState(null, "", "#" + t);
-              }}
-            >
-              {t}
-            </button>
-          ))}
-        </nav>
-        <TabBoundary key={tab} onError={ON_ERROR[tab]}>
-          <View />
-        </TabBoundary>
-      </main>
+      <ProtoApp
+        legacy={legacy}
+        account={
+          auth.required
+            ? {
+                email: auth.member?.email ?? null,
+                signIn: () => setSigningIn(true),
+                signOut: async () => {
+                  await fetch("/api/auth/signout", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: "{}",
+                  }).catch(() => undefined);
+                  setAuth({ ...auth, member: null });
+                  reloadPlans();
+                },
+              }
+            : undefined
+        }
+      />
+      {signingIn && (
+        <SignIn
+          inviteOpen={auth.inviteOpen}
+          onClose={close}
+          onSignedIn={(member) => (setAuth({ ...auth, required: true, member }), setSigningIn(false), reloadPlans())}
+        />
+      )}
     </>
   );
 }
-createRoot(document.getElementById("root")!).render(<App />);
+
+createRoot(document.getElementById("root")!).render(<Root />);

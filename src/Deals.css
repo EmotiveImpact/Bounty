@@ -1,0 +1,564 @@
+/* Deals: the first screen. Cards lead with the shop price against what the
+   item sells for, then the profit a unit. Shop price uses --retail and the
+   completed-sale figure --sold, as everywhere else in the app. */
+.deals {
+  display: grid;
+  gap: 14px;
+}
+.deals-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.deals-search input {
+  width: 100%;
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 15px;
+}
+.deals-cats {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.deals-cats button {
+  flex: none;
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+.deals-cats button[aria-pressed="true"] {
+  background: var(--cta);
+  border-color: var(--cta);
+  color: var(--cta-ink);
+}
+.deals-sorts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  font-size: 13.5px;
+}
+.deals-sorts .muted {
+  margin-right: 4px;
+}
+.deals-sorts button {
+  border: 0;
+  background: none;
+  padding: 5px 10px;
+  border-radius: 8px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+.deals-sorts button[aria-pressed="true"] {
+  background: var(--info-soft);
+  color: var(--ink);
+}
+.deals-sample {
+  margin: 0;
+  font-size: 13.5px;
+}
+
+.deals-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+}
+.deals-card {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  text-align: left;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-weight: 400;
+}
+.deals-card:hover {
+  box-shadow: var(--shadow-lg);
+  border-color: var(--line-2);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .deals-card {
+    transition:
+      box-shadow 0.15s,
+      transform 0.15s;
+  }
+  .deals-card:hover {
+    transform: translateY(-1px);
+  }
+}
+.deals-picture {
+  position: relative;
+  display: grid;
+  place-items: center;
+  height: 124px;
+  background: var(--tile);
+}
+.deals-picture .planner-tile {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+}
+.deals-picture .planner-tile svg {
+  width: 64px;
+  height: 64px;
+}
+.deals-ribbon {
+  position: absolute;
+  left: 0;
+  top: 12px;
+  background: var(--brand);
+  color: var(--brand-ink);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 10px 3px 8px;
+  border-radius: 0 999px 999px 0;
+}
+.deals-tag {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  margin: 0;
+}
+.deals-body {
+  display: grid;
+  gap: 9px;
+  align-content: start;
+  padding: 12px 14px 14px;
+  min-width: 0;
+}
+.deals-item {
+  display: grid;
+  gap: 1px;
+}
+.deals-item b {
+  font-weight: 700;
+  line-height: 1.3;
+}
+.deals-item em {
+  font-style: normal;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.deals-prices {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+.deals-prices > span:not(.deals-arrow) {
+  display: grid;
+  gap: 1px;
+}
+.deals-prices small {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.deals-prices b {
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+}
+.deals-shop small,
+.deals-shop b {
+  color: var(--retail);
+}
+.deals-sold small,
+.deals-sold b {
+  color: var(--sold);
+}
+.deals-arrow {
+  color: var(--muted);
+  padding-bottom: 2px;
+}
+.deals-evidence {
+  font-size: 12px;
+  color: var(--muted);
+}
+.deals-profit {
+  display: grid;
+  background: var(--brand-soft);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+.deals-profit b {
+  font-size: 22px;
+  line-height: 1.15;
+  color: var(--brand);
+  font-variant-numeric: tabular-nums;
+}
+.deals-profit span {
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.deals-profit.small {
+  background: var(--info-soft);
+}
+.deals-profit.small b {
+  color: var(--ink-2);
+}
+.deals-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.deals-chip {
+  font-size: 12px;
+  color: var(--muted);
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.deals-chip.travel {
+  border-style: dashed;
+}
+
+.deals-sharper {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(200px, 1.3fr) repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  align-items: center;
+  border: 1px dashed var(--line-2);
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+.deals-sharper h2 {
+  font-size: 16px;
+  margin: 0;
+}
+.deals-sharper p {
+  font-size: 13.5px;
+  color: var(--ink-2);
+  margin: 2px 0 0;
+}
+.deals-sharper a {
+  display: grid;
+  gap: 1px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  text-decoration: none;
+}
+.deals-sharper a:hover {
+  border-color: var(--line-2);
+}
+.deals-sharper small {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 12.5px;
+}
+.deals-fees {
+  font-size: 13px;
+  margin: 0;
+}
+
+/* The working behind one deal: a panel from the right, a sheet on phones. */
+.deals-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(13, 23, 38, 0.32);
+}
+.deals-panel {
+  position: fixed;
+  z-index: 41;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(440px, 100%);
+  overflow-y: auto;
+  background: var(--surface);
+  border-left: 1px solid var(--line);
+  box-shadow: var(--shadow-lg);
+  padding: calc(18px + env(safe-area-inset-top, 0px)) max(18px, env(safe-area-inset-right, 0px))
+    calc(24px + env(safe-area-inset-bottom, 0px)) 18px;
+  display: grid;
+  gap: 14px;
+  align-content: start;
+}
+.deals-panel:focus {
+  outline: none;
+}
+.deals-panel-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+.deals-panel-head .planner-tile {
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+}
+.deals-panel-head h2 {
+  font-size: 19px;
+  margin: 0;
+}
+.deals-panel-head .muted {
+  font-size: 13px;
+}
+.deals-close {
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  border-radius: 10px;
+  padding: 6px 12px;
+  font-weight: 600;
+}
+.deals-sum {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.deals-sum th,
+.deals-sum td {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+  font-weight: 400;
+  text-align: left;
+  color: var(--ink-2);
+}
+.deals-sum td {
+  text-align: right;
+  white-space: nowrap;
+  padding-left: 12px;
+}
+.deals-sum tr:first-child th,
+.deals-sum tr:first-child td {
+  color: var(--sold);
+  font-weight: 600;
+}
+.deals-sum tr.total th,
+.deals-sum tr.total td {
+  border-bottom: 0;
+  padding-top: 10px;
+  font-weight: 700;
+  font-size: 16px;
+  color: var(--brand);
+}
+.deals-panel > .muted {
+  font-size: 13px;
+  margin: -6px 0 0;
+}
+.deals-box {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  font-size: 13.5px;
+  color: var(--ink-2);
+}
+.deals-box h3 {
+  font-size: 14px;
+  margin: 0;
+}
+.deals-box ul {
+  margin: 0;
+  padding-left: 18px;
+}
+.deals-sales {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.deals-sales span {
+  background: var(--sold-soft);
+  color: var(--sold);
+  border-radius: 999px;
+  padding: 1px 9px;
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.deals-actions {
+  display: grid;
+  gap: 8px;
+}
+.deals-cta,
+.deals-ghost {
+  display: block;
+  text-align: center;
+  border-radius: 12px;
+  padding: 11px 14px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.deals-cta {
+  background: var(--cta);
+  color: var(--cta-ink);
+}
+.deals-ghost {
+  border: 1px solid var(--line-2);
+  color: var(--ink);
+}
+
+@media (max-width: 960px) {
+  .deals-sharper {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 760px) {
+  .deals-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .deals-card {
+    grid-template-rows: none;
+    grid-template-columns: 96px minmax(0, 1fr);
+  }
+  .deals-picture {
+    height: auto;
+    min-height: 100%;
+  }
+  .deals-picture .planner-tile svg {
+    width: 46px;
+    height: 46px;
+  }
+  .deals-ribbon {
+    top: 8px;
+    font-size: 11px;
+    padding: 2px 7px 2px 5px;
+  }
+  .deals-tag {
+    display: none;
+  }
+  .deals-body {
+    padding: 10px 12px 12px;
+    gap: 7px;
+  }
+  .deals-profit b {
+    font-size: 19px;
+  }
+  .deals-panel {
+    top: auto;
+    max-height: 90vh;
+    width: 100%;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+    border-radius: 18px 18px 0 0;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+}
+
+/* Sort strip and the Simple or Pro switch share one row. */
+.deals-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.deals-verdict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  font-size: 13px;
+}
+.deals-answer {
+  display: grid;
+  gap: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 14px;
+  color: var(--ink-2);
+  justify-items: start;
+}
+/* Pro view: a dense table that scrolls sideways inside its own box on phones. */
+.deals-pro {
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.deals-pro table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  min-width: 860px;
+}
+.deals-pro th,
+.deals-pro td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: middle;
+}
+.deals-pro thead th {
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: var(--surface-2);
+  font-weight: 700;
+}
+.deals-pro tbody tr:last-child th,
+.deals-pro tbody tr:last-child td {
+  border-bottom: 0;
+}
+.deals-pro .n {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.deals-pro .retail {
+  color: var(--retail);
+  font-weight: 600;
+}
+.deals-pro .sold {
+  color: var(--sold);
+  font-weight: 600;
+}
+.deals-pro .gain {
+  color: var(--pass);
+  font-weight: 700;
+}
+.deals-pro .loss {
+  color: var(--fail);
+  font-weight: 700;
+}
+.deals-pro tbody th {
+  background: none;
+}
+.deals-pro tbody th small {
+  display: block;
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 12.5px;
+}
+.deals-pro-name,
+.deals-pro-name:hover:not(:disabled) {
+  border: 0;
+  background: none;
+  padding: 0;
+  font-weight: 650;
+  color: var(--ink);
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: var(--line-2);
+  text-underline-offset: 3px;
+}

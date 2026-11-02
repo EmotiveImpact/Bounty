@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   api,
   dateTime,
@@ -8,8 +8,12 @@ import {
   MemberRules,
   money,
   percent,
+  editedTripFields,
   Profile,
+  profileEdited,
   RuleKey as ApiRuleKey,
+  TRIP_FIELDS,
+  type TripField,
   saveMemberRules,
   saveProfile,
   toPence,
@@ -50,6 +54,18 @@ export type Economics = {
   allSellAssumed: boolean;
   journeyKnown?: false;
 };
+// The same figures before travel while a public transport fare is blank:
+// the best the trip can do, shown only labelled "before your fare".
+export type BeforeTravel = {
+  contribution: number;
+  unitProfit: number | null;
+  returnOnCost: number | null;
+  cashRequired: number;
+  hourly: number | null;
+  unsoldLoss: number;
+  halfSells: number | null;
+  breakEvenSale: number | null;
+};
 type Check = { id: string; ok: boolean; detail: string };
 export type Opportunity = {
   tier: string;
@@ -65,7 +81,10 @@ export type Thresholds = {
   returnOnCost: number | null;
   ok: boolean;
   failures: string[];
-  fareNeeded?: boolean; // the verdict waits for a public transport fare
+  // Inside every threshold before travel, shortlisted while the public
+  // transport fare is blank; the verdict after travel waits for the fare.
+  fareNeeded?: boolean;
+  beforeTravel?: { unitProfit: number | null; returnOnCost: number | null; ok: boolean } | null;
 };
 export type AccessNeed = { id: string; label: string; detail: string };
 export type Checked = { price: string | null; stock: string | null };
@@ -102,6 +121,7 @@ type ModeSummary = {
   contribution: number | null;
   hourly: number | null;
   fareMissing: boolean;
+  beforeTravel?: { cashRequired: number; contribution: number; hourly: number | null } | null;
   reason: string;
   fits: boolean;
 };
@@ -142,6 +162,8 @@ type Trip = {
   journey: { mode: string; miles: number; cost: number | null; minutes: number };
   fareMissing: boolean;
   economics: Economics;
+  beforeTravel?: BeforeTravel | null; // set while the public transport fare is blank
+  travelNote?: string | null;
   downside: { nothingSells: number | null; halfSellsUnits: number; halfSells: number | null };
   thresholds: Thresholds;
   hardFilters: string[];
@@ -158,6 +180,7 @@ type Trip = {
     current: ModeSummary;
     alternative: ModeSummary;
     difference: Record<string, number | null>;
+    differenceBeforeTravel?: Record<string, number | null>;
     timeSaved: number | null;
     assumptions: string[];
   };
@@ -175,7 +198,6 @@ type Rejected = {
   unitProfit: number | null;
   returnOnCost: number | null;
   reasons: string[];
-  fareNeeded?: boolean; // waits for a public transport fare
   tier: string;
   accessNeeds: AccessNeed[];
 };
@@ -187,6 +209,7 @@ type DriveOption = {
   loadKg: number;
   contribution: number | null;
   hourly: number | null;
+  beforeTravel?: { cashRequired: number; contribution: number; hourly: number | null } | null;
   reason: string;
 };
 type Drive = {
@@ -197,7 +220,7 @@ type Drive = {
   alternativeFareMissing?: boolean;
   extra: DriveOption[];
   lost: DriveOption[];
-  fareNeeded?: DriveOption[]; // fit now; by public transport they wait for a fare
+  fareNeeded?: DriveOption[]; // fit now; by public transport only before the fare
 };
 export type RuleKey = ApiRuleKey;
 export type Rules = MemberRules;
@@ -211,6 +234,9 @@ type PlanResponse = {
   sample: true;
   trips: Trip[];
   rejected: Rejected[];
+  // "after travel", "before travel" (a blank public transport fare) or
+  // "known first" (trips with a known travel cost before the others).
+  ranking?: "after travel" | "before travel" | "known first";
   drive: Drive;
   timing: TripTiming | null;
   accessNeeds: { id: string; label: string }[];
@@ -222,20 +248,38 @@ export const pounds = (pence: number | null | undefined) =>
   pence === null || pence === undefined || !Number.isFinite(pence)
     ? "not known"
     : money(pence);
-/** What a figure that needs the journey cost reads while the fare is blank. */
-export const FARE_UNKNOWN = "not known until you enter your fare";
-const FARE_NEEDED_TEXT = "Enter your return fare to see whether this trip meets your thresholds.";
-/** A figure that depends on the journey: unknown while the fare is blank, never £0. */
-export const fareFigure = (pence: number | null | undefined, fareMissing: boolean) =>
-  fareMissing && (pence === null || pence === undefined) ? FARE_UNKNOWN : pounds(pence);
+/** What a blank public transport fare (the travel cost) reads: never £0. */
+export const FARE_NOT_KNOWN = "not known yet";
+/** The label every figure worked out before the fare carries. */
+export const BEFORE_FARE = "before your fare";
+/** The note a trip carries while its fare is blank (catalog.mjs FARE_NEEDED). */
+export const TRAVEL_NOTE =
+  "Travel cost still to be added: enter your return fare to check this trip against your thresholds after travel";
+/**
+ * A figure that depends on the journey. With the travel cost known it is
+ * the figure itself. While the public transport fare is blank (pending) it
+ * is the figure before the fare, labelled "before your fare" or, for cash
+ * that the fare adds to, "plus your fare"; with no such figure it reads
+ * "not known yet". A blank fare is never shown as £0.
+ */
+export function fareDependent(
+  known: number | null | undefined,
+  before: number | null | undefined,
+  pending: boolean,
+  { plus = false, unit = "", share = false }: { plus?: boolean; unit?: string; share?: boolean } = {},
+) {
+  const has = (v: number | null | undefined): v is number => typeof v === "number" && Number.isFinite(v);
+  if (!pending) return has(known) ? money(known) + unit : "not known";
+  if (!has(before)) return FARE_NOT_KNOWN;
+  if (plus) return money(before) + unit + (share ? " plus a share of your fare" : " plus your fare");
+  return money(before) + unit + " " + BEFORE_FARE;
+}
 const signed = (pence: number | null) =>
   pence === null ? "not comparable" : (pence > 0 ? "+" : "") + money(pence);
 const signedNumber = (n: number | null, unit: string) =>
   n === null ? "not comparable" : (n > 0 ? "+" : "") + n + unit;
-const perHour = (pence: number | null, fareMissing = false) =>
-  pence === null ? (fareMissing ? FARE_UNKNOWN : "no trip") : money(pence) + " an hour";
-const perHourShort = (pence: number | null, fareMissing = false) =>
-  pence === null ? (fareMissing ? FARE_UNKNOWN : "no trip") : money(pence) + "/h";
+const perHour = (pence: number | null) => (pence === null ? "no trip" : money(pence) + " an hour");
+const perHourShort = (pence: number | null) => (pence === null ? "no trip" : money(pence) + "/h");
 const minutesText = (m: number) => m + " min";
 /** "on foot", "by bicycle", "by public transport", "by car" or "by van". */
 export const byMode = (mode: string) => (mode === "Walk" ? "on foot" : "by " + mode.toLowerCase());
@@ -268,8 +312,8 @@ export function cashSentence(cash: CashTiming, cashNeededBy: string | null, payo
 export function sellingSentence(t: { daysToSell: number | null; daysToSellOneUnit: number; units: number }) {
   if (t.daysToSell === null) return "";
   if (t.daysToSell > t.daysToSellOneUnit)
-    return `At the item's sales rate the last of ${plural(t.units, "unit")} is expected to sell after ${plural(t.daysToSell, "day")}, longer than the ${plural(t.daysToSellOneUnit, "day")} your Goals assume for one unit.`;
-  return `It uses your Goals assumption of ${plural(t.daysToSellOneUnit, "day")} to sell, your dispatch days, delivery and payout delay, not sold evidence for this item.`;
+    return `At the item's sales rate the last of ${plural(t.units, "unit")} is expected to sell after ${plural(t.daysToSell, "day")}, longer than the ${plural(t.daysToSellOneUnit, "day")} your settings assume for one unit.`;
+  return `It uses your settings assumption of ${plural(t.daysToSellOneUnit, "day")} to sell, your dispatch days, delivery and payout delay, not sold evidence for this item.`;
 }
 
 // The member's stricter thresholds are shared with Research through api.ts
@@ -519,11 +563,27 @@ export default function Planner() {
   const [result, setResult] = useState<PlanResponse | null>(null);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState("");
-  const set = (patch: Partial<PlannerProfile>) => setProfile({ ...profile, ...patch });
+  // Display only: whether the profile editor is open.
+  const [profileOpen, setProfileOpen] = useState(false);
+  // The profile is stored only once someone changes it here (round 5b), with
+  // a mark naming the trip fields they changed: opening the Planner never
+  // saves its starting values as if someone had entered them, and changing
+  // one field never marks the others (Research and the member form fill in
+  // only the marked trip fields).
+  const [edited, setEdited] = useState<boolean>(profileEdited);
+  const [tripEdited, setTripEdited] = useState<TripField[]>(editedTripFields);
+  const set = (patch: Partial<PlannerProfile>) => {
+    setEdited(true);
+    const changed = TRIP_FIELDS.filter((k) => Object.hasOwn(patch, k) && !tripEdited.includes(k));
+    if (changed.length) setTripEdited([...tripEdited, ...changed]);
+    setProfile({ ...profile, ...patch });
+  };
   const problem = profileProblem(profile);
   const noFare = fareNotEntered(profile);
 
-  useEffect(() => saveProfile(profile), [profile]);
+  useEffect(() => {
+    if (edited) saveProfile(profile, { edited: tripEdited });
+  }, [profile, edited, tripEdited]);
   useEffect(() => saveHidden(hidden), [hidden]);
   useEffect(() => {
     if (problem) {
@@ -554,43 +614,137 @@ export default function Planner() {
 
   const all = result?.trips ?? [];
   const isHidden = (t: { accessNeeds: AccessNeed[] }) => t.accessNeeds.some((n) => hidden.includes(n.id));
-  const trips = all.filter((t) => !isHidden(t));
+  // Display only: the member's sort order and shop filter for the cards.
+  const [sort, setSort] = useState<SortKey>("best");
+  const [shop, setShop] = useState("");
+  const [cat, setCat] = useState("");
+  const cats = [...new Set(all.map((t) => t.category))].sort();
+  const shops = [...new Set(all.map((t) => t.shop))].sort();
+  const shown = all.filter((t) => !isHidden(t));
+  const trips = sortTrips(
+    shown.filter((t) => (!shop || t.shop === shop) && (!cat || t.category === cat)),
+    sort,
+  );
   const hiddenTrips = all.filter(isHidden);
   const trip = trips.find((t) => t.sku === selected) ?? trips[0];
 
+  // Display only: the profile editor slides in over the page, keeps focus
+  // inside while it is open and hands it back to the button that opened it.
+  const editRef = useRef<HTMLButtonElement>(null);
+  const drawerRef = useRef<HTMLElement>(null);
+  const wasOpen = useRef(false);
+  useEffect(() => {
+    if (profileOpen) {
+      wasOpen.current = true;
+      // Focus the panel itself, so a phone does not open its keyboard at once.
+      drawerRef.current?.focus();
+      const onKey = (e: KeyboardEvent) => {
+        if (e.key === "Escape") setProfileOpen(false);
+      };
+      window.addEventListener("keydown", onKey);
+      return () => window.removeEventListener("keydown", onKey);
+    }
+    if (wasOpen.current) editRef.current?.focus();
+  }, [profileOpen]);
+  const choose = (sku: string) => {
+    setSelected(sku);
+    // Bring the trip details into view, below the cards.
+    requestAnimationFrame(() => {
+      const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+      document
+        .getElementById("planner-trip")
+        ?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+    });
+  };
+  const cash = (v: number) => (Number.isFinite(v) ? money(toPence(v)) : "not set");
+  const hiddenLabels = ACCESS_FILTERS.filter(([id]) => hidden.includes(id)).map(([, label]) => label);
+
   return (
     <div className="planner">
-      <div className="layout">
-        <aside>
-          <small>01 / PARAMETERS</small>
-          <h2>Your buying profile</h2>
-          <label>
-            Local area
-            <input value={profile.area ?? ""} onChange={(e) => set({ area: e.target.value })} />
-          </label>
-          <label>
-            Transport
-            <select value={profile.transport} onChange={(e) => set({ transport: e.target.value })}>
-              {MODES.map((m) => (
-                <option key={m}>{m}</option>
-              ))}
-            </select>
-          </label>
+      <div className="planner-profilebar" aria-label="Your buying profile" role="group">
+        <div className="planner-profilebar-text">
+          <small>Your buying profile</small>
+          <ul className="planner-chips">
+            <li>
+              <b>{profile.area || "No area"}</b>
+            </li>
+            <li>
+              {profile.transport}
+              {profile.transport === "Public transport" &&
+                (profile.fareFree === true ? ", free travel" : fareEntered(profile) ? `, ${cash(profile.fare as number)} fare` : "")}
+            </li>
+            <li>{cash(profile.budget)} to spend</li>
+            <li>{Number.isFinite(profile.carry) ? profile.carry + " kg" : "no"} carry limit</li>
+            <li>Up to {Number.isFinite(profile.quantity) ? plural(profile.quantity, "unit") : "? units"}</li>
+            <li>{cash(profile.target)} an hour target</li>
+            {noFare && <li className="warn">Fare not entered</li>}
+            {hiddenLabels.length > 0 && <li>Hiding: {hiddenLabels.join(", ")}</li>}
+          </ul>
+        </div>
+        <button
+          ref={editRef}
+          type="button"
+          className="planner-edit"
+          aria-expanded={profileOpen}
+          aria-controls="planner-profile"
+          onClick={() => setProfileOpen(true)}
+        >
+          Edit profile
+        </button>
+      </div>
+
+      {profileOpen && <div className="planner-backdrop" onClick={() => setProfileOpen(false)} />}
+      <aside
+        id="planner-profile"
+        ref={drawerRef}
+        className={"planner-profile" + (profileOpen ? " open" : "")}
+        hidden={!profileOpen}
+        tabIndex={-1}
+        aria-label="Edit your buying profile"
+      >
+        <div className="planner-drawer-head">
+          <div>
+            <small>Your buying profile</small>
+            <h2>Edit profile</h2>
+          </div>
+          <button type="button" className="planner-close" onClick={() => setProfileOpen(false)}>
+            Done
+          </button>
+        </div>
+        <p className="muted">
+          Changes apply as you type, and the trips behind this panel update. The transport, cash,
+          carry limit and storage you change here are kept in this browser to fill in Research and
+          member forms.
+        </p>
+        <label>
+          Local area
+          <input value={profile.area ?? ""} onChange={(e) => set({ area: e.target.value })} />
+        </label>
+        <label>
+          Transport
+          <select value={profile.transport} onChange={(e) => set({ transport: e.target.value })}>
+            {MODES.map((m) => (
+              <option key={m}>{m}</option>
+            ))}
+          </select>
+        </label>
+        <div className="planner-pair">
           <NumberField label="Available cash (£)" value={profile.budget} onChange={(budget) => set({ budget })} />
           <NumberField label="Hourly target (£)" value={profile.target} onChange={(target) => set({ target })} />
-          <NumberField
-            label="Comfortable carry limit (kg)"
-            value={profile.carry}
-            onChange={(carry) => set({ carry })}
-            note={`What you can carry by hand. By car or van the load limit is the larger of this and 25 kg; by public transport, the smaller of this and 10 kg.`}
-          />
+        </div>
+        <NumberField
+          label="Comfortable carry limit (kg)"
+          value={profile.carry}
+          onChange={(carry) => set({ carry })}
+          note={`What you can carry by hand. By car or van the load limit is the larger of this and 25 kg; by public transport, the smaller of this and 10 kg.`}
+        />
+        <div className="planner-pair">
           <NumberField
             label="Maximum units per trip"
             value={profile.quantity}
             step={1}
             min={1}
             onChange={(quantity) => set({ quantity })}
-            note="A first purchase of any item is still a small trial batch."
           />
           <NumberField
             label="Storage at home (units)"
@@ -598,63 +752,66 @@ export default function Planner() {
             step={1}
             onChange={(storage) => set({ storage })}
           />
-          <fieldset>
-            <legend>Travel costs</legend>
-            <OptionalNumberField
-              label="Public transport return fare (£)"
-              value={profile.fare}
-              placeholder="Not entered"
-              disabled={profile.fareFree === true}
-              onChange={(fare) => set({ fare })}
-              note={
-                profile.fareFree === true
-                  ? "Not used: you ticked that your public transport is free."
-                  : "Used when you travel by public transport, and for the public transport comparison when you drive. Leave it empty if you do not know it yet."
-              }
+        </div>
+        <p className="muted">A first purchase of any item is still a small trial batch.</p>
+        <fieldset>
+          <legend>Travel costs</legend>
+          <OptionalNumberField
+            label="Public transport return fare (£)"
+            value={profile.fare}
+            placeholder="Not entered"
+            disabled={profile.fareFree === true}
+            onChange={(fare) => set({ fare })}
+            note={
+              profile.fareFree === true
+                ? "Not used: you ticked that your public transport is free."
+                : "Used when you travel by public transport, and for the public transport comparison when you drive. Leave it empty if you do not know it yet."
+            }
+          />
+          <label className="planner-check">
+            <input
+              type="checkbox"
+              checked={profile.fareFree === true}
+              onChange={(e) => set({ fareFree: e.target.checked })}
             />
-            <label className="planner-check">
-              <input
-                type="checkbox"
-                checked={profile.fareFree === true}
-                onChange={(e) => set({ fareFree: e.target.checked })}
-              />
-              My public transport is free (for example a bus pass)
-            </label>
-            {noFare && (
-              <p className="notice warn" role="status">
-                {profile.fare === 0
-                  ? "A fare of £0 counts only when you tick that your travel is free. "
-                  : "Enter your return fare, or tick the box if your travel is free. "}
-                A blank fare is never counted as free: until then profit per unit, contribution and
-                earnings per hour are not known for any trip, and nothing is shortlisted.
-              </p>
-            )}
-            <NumberField
-              label="Car or van cost per mile (p)"
-              value={profile.perMile}
-              step={1}
-              onChange={(perMile) => set({ perMile })}
-              note="45p is the HMRC mileage rate, covering fuel and wear. Used for car or van trips and the driving comparison."
-            />
-            <NumberField
-              label="Parking or tolls per trip (£)"
-              value={profile.extra}
-              onChange={(extra) => set({ extra })}
-              note="Car or van only."
-            />
-          </fieldset>
-          <fieldset>
-            <legend>Your selling assumptions</legend>
-            <p className="muted">
-              These are your assumptions. The cautious sample defaults are a 13% marketplace fee plus
-              40p per item sold and a 5% returns allowance. Clothing always uses at least 15% for
-              returns. Replace them with your own marketplace's fees.
+            My public transport is free (for example a bus pass)
+          </label>
+          {noFare && (
+            <p className="notice warn" role="status">
+              {profile.fare === 0
+                ? "A fare of £0 counts only when you tick that your travel is free. "
+                : "Enter your return fare, or tick the box if your travel is free. "}
+              A blank fare is never counted as free. Trips are still shortlisted on their figures
+              before your fare, labelled so, and the cash needed is shown plus your fare.
             </p>
-            <NumberField
-              label="Marketplace fee (% of the sale)"
-              value={asPercent(profile.feeRate)}
-              onChange={(v) => set({ feeRate: v / 100 })}
-            />
+          )}
+          <NumberField
+            label="Car or van cost per mile (p)"
+            value={profile.perMile}
+            step={1}
+            onChange={(perMile) => set({ perMile })}
+            note="45p is the HMRC mileage rate, covering fuel and wear. Used for car or van trips and the driving comparison."
+          />
+          <NumberField
+            label="Parking or tolls per trip (£)"
+            value={profile.extra}
+            onChange={(extra) => set({ extra })}
+            note="Car or van only."
+          />
+        </fieldset>
+        <fieldset>
+          <legend>Your selling assumptions</legend>
+          <p className="muted">
+            These are your assumptions. The cautious sample defaults are a 13% marketplace fee plus
+            40p per item sold and a 5% returns allowance. Clothing always uses at least 15% for
+            returns. Replace them with your own marketplace's fees.
+          </p>
+          <NumberField
+            label="Marketplace fee (% of the sale)"
+            value={asPercent(profile.feeRate)}
+            onChange={(v) => set({ feeRate: v / 100 })}
+          />
+          <div className="planner-pair">
             <NumberField
               label="Fixed fee per item sold (p)"
               value={profile.feeFixed}
@@ -662,106 +819,286 @@ export default function Planner() {
               onChange={(feeFixed) => set({ feeFixed })}
             />
             <NumberField
-              label="Returns allowance (% of the sale)"
+              label="Returns allowance (%)"
               value={asPercent(profile.returnsRate)}
               onChange={(v) => set({ returnsRate: v / 100 })}
             />
-          </fieldset>
-          <fieldset>
-            <legend>Access needs to avoid</legend>
-            <p className="muted">Hide trips with any need you tick.</p>
-            {ACCESS_FILTERS.map(([id, label]) => (
-              <label key={id} className="planner-check">
-                <input
-                  type="checkbox"
-                  checked={hidden.includes(id)}
-                  onChange={(e) =>
-                    setHidden(e.target.checked ? [...hidden, id] : hidden.filter((h) => h !== id))
-                  }
-                />
-                {label}
-              </label>
-            ))}
-          </fieldset>
-        </aside>
-        <section>
-          <small>02 / RANKED OPPORTUNITIES</small>
-          <h2>Local shortlist</h2>
-          <p className="notice">
-            Sample data: illustrative Leeds offers with modelled sale totals. Stock, prices and
-            earnings are simulated, so nothing here is ever a buy alert.
-          </p>
-          {error && <p role="alert">{error}</p>}
-          {result && !all.length && (
-            <p className="warn">
-              {result.rejected.some((r) => r.fareNeeded)
-                ? `Enter your return fare to see whether these trips meet your thresholds: ${result.rejected
-                    .filter((r) => r.fareNeeded)
-                    .map((r) => r.name)
-                    .join(", ")}. Until then nothing is shortlisted. The list of offers not shortlisted says why for each one.`
-                : "No offer is inside your buying thresholds, so nothing is shortlisted. The list of offers not shortlisted says why."}
-            </p>
-          )}
-          {trips.map((t) => (
-            <button
-              key={t.sku}
-              type="button"
-              className={"card" + (t.sku === trip?.sku ? " active" : "")}
-              aria-current={t.sku === trip?.sku ? "true" : undefined}
-              onClick={() => setSelected(t.sku)}
-            >
-              <span>
-                <small>
-                  {t.shop} · {t.miles} mi · {t.area}
-                </small>
-                <b>{t.name}</b>
-                <span className="planner-badges">
-                  <span className="badge sample">Sample</span>
-                  <TierBadge tier={t.opportunity.tier} />
-                  <AccessBadges needs={t.accessNeeds} />
-                </span>
-                <em className={t.fits ? "ok" : "warn"}>
-                  {t.reason}
-                  {t.units ? `: ${plural(t.units, "unit")}` : ""}
-                </em>
-                <em>
-                  Price checked: {checkedText(t.checked.price)}. Stock checked:{" "}
-                  {checkedText(t.checked.stock)}. Main uncertainty: {t.mainUncertainty}.
-                </em>
-                <em>
-                  Time until payment:{" "}
-                  {t.units ? paymentText(t.timing?.payoutDays, t.timing?.payout.date) : "no trip"}
-                </em>
-              </span>
-              <span>
-                <b>{fareFigure(t.economics.contribution, t.fareMissing)}</b>
-                <small>{perHour(t.economics.hourly, t.fareMissing)}</small>
-              </span>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>Access needs to avoid</legend>
+          <p className="muted">Hide trips with any need you tick.</p>
+          {ACCESS_FILTERS.map(([id, label]) => (
+            <label key={id} className="planner-check">
+              <input
+                type="checkbox"
+                checked={hidden.includes(id)}
+                onChange={(e) =>
+                  setHidden(e.target.checked ? [...hidden, id] : hidden.filter((h) => h !== id))
+                }
+              />
+              {label}
+            </label>
+          ))}
+        </fieldset>
+        <button type="button" className="planner-done" onClick={() => setProfileOpen(false)}>
+          Show my trips
+        </button>
+      </aside>
+
+      <p className="notice planner-sample">
+        <strong>Sample data.</strong> Illustrative Leeds offers with modelled sale prices. Stock,
+        prices and earnings are simulated, so nothing here is ever a buy alert.
+      </p>
+      {error && <p role="alert" className="notice warn">{error}</p>}
+
+      <div className="planner-finds">
+      <div className="planner-head">
+        <h2>
+          Today's <span>best finds</span> near you
+        </h2>
+        {result && (
+          <span className="muted">
+            {trips.length ? `${plural(trips.length, "trip")} shortlisted` : "None shortlisted yet"}
+            {result.rejected.length ? ` · ${result.rejected.length} not shortlisted` : ""}
+          </span>
+        )}
+      </div>
+      {result && !all.length && (
+        <p className="planner-empty">
+          {noFare
+            ? "No offer is inside your buying thresholds, even before your fare, so nothing is shortlisted. The list of offers not shortlisted says why."
+            : "No offer is inside your buying thresholds, so nothing is shortlisted. The list of offers not shortlisted says why."}
+        </p>
+      )}
+      {result && all.some((t) => t.beforeTravel) && (
+        <p className="notice warn planner-ranking" role="status">
+          {result.ranking === "known first"
+            ? "Trips whose travel cost is known come first. The others wait for your public transport fare and follow, ranked by profit per unit before your fare."
+            : "Ranked by profit per unit before your fare, because your public transport fare is not known yet. Trips that fit your profile before the fare come first."}{" "}
+          Each one's travel cost is still to be added: enter your return fare to rank them after
+          travel and check them against your thresholds.
+        </p>
+      )}
+      {cats.length > 1 && (
+        <div className="planner-cats" role="group" aria-label="Category">
+          {["", ...cats].map((c) => (
+            <button key={c || "all"} type="button" aria-pressed={cat === c} onClick={() => setCat(c)}>
+              <CategoryIcon category={c} />
+              {c ? (CATEGORY_LABEL[c] ?? c) : "All"}
             </button>
           ))}
-          {hiddenTrips.length > 0 && (
-            <p className="muted">
-              Hidden by your access needs: {hiddenTrips.map((t) => t.name).join(", ")}. Untick a need
-              in the profile to show {hiddenTrips.length === 1 ? "it" : "them"}.
-            </p>
+        </div>
+      )}
+      {all.length > 1 && (
+        <div className="planner-sortbar" role="group" aria-label="Sort and filter the trips">
+          <span className="planner-sort">
+            <span className="muted">Sort by</span>
+            {SORTS.map(([key, label]) => (
+              <button key={key} type="button" aria-pressed={sort === key} onClick={() => setSort(key)}>
+                {label}
+              </button>
+            ))}
+          </span>
+          {shops.length > 1 && (
+            <label className="planner-shop">
+              <span className="muted">Shop</span>
+              <select value={shop} onChange={(e) => setShop(e.target.value)}>
+                <option value="">All shops</option>
+                {shops.map((s) => (
+                  <option key={s}>{s}</option>
+                ))}
+              </select>
+            </label>
           )}
-          {result && result.rejected.length > 0 && (
-            <RejectedList rejected={result.rejected} rules={result.rules.effective} />
-          )}
-          {trip && <TripView key={trip.sku} trip={trip} profile={profile} />}
-          {result && <DriveSummary drive={result.drive} />}
-          <BasketsLink />
-          <StricterThresholds
-            rules={rules}
-            info={result?.rules ?? null}
-            onSave={(next) => {
-              saveMemberRules(next);
-              setRules(next);
-            }}
-          />
-        </section>
+        </div>
+      )}
+      {(shop || cat) && !trips.length && shown.length > 0 && (
+        <p className="muted">Nothing shortlisted matches this filter. Choose All to see the others.</p>
+      )}
+      <div className="planner-grid">
+        {trips.map((t) => (
+          <TripCard key={t.sku} trip={t} active={t.sku === trip?.sku} onChoose={() => choose(t.sku)} />
+        ))}
+      </div>
+      </div>
+      {hiddenTrips.length > 0 && (
+        <p className="muted">
+          Hidden by your access needs: {hiddenTrips.map((t) => t.name).join(", ")}. Untick a need in
+          the profile to show {hiddenTrips.length === 1 ? "it" : "them"}.
+        </p>
+      )}
+      {trip && <TripView key={trip.sku} trip={trip} profile={profile} />}
+      {result && result.rejected.length > 0 && (
+        <RejectedList rejected={result.rejected} rules={result.rules.effective} noFare={noFare} />
+      )}
+      <div className="planner-more">
+        {result && <DriveSummary drive={result.drive} />}
+        <BasketsLink />
       </div>
     </div>
+  );
+}
+
+type SortKey = "best" | "unit" | "cheap" | "near";
+const SORTS: [SortKey, string][] = [
+  ["best", "Best first"],
+  ["unit", "Biggest profit a unit"],
+  ["cheap", "Cheapest"],
+  ["near", "Nearest"],
+];
+/** The cards in the chosen order. Best first keeps the planner's ranking; an unknown figure sorts last. */
+function sortTrips(list: Trip[], key: SortKey) {
+  if (key === "best") return list;
+  const value = (t: Trip) =>
+    key === "unit" ? unitBeforeTravel(t.economics) : key === "cheap" ? -t.buy : -t.miles;
+  return [...list].sort((a, b) => (value(b) ?? -Infinity) - (value(a) ?? -Infinity));
+}
+
+// Display only: a simple drawing of each sample item, so a card reads at a
+// glance. Unknown items fall back to a drawing for their category.
+const ITEM_ART: Record<string, { bg: string; d: string[] }> = {
+  knit: { bg: "#dde7f4", d: ["M17 10l-9 5 3 9 5-2v18h16V22l5 2 3-9-9-5c-1 3-4 5-7 5s-6-2-7-5z"] },
+  baby: {
+    bg: "#f4e3ea",
+    d: ["M18 8h12l3 6 6 3-2 7-5-1v8l-3 9h-4l-1-6-1 6h-4l-3-9v-8l-5 1-2-7 6-3z", "M21 8c0 2 1.3 3 3 3s3-1 3-3"],
+  },
+  pot: { bg: "#f6e2d3", d: ["M11 16h26l-3 22a3 3 0 0 1-3 2H17a3 3 0 0 1-3-2z", "M9 11h30v5H9z", "M24 11c0-4 3-6 6-6"] },
+  jacket: {
+    bg: "#f6e8c6",
+    d: ["M17 8l-9 6 2 11 5-1v17h18V24l5 1 2-11-9-6-3 4h-8z", "M24 12v29M20 25h1M27 25h1"],
+  },
+  bottle: { bg: "#dbe7f6", d: ["M20 6h8v5l3 4v25a3 3 0 0 1-3 3h-8a3 3 0 0 1-3-3V15l3-4z", "M17 22h14"] },
+  clothing: { bg: "#e3e8f2", d: ["M17 10l-9 5 3 9 5-2v18h16V22l5 2 3-9-9-5c-1 3-4 5-7 5s-6-2-7-5z"] },
+  general: { bg: "#e6e9ee", d: ["M8 16l16-8 16 8v18l-16 8-16-8z", "M8 16l16 8 16-8M24 24v18"] },
+};
+/**
+ * Placeholder photos for the five sample products while Bounty is in
+ * development (public/products, made with an image model). Real items have no
+ * photo yet and keep the drawn tile.
+ */
+const SAMPLE_PHOTO: Record<string, string> = {
+  knit: "/products/knit.jpg",
+  baby: "/products/baby.jpg",
+  pot: "/products/pot.jpg",
+  jacket: "/products/jacket.jpg",
+  bottle: "/products/bottle.jpg",
+};
+export function ItemTile({ sku, category }: { sku: string; category?: string }) {
+  const photo = SAMPLE_PHOTO[sku];
+  if (photo)
+    return (
+      <span className="planner-tile photo" aria-hidden="true">
+        <img src={photo} alt="" loading="lazy" decoding="async" />
+      </span>
+    );
+  const art = ITEM_ART[sku] ?? ITEM_ART[category ?? ""] ?? ITEM_ART.general;
+  return (
+    <span className="planner-tile" style={{ background: art.bg }} aria-hidden="true">
+      <svg viewBox="0 0 48 48" fill="#fff" stroke="#10233a" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round">
+        {art.d.map((d) => (
+          <path key={d} d={d} />
+        ))}
+      </svg>
+    </span>
+  );
+}
+
+/** A shortlisted trip as a card: the money first, then the item, then its prices. */
+/**
+ * Display only: profit a unit after fees, postage, packaging and returns,
+ * before travel. It is the planner's own contribution with the journey cost
+ * added back, so it is known even while a public transport fare is blank.
+ */
+export function unitBeforeTravel(e: Economics): number | null {
+  if (!e.units) return null;
+  const c = e.costs;
+  return Math.round((e.proceeds - c.stock - c.packaging - c.postage - c.fees - c.returns) / e.units);
+}
+
+const CATEGORY_LABEL: Record<string, string> = { clothing: "Clothing", general: "Home and general" };
+const CATEGORY_ICON: Record<string, string[]> = {
+  "": ["M4 4h7v7H4z", "M13 4h7v7h-7z", "M4 13h7v7H4z", "M13 13h7v7h-7z"],
+  clothing: ["M12 6a2 2 0 1 1 2 2c-1 0-2 .8-2 2v.5", "M12 10.5 3.5 17h17z"],
+  general: ["M4 8l8-4 8 4v8l-8 4-8-4z", "M4 8l8 4 8-4M12 12v8"],
+};
+function CategoryIcon({ category }: { category: string }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      {(CATEGORY_ICON[category] ?? CATEGORY_ICON.general).map((d) => (
+        <path key={d} d={d} />
+      ))}
+    </svg>
+  );
+}
+
+/** Display only: how far the shop price sits under the sale estimate, as a whole percentage. */
+function underSale(buy: number, sale: number | null) {
+  if (sale === null || !Number.isFinite(sale) || sale <= buy) return null;
+  return Math.floor((1 - buy / sale) * 100);
+}
+
+/** A shortlisted find as a card: the picture, the prices, then the profit and travel. */
+function TripCard({ trip: t, active, onChoose }: { trip: Trip; active: boolean; onChoose: () => void }) {
+  const e = t.economics;
+  const unit = unitBeforeTravel(e);
+  const under = underSale(t.buy, t.salePrice);
+  // Display only: tint the profit by its sign; unknown stays neutral.
+  const tone = unit === null ? " none" : unit > 0 ? " gain" : " loss";
+  return (
+    <button
+      type="button"
+      className={"planner-trip" + tone + (active ? " active" : "")}
+      aria-current={active ? "true" : undefined}
+      onClick={onChoose}
+    >
+      <span className="planner-picture">
+        <ItemTile sku={t.sku} category={t.category} />
+        {under !== null && (
+          <span className="planner-ribbon" title={`Shop price ${under}% under the sale estimate`}>
+            {under}% under<span className="planner-sr"> the sale estimate</span>
+          </span>
+        )}
+        <span className="planner-picture-badges">
+          <span className="badge sample">Sample</span>
+          <TierBadge tier={t.opportunity.tier} />
+        </span>
+      </span>
+      <span className="planner-trip-body">
+        <span className="planner-item">
+          <b className="planner-name">{t.name}</b>
+          <em>
+            {t.variant} · {t.shop}, {t.miles} mi
+          </em>
+        </span>
+        <span className="planner-deal-prices">
+          <span>
+            <span className="badge ev-retail">Shop price</span>
+            <b className="p-retail">{money(t.buy)}</b>
+          </span>
+          <span className="planner-arrow" aria-hidden="true">
+            →
+          </span>
+          <span>
+            <span className="badge ev-estimate">Sells for about</span>
+            <b className="p-estimate">{pounds(t.salePrice)}</b>
+          </span>
+        </span>
+        <span className="planner-deal-profit">
+          <b>{pounds(unit)}</b>
+          <span>profit a unit after fees and postage</span>
+        </span>
+        <span className="planner-foot">
+          <span>
+            {t.fareMissing || e.unitContribution === null
+              ? `Travel ${byMode(t.journey.mode)}: add your fare`
+              : `With travel ${byMode(t.journey.mode)}: ${money(e.unitContribution)} a unit`}
+          </span>
+          <span>{t.competingListings === null ? "others listed not known" : `${t.competingListings} other listed`}</span>
+        </span>
+        {!t.fits && <span className="planner-fit warn">{t.reason}</span>}
+      </span>
+    </button>
   );
 }
 
@@ -770,34 +1107,68 @@ export function thresholdsSentence(rules: Record<RuleKey, number>) {
   return `${money(rules.minUnitPrice)} to ${money(rules.maxUnitPrice)} per unit, under ${rules.maxWeightKg} kg, at least ${money(rules.minUnitProfit)} profit per unit after every cost including its share of travel, and at least ${percent(rules.minReturn)} return on the purchase price`;
 }
 
-function RejectedList({ rejected, rules }: { rejected: Rejected[]; rules: Record<RuleKey, number> }) {
-  const waiting = rejected.filter((r) => r.fareNeeded).length;
+function RejectedList({
+  rejected,
+  rules,
+  noFare,
+}: {
+  rejected: Rejected[];
+  rules: Record<RuleKey, number>;
+  noFare: boolean;
+}) {
   return (
-    <details className="planner-rejected">
-      <summary>
-        {waiting
-          ? `Not shortlisted: ${plural(rejected.length, "offer")}, ${waiting} waiting for your fare`
-          : `Not shortlisted: ${plural(rejected.length, "offer")} outside your buying thresholds`}
-      </summary>
+    <section className="planner-rejected">
+      <div className="planner-head">
+        <h2>Not shortlisted</h2>
+        <span className="muted">
+          {`${plural(rejected.length, "offer")} outside your buying thresholds`}
+        </span>
+      </div>
       <p className="muted">
         An offer is shortlisted only when it is inside every buying threshold that applies to you:{" "}
         {thresholdsSentence(rules)}.
-        {waiting
-          ? " By public transport your fare is part of each unit's share of travel, so whether an offer meets these is not known until you enter your return fare (or tick that your travel is free)."
+        {noFare
+          ? " While your public transport fare is not known yet, an offer is shortlisted when it is inside them before your fare; those listed here fail even before it, or for another reason."
           : ""}
       </p>
-      <ul>
+      <ul className="planner-rejected-grid">
         {rejected.map((r) => (
           <li key={r.sku}>
-            <b>{r.name}</b> at {r.shop} ({money(r.buy)}, {r.weight} kg): {r.reasons.join("; ")}.{" "}
-            <span className="planner-badges">
-              <span className="badge sample">Sample</span>
-              <AccessBadges needs={r.accessNeeds} />
-            </span>
+            <div className="planner-band small rej">
+              <span>
+                <small>Why not</small>
+                <span className="planner-reason">{r.reasons.join("; ")}.</span>
+              </span>
+            </div>
+            <div className="planner-trip-body">
+              <span className="planner-item">
+                <ItemTile sku={r.sku} />
+                <span>
+                  <b className="planner-name">{r.name}</b>
+                  <em>
+                    {r.shop} · {r.miles} mi · {r.weight} kg
+                  </em>
+                </span>
+              </span>
+              <span className="planner-prices two">
+                <span>
+                  <span className="badge ev-retail">Shop price</span>
+                  <b className="p-retail">{money(r.buy)}</b>
+                </span>
+                <span>
+                  <span className="badge">Profit a unit</span>
+                  <b>{pounds(r.unitProfit)}</b>
+                </span>
+              </span>
+              <span className="planner-badges">
+                <span className="badge sample">Sample</span>
+                <AccessBadges needs={r.accessNeeds} />
+              </span>
+            </div>
           </li>
         ))}
       </ul>
-    </details>
+    </section>
   );
 }
 
@@ -816,11 +1187,22 @@ function Figures({ rows }: { rows: [string, React.ReactNode][] }) {
 
 function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile }) {
   const e = t.economics;
-  // Figures that need the journey cost read "not known until you enter your
-  // fare" while a public transport fare is blank, never £0.
-  const fig = (pence: number | null | undefined) => fareFigure(pence, t.fareMissing);
+  // While a public transport fare is blank, every figure that needs the
+  // journey cost is shown before the fare and labelled so (the travel cost
+  // itself reads "not known yet"), never as the trip's figure or as £0.
+  const bt = t.beforeTravel ?? null;
+  const pending = bt !== null;
+  const fig = (
+    known: number | null | undefined,
+    before: number | null | undefined,
+    options?: Parameters<typeof fareDependent>[3],
+  ) => fareDependent(known, before, pending, options);
   const [ledger, setLedger] = useState({ busy: false, notice: "" });
   const failing = t.alert.checks.filter((c) => !c.ok).length;
+  // Display only: short forms for the headline figures; the fare notice below explains a gap.
+  const short = (pence: number | null | undefined) =>
+    t.fareMissing && (pence === null || pence === undefined) ? "Fare needed" : pounds(pence);
+  const kpiTone = t.fareMissing || e.contribution === null ? "" : e.contribution > 0 ? " gain" : " loss";
 
   async function track() {
     setLedger({ busy: true, notice: "" });
@@ -853,17 +1235,73 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile })
   }
 
   return (
-    <article>
-      <small>03 / TRIP CALCULATION</small>
-      <h2>{t.name}</h2>
-      <p className="planner-badges">
-        <span className="badge sample">Sample</span>
-        <TierBadge tier={t.opportunity.tier} />
-        <span className={t.fits ? "badge ok" : "badge warn"}>{t.reason}</span>
-        <AccessBadges needs={t.accessNeeds} />
-      </p>
+    <article id="planner-trip" className="planner-detail">
+      <div className="planner-detail-head">
+        <ItemTile sku={t.sku} category={t.category} />
+        <div>
+          <small>Trip details</small>
+          <h2>{t.name}</h2>
+          <p className="planner-detail-sub">
+            {t.variant} at {t.shop}, {t.miles} miles from the centre of {t.area}.
+          </p>
+          <p className="planner-badges">
+            <span className="badge sample">Sample</span>
+            <TierBadge tier={t.opportunity.tier} />
+            <span className={t.fits ? "badge ok" : "badge warn"}>{t.reason}</span>
+            <AccessBadges needs={t.accessNeeds} />
+          </p>
+        </div>
+      </div>
+      <div className="planner-kpis">
+        <div className={"planner-kpi" + kpiTone}>
+          <small>Contribution</small>
+          <b>{short(e.contribution)}</b>
+          <span>if every unit sells</span>
+        </div>
+        <div className="planner-kpi">
+          <small>Cash needed before payout</small>
+          <b>{short(e.cashRequired)}</b>
+          <span>
+            {plural(t.units, "unit")}, {t.weightKg} kg
+          </span>
+        </div>
+        <div className="planner-kpi">
+          <small>Earnings an hour</small>
+          <b>{t.fareMissing && e.hourly === null ? "Fare needed" : e.hourly === null ? "no trip" : money(e.hourly)}</b>
+          <span>{hours(e.activeMinutes)} of your time</span>
+        </div>
+        <div className="planner-kpi">
+          <small>Time until payment</small>
+          <b>
+            {!t.units
+              ? "no trip"
+              : t.timing?.payoutDays == null || !t.timing.payout.date
+                ? "not known"
+                : plural(t.timing.payoutDays, "day")}
+          </b>
+          <span>
+            {t.units && t.timing?.payout.date ? "payout " + dateTime(t.timing.payout.date) : "no payout date yet"}
+          </span>
+        </div>
+      </div>
+      <div className="planner-prices wide">
+        <span>
+          <span className="badge ev-retail">Shop price</span>
+          <b className="p-retail">{money(t.buy)}</b>
+          <em>per unit, on the shelf</em>
+        </span>
+        <span>
+          <span className="badge ev-estimate">Sale estimate</span>
+          <b className="p-estimate">{pounds(t.salePrice)}</b>
+          <em>modelled, not a completed sale</em>
+        </span>
+        <span>
+          <span className="badge">Break-even sale</span>
+          <b>{short(e.breakEvenSale)}</b>
+          <em>lowest sale price that covers every cost</em>
+        </span>
+      </div>
       <p>
-        {t.variant} at {t.shop}, {t.miles} miles from the centre of {t.area}.{" "}
         {t.units
           ? `${plural(t.units, "unit")} (${t.weightKg} kg), limited by ${limitText(t)}. Return journey ${byMode(t.journey.mode)}: ${t.journey.miles} miles, ${t.journey.minutes} minutes.`
           : `No units fit: limited by ${limitText(t)}.`}
@@ -874,11 +1312,13 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile })
           item, your other limits would allow {plural(t.afterTrial, "unit")}.
         </p>
       )}
-      {t.fareMissing && (
-        <p className="notice warn">
-          No public transport fare is entered, so the cash required, contribution, profit per unit
-          and earnings per hour are {FARE_UNKNOWN}. {FARE_NEEDED_TEXT} Enter it in the profile (or
-          tick that your travel is free).
+      {pending && (
+        <p className="notice warn planner-travel-note">
+          {t.travelNote ?? TRAVEL_NOTE}. No public transport fare is entered, so your fare is{" "}
+          {FARE_NOT_KNOWN}. The figures below are before your fare: profit per unit, contribution and
+          earnings per hour can only fall once it is added, and the cash needed and the loss if
+          nothing sells can only rise. Enter your fare in the profile (or tick that your travel is
+          free).
         </p>
       )}
       {t.reason === "Outside your area" && (
@@ -899,16 +1339,19 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile })
           <h3>Money</h3>
           <Figures
             rows={[
-              ["Cash required before payout", <strong key="c">{fig(e.cashRequired)}</strong>],
+              [
+                "Cash required before payout",
+                <strong key="c">{fig(e.cashRequired, bt?.cashRequired, { plus: true })}</strong>,
+              ],
               ["Stock", money(e.costs.stock)],
               ["Packaging", money(e.costs.packaging)],
               ["Parcel costs (illustrative)", money(e.costs.postage)],
               ["Marketplace fees", money(e.costs.fees)],
               [`Returns allowance (${percent(t.returnsRate)})`, money(e.costs.returns)],
-              ["Travel (one journey)", fig(e.costs.travel)],
-              ["Travel per unit", fig(e.journeyPerUnit)],
+              ["Travel (one journey)", fig(e.costs.travel, null)],
+              ["Travel per unit", fig(e.journeyPerUnit, null)],
               ["Proceeds if every unit sells (estimate)", money(e.proceeds)],
-              ["Contribution", <strong key="p">{fig(e.contribution)}</strong>],
+              ["Contribution", <strong key="p">{fig(e.contribution, bt?.contribution)}</strong>],
             ]}
           />
         </div>
@@ -917,17 +1360,17 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile })
           <Figures
             rows={[
               ["Active hours", hours(e.activeMinutes)],
-              ["Earnings per hour", perHour(e.hourly, t.fareMissing)],
+              [
+                "Earnings per hour",
+                pending ? fig(null, bt?.hourly, { unit: " an hour" }) : perHour(e.hourly),
+              ],
               [
                 "Time until payment",
                 t.units ? paymentText(t.timing?.payoutDays, t.timing?.payout.date) : "no trip",
               ],
-              ["Loss if nothing sells", fig(t.downside.nothingSells)],
-              [
-                `If only ${t.downside.halfSellsUnits} of ${t.units} sell`,
-                fig(t.downside.halfSells),
-              ],
-              ["Break-even sale price per unit", fig(e.breakEvenSale)],
+              ["Loss if nothing sells", fig(t.downside.nothingSells, bt?.unsoldLoss)],
+              [`If only ${t.downside.halfSellsUnits} of ${t.units} sell`, fig(t.downside.halfSells, bt?.halfSells)],
+              ["Break-even sale price per unit", fig(e.breakEvenSale, bt?.breakEvenSale)],
               ["Sale price used per unit", pounds(t.salePrice)],
               ["Shelf price per unit", money(t.buy)],
             ]}
@@ -938,26 +1381,47 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile })
         Active hours are your working time. Time until payment is when the cash comes back:{" "}
         {t.timing
           ? `${payoutSentence(t.timing.payout)} ${sellingSentence(t.timing)}`
-          : "set your selling rhythm in Goals to see it."}
+          : "set your selling rhythm in Profile and settings to see it."}
         {t.timing?.cashNeededBy
           ? " " + cashSentence(t.timing.cash, t.timing.cashNeededBy, t.timing.payout.date)
           : ""}
       </p>
 
       <h3>Buying thresholds</h3>
-      <p>
-        Profit per unit after fees, postage, packaging, returns and the unit's share of travel:{" "}
-        {fig(t.thresholds.unitProfit)}. Return on the purchase price:{" "}
-        {t.thresholds.returnOnCost === null
-          ? t.fareMissing
-            ? FARE_UNKNOWN
-            : "not known"
-          : percent(t.thresholds.returnOnCost)}
-        .
-      </p>
+      {t.thresholds.fareNeeded ? (
+        <p>
+          Profit per unit after fees, postage, packaging and returns:{" "}
+          {pounds(t.thresholds.beforeTravel?.unitProfit)} profit per unit {BEFORE_FARE}. Return on the
+          purchase price:{" "}
+          {typeof t.thresholds.beforeTravel?.returnOnCost === "number"
+            ? percent(t.thresholds.beforeTravel.returnOnCost) + " " + BEFORE_FARE
+            : "not known"}
+          . Each unit's share of your fare is still to be taken off.
+        </p>
+      ) : (
+        <p>
+          Profit per unit after fees, postage, packaging, returns and the unit's share of travel:{" "}
+          {fig(t.thresholds.unitProfit, null)}. Return on the purchase price:{" "}
+          {t.thresholds.returnOnCost === null
+            ? pending
+              ? FARE_NOT_KNOWN
+              : "not known"
+            : percent(t.thresholds.returnOnCost)}
+          .
+        </p>
+      )}
       <ul className="checks">
         {t.thresholds.ok ? (
           <li className="pass">Inside your buying thresholds</li>
+        ) : t.thresholds.fareNeeded ? (
+          <>
+            <li className="pass">Inside your buying thresholds {BEFORE_FARE}</li>
+            {t.thresholds.failures.map((f) => (
+              <li key={f} className={f === TRAVEL_NOTE ? "planner-pending" : undefined}>
+                {f}
+              </li>
+            ))}
+          </>
         ) : (
           t.thresholds.failures.map((f) => <li key={f}>{f}</li>)
         )}
@@ -980,13 +1444,18 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile })
         <strong>Sample data: never a buy alert.</strong> {failing} of {t.alert.checks.length}{" "}
         checks fail.
       </p>
-      <ul className="checks">
-        {t.alert.checks.map((c) => (
-          <li key={c.id} className={c.ok ? "pass" : ""}>
-            {c.detail}
-          </li>
-        ))}
-      </ul>
+      <details className="planner-checks">
+        <summary>
+          See all {t.alert.checks.length} checks ({t.alert.checks.length - failing} pass)
+        </summary>
+        <ul className="checks">
+          {t.alert.checks.map((c) => (
+            <li key={c.id} className={c.ok ? "pass" : ""}>
+              {c.detail}
+            </li>
+          ))}
+        </ul>
+      </details>
 
       <DriveComparison compare={t.compare} />
 
@@ -1040,25 +1509,42 @@ function DriveComparison({ compare: c }: { compare: Trip["compare"] }) {
   const a = c.current;
   const b = c.alternative;
   const d = c.difference;
-  // A side with a blank public transport fare has no journey cost, so the
-  // figures built on it are not known (and neither is the difference).
-  const fig = (s: ModeSummary, pence: number | null) => fareFigure(pence, s.fareMissing);
+  const dbt = c.differenceBeforeTravel ?? {};
+  // A side with a blank public transport fare shows its figures before the
+  // fare, labelled so, and its travel cost reads "not known yet". The
+  // difference is then also before the fare, never one after travel.
+  const fig = (s: ModeSummary, k: "travelCost" | "cashRequired" | "contribution" | "hourly", unit = "") =>
+    s.beforeTravel
+      ? k === "travelCost"
+        ? FARE_NOT_KNOWN
+        : fareDependent(null, s.beforeTravel[k], true, { plus: k === "cashRequired", unit })
+      : k === "hourly"
+        ? perHourShort(s.hourly)
+        : pounds(s[k]);
+  const pending = Boolean(a.beforeTravel || b.beforeTravel);
+  const diff = (k: "travelCost" | "cashRequired" | "contribution" | "hourly", unit = "") => {
+    const known = d[k];
+    if (known !== null && known !== undefined) return signed(known);
+    if (!pending) return "not comparable";
+    if (k === "travelCost") return FARE_NOT_KNOWN;
+    const v = dbt[k];
+    return v === null || v === undefined ? "not comparable" : signed(v) + unit + " " + BEFORE_FARE;
+  };
+  // Before the fare, the difference leaves out the public transport fare, so
+  // it moves towards the car by the amount of that fare once it is entered.
+  const transitSide = a.beforeTravel ? a.mode : b.beforeTravel ? b.mode : null;
+  const otherSide = a.beforeTravel ? b.mode : a.mode;
   const rows: [string, string, string, string][] = [
     ["Load limit", a.carry + " kg", b.carry + " kg", ""],
     ["Units", String(a.units), String(b.units), signedNumber(d.units, "")],
     ["Total load", a.loadKg + " kg", b.loadKg + " kg", signedNumber(d.loadKg, " kg")],
     ["Mileage (return)", a.miles + " mi", b.miles + " mi", signedNumber(d.miles, " mi")],
-    ["Travel cost", fig(a, a.travelCost), fig(b, b.travelCost), signed(d.travelCost)],
+    ["Travel cost", fig(a, "travelCost"), fig(b, "travelCost"), diff("travelCost")],
     ["Parking or tolls (in travel cost)", money(a.parking), money(b.parking), signed(d.parking)],
     ["Travel time", minutesText(a.travelMinutes), minutesText(b.travelMinutes), signedNumber(d.travelMinutes, " min")],
-    ["Cash required before payout", fig(a, a.cashRequired), fig(b, b.cashRequired), signed(d.cashRequired)],
-    ["Contribution", fig(a, a.contribution), fig(b, b.contribution), signed(d.contribution)],
-    [
-      "Earnings per hour",
-      perHourShort(a.hourly, a.fareMissing && a.units > 0),
-      perHourShort(b.hourly, b.fareMissing && b.units > 0),
-      signed(d.hourly),
-    ],
+    ["Cash required before payout", fig(a, "cashRequired"), fig(b, "cashRequired"), diff("cashRequired")],
+    ["Contribution", fig(a, "contribution"), fig(b, "contribution"), diff("contribution")],
+    ["Earnings per hour", fig(a, "hourly", "/h"), fig(b, "hourly", "/h"), diff("hourly", "/h")],
   ];
   return (
     <>
@@ -1074,6 +1560,12 @@ function DriveComparison({ compare: c }: { compare: Trip["compare"] }) {
               ? `${b.mode} takes ${-c.timeSaved} minutes longer.`
               : "Travel time is the same.")}
       </p>
+      {transitSide && (
+        <p className="muted">
+          Differences marked &ldquo;before your fare&rdquo; leave out the {transitSide.toLowerCase()} fare, which is not known yet.
+          Once you enter it, each money difference moves in favour of the {otherSide.toLowerCase()} by the amount of the fare.
+        </p>
+      )}
       <div className="scroll">
         <table className="planner-compare">
           <thead>
@@ -1119,11 +1611,13 @@ function DriveComparison({ compare: c }: { compare: Trip["compare"] }) {
 
 function DriveSummary({ drive }: { drive: Drive }) {
   const line = (o: DriveOption) =>
-    `${o.name} at ${o.shop}: ${plural(o.units, "unit")}, ${o.loadKg} kg, ${pounds(o.contribution)}, ${perHour(o.hourly)}`;
+    o.beforeTravel
+      ? `${o.name} at ${o.shop}: ${plural(o.units, "unit")}, ${o.loadKg} kg, ${fareDependent(null, o.beforeTravel.contribution, true)}, ${fareDependent(null, o.beforeTravel.hourly, true, { unit: " an hour" })}`
+      : `${o.name} at ${o.shop}: ${plural(o.units, "unit")}, ${o.loadKg} kg, ${pounds(o.contribution)}, ${perHour(o.hourly)}`;
   const waiting = drive.fareNeeded ?? [];
   return (
-    <article>
-      <small>WHAT CHANGES IF I {drive.alternative === "Car" ? "DRIVE" : "TAKE PUBLIC TRANSPORT"}?</small>
+    <article className="planner-card">
+      <small>What changes if I {drive.alternative === "Car" ? "drive" : "take public transport"}?</small>
       <h2>
         {drive.alternative === "Car" ? "Extra opportunities by car" : "Opportunities by public transport"}
       </h2>
@@ -1131,7 +1625,7 @@ function DriveSummary({ drive }: { drive: Drive }) {
         <>
           <p>
             {drive.currentFareMissing
-              ? `These fit your profile ${byMode(drive.alternative)}. ${byMode(drive.current).replace(/^b/, "B")} they cannot be checked until you enter your return fare:`
+              ? `These fit your profile ${byMode(drive.alternative)}. ${byMode(drive.current).replace(/^b/, "B")} they fit only before your fare, which is ${FARE_NOT_KNOWN}:`
               : `These fit your profile ${byMode(drive.alternative)} but not ${byMode(drive.current)}:`}
           </p>
           <ul>
@@ -1142,9 +1636,9 @@ function DriveSummary({ drive }: { drive: Drive }) {
         </>
       ) : drive.alternativeFareMissing ? (
         <p>
-          No public transport fare is entered, so whether any trip works by public transport is not
-          known until you enter your return fare (or tick that your travel is free). A blank fare is
-          never counted as free.
+          No public transport fare is entered, so your fare is {FARE_NOT_KNOWN} and every trip by
+          public transport is shown before your fare. Enter your return fare (or tick that your travel
+          is free) to see which work after travel. A blank fare is never counted as free.
         </p>
       ) : (
         <p>
@@ -1154,8 +1648,8 @@ function DriveSummary({ drive }: { drive: Drive }) {
       )}
       {waiting.length > 0 && (
         <p>
-          These fit now; {byMode(drive.alternative)} they cannot be checked until you enter your
-          return fare: {waiting.map((o) => `${o.name} at ${o.shop}`).join(" and ")}.
+          These fit now; {byMode(drive.alternative)} they fit only before your fare, which is{" "}
+          {FARE_NOT_KNOWN}: {waiting.map((o) => `${o.name} at ${o.shop}`).join(" and ")}.
         </p>
       )}
       {drive.lost.length > 0 && (
@@ -1176,31 +1670,38 @@ function DriveSummary({ drive }: { drive: Drive }) {
 }
 
 function BasketsLink() {
-  const [asked, setAsked] = useState(false);
   return (
-    <article>
-      <small>04 / SEVERAL ITEMS, ONE TRIP</small>
+    <article className="planner-card">
+      <small>Several items, one trip</small>
       <h2>One shopping trip, one cash limit</h2>
       <p>
         Each trip above buys one item. To buy several items on one trip, sharing one journey and one
-        cash limit for the whole basket, use the basket plan in the Goals tab.
+        cash limit for the whole basket, use the basket plan at the bottom of this page.
       </p>
       <button
         type="button"
-        onClick={() => {
-          location.hash = "#Goals";
-          window.dispatchEvent(new HashChangeEvent("hashchange"));
-          setAsked(true);
-        }}
+        onClick={() =>
+          document.getElementById("basket-plan")?.scrollIntoView({ behavior: "smooth", block: "start" })
+        }
       >
-        Open the basket plan in Goals
+        Go to the basket plan
       </button>
-      <p className="muted">
-        {asked
-          ? "If the page has not switched, select Goals in the tabs above."
-          : "You can also select Goals in the tabs above."}
-      </p>
     </article>
+  );
+}
+
+/** Your stricter buying thresholds, shown in Profile and settings. */
+export function BuyingRules() {
+  const [rules, setRules] = useState<Rules>(loadMemberRules);
+  return (
+    <StricterThresholds
+      rules={rules}
+      info={null}
+      onSave={(next) => {
+        saveMemberRules(next);
+        setRules(next);
+      }}
+    />
   );
 }
 
@@ -1239,8 +1740,8 @@ function StricterThresholds({
   }
 
   return (
-    <article>
-      <small>05 / YOUR THRESHOLDS</small>
+    <article className="planner-card planner-thresholds">
+      <small>Your thresholds</small>
       <h2>Your stricter thresholds</h2>
       <p>
         The agreed buying thresholds apply to everyone. You can make them stricter for yourself, for
@@ -1297,8 +1798,8 @@ function StricterThresholds({
       )}
       {notice && <p role="status">{notice}</p>}
       <p className="muted">
-        Saved in this browser only. They apply to the planner trips, the baskets in Goals and the
-        Research desk.
+        Saved in this browser only. They apply to My trip plans, the basket plan and the Research
+        desk.
       </p>
     </article>
   );

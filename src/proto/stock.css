@@ -1,0 +1,37 @@
+/* Stock screen layout (proto/StockScreen.tsx). The pieces themselves come
+   from src/ui/kit.css; this only places them. Prefixed sk- because older
+   global classes (.strip, .stop, .chip) clash with plain names. */
+.sk { display: grid; gap: 22px; font-family: var(--k-sans); }
+.sk-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr)); gap: 16px; align-items: start; }
+.sk-card { gap: 16px; }
+.sk-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px 20px; flex-wrap: wrap; }
+.sk-name { display: grid; gap: 8px; min-width: 0; }
+.sk-name h3 { font-size: 18px; }
+.sk-title { display: inline-flex; align-items: center; gap: 4px; border: 0; background: none; padding: 0; margin: 0; font: inherit; color: inherit; text-align: left; cursor: pointer; border-radius: 4px; }
+.sk-title svg { width: 16px; height: 16px; color: var(--k-muted); transition: transform 0.15s; }
+.sk-title:hover svg { transform: translateX(2px); color: var(--k-ink); }
+.sk-money { display: flex; gap: 20px; }
+.sk-money span { display: grid; gap: 2px; text-align: right; }
+.sk-money small { font: 500 12px/1.2 var(--k-sans); color: var(--k-muted); }
+.sk-money b { font: 600 19px/1.2 var(--k-sans); color: var(--k-ink); font-variant-numeric: tabular-nums; }
+.sk-money b.profit { color: var(--k-profit); }
+.sk-acts { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; }
+.sk-p { margin: 0; font: 400 14.5px/1.5 var(--k-sans); color: var(--k-muted); }
+.sk-wfigs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.sk-wfigs .k-fig { padding: 12px 14px 14px; border-radius: 16px; background: var(--k-tile); border-color: transparent; }
+.sk-wfigs .k-fig b { font-size: 22px; }
+.sk-sec { display: grid; gap: 4px; }
+.sk-sec h4 { margin: 0 0 4px; font: 700 12px/1.2 var(--k-sans); letter-spacing: 0.08em; text-transform: uppercase; color: var(--k-muted); }
+.sk-left { font: 600 13px/1 var(--k-sans); color: var(--k-muted); }
+.sk-records { display: grid; gap: 16px; margin-top: 12px; padding-top: 24px; border-top: 1px solid var(--k-line); scroll-margin-top: 80px; }
+.sk-rechead { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px 20px; flex-wrap: wrap; }
+.sk-rechead h2 { margin: 0 0 4px; font-size: 28px; color: var(--k-ink); }
+.sk-rechead p { margin: 0; font: 400 14.5px/1.5 var(--k-sans); color: var(--k-muted); max-width: 60ch; }
+@media (max-width: 640px) {
+  .sk-money { width: 100%; justify-content: flex-start; }
+  .sk-money span { text-align: left; }
+  .sk-acts > .k-btn.main { flex: 1 1 auto; }
+  .sk-acts > .sk-details { display: none; }
+  .sk-wfigs { grid-template-columns: 1fr 1fr; }
+  .sk-pair { grid-template-columns: 1fr; }
+}

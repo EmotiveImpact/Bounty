@@ -38,6 +38,7 @@ export function routes(db) {
         const goals = getGoals(db);
         return planTrips(profile, { now, timing: (sale) => tripTiming(goals, { now, items: [sale] }) });
       },
+      { read: true },
     ],
     ["GET", "/api/goals", () => getGoals(db)],
     ["PUT", "/api/goals", ({ body }) => saveGoals(db, body, { now: serverNow() })],
@@ -71,6 +72,7 @@ export function routes(db) {
           now: serverNow(),
         });
       },
+      { read: true },
     ],
   ];
 }

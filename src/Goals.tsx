@@ -5,15 +5,18 @@ import {
   AccessNeed,
   CashTiming,
   Checked,
+  BEFORE_FARE,
   Costs,
-  FARE_UNKNOWN,
+  FARE_NOT_KNOWN,
   Opportunity,
   Payout,
   Thresholds,
   TierBadge,
+  TRAVEL_NOTE,
   byMode,
   cashSentence,
   checkedText,
+  fareDependent,
   paymentText,
   payoutSentence,
   planProfile,
@@ -62,12 +65,20 @@ type BasketItem = {
   shop: string;
   units: number;
   weightKg: number;
-  travelShare: number;
-  cashRequired: number;
-  contribution: number;
+  // null while the public transport fare is blank (never £0); beforeTravel
+  // then holds the item's figures before the fare.
+  travelShare: number | null;
+  cashRequired: number | null;
+  contribution: number | null;
   unitProfit: number | null;
   returnOnCost: number | null;
   returnsRate: number;
+  beforeTravel?: {
+    cashRequired: number;
+    contribution: number;
+    unitProfit: number | null;
+    returnOnCost: number | null;
+  } | null;
   thresholds: Thresholds;
   opportunity: Opportunity;
   accessNeeds: AccessNeed[];
@@ -78,25 +89,35 @@ type Basket = {
   id: string;
   items: BasketItem[];
   shops: string[];
-  journey: { mode: string; miles: number; cost: number; minutes: number; extraShops: number };
+  journey: { mode: string; miles: number; cost: number | null; minutes: number; extraShops: number };
+  fareMissing?: boolean;
   units: number;
   storage: { used: number; limit: number };
   weightKg: number;
+  // Every figure after travel is null while the public transport fare is
+  // blank (never £0); beforeTravel then holds the same figures before it.
   economics: {
     units: number;
     proceeds: number;
     costs: Costs;
-    totalCosts: number;
-    contribution: number;
-    cashRequired: number;
-    journeyPerUnit: number;
+    totalCosts: number | null;
+    contribution: number | null;
+    cashRequired: number | null;
+    journeyPerUnit: number | null;
     activeMinutes: number;
     hourly: number | null;
-    unsoldLoss: number;
+    unsoldLoss: number | null;
   };
+  beforeTravel?: {
+    contribution: number;
+    cashRequired: number;
+    hourly: number | null;
+    unsoldLoss: number;
+    halfSells: number;
+  } | null;
   // halfSellsUnits: units sold in the half-sold case (half of each item's
   // units, rounded down), so the label matches the figure.
-  downside: { nothingSells: number; halfSells: number; halfSellsUnits?: number };
+  downside: { nothingSells: number | null; halfSells: number | null; halfSellsUnits?: number };
   timing: BasketTiming;
   reasons: string[];
   recommended: boolean;
@@ -123,9 +144,10 @@ type BasketResponse = {
   baskets: Basket[];
   bestSingle: Basket | null;
   recommended: string | null;
-  // rejected: outside the buying thresholds; fareNeeded: waits for a
-  // public transport fare (a blank fare is never counted as free).
-  excluded: { sku: string; name: string; shop: string; reason: string; rejected?: boolean; fareNeeded?: boolean }[];
+  ranking?: "after travel" | "before travel";
+  // rejected: outside the buying thresholds. A blank public transport fare
+  // never leaves an offer out on its own.
+  excluded: { sku: string; name: string; shop: string; reason: string; rejected?: boolean }[];
   searched: number;
   truncated: boolean;
   timing: BasketTiming; // for one unit; each basket carries its own
@@ -243,17 +265,21 @@ function goalsBody(d: Draft): { body?: Omit<Goals, "updated">; problem?: string 
   };
 }
 
-export default function Goals() {
+/** The monthly goal, storage and posting-day settings. Shown on the Profile
+ * screen; the old Goals screen embeds it above its baskets. */
+export function GoalsSettings({
+  onLoaded,
+  onSaved,
+  savedNote = "Saved. Money and trip timing now use these.",
+}: {
+  onLoaded?: (g: Goals) => void;
+  onSaved?: (g: Goals) => void;
+  savedNote?: string;
+}) {
   const [goals, setGoals] = useState<Goals | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [goalsNotice, setGoalsNotice] = useState("");
   const [saving, setSaving] = useState(false);
-  const [baskets, setBaskets] = useState<BasketResponse | null>(null);
-  const [basketError, setBasketError] = useState("");
-  const [month, setMonth] = useState(thisMonth);
-  const [summary, setSummary] = useState<Summary | null>(null);
-  const [summaryError, setSummaryError] = useState("");
-  const [version, setVersion] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -262,50 +288,13 @@ export default function Goals() {
         if (!active) return;
         setGoals(g);
         setDraft(toDraft(g));
+        onLoaded?.(g);
       })
       .catch((e) => active && setGoalsNotice("Could not load your goals: " + (e as Error).message));
     return () => {
       active = false;
     };
   }, []);
-
-  useEffect(() => {
-    let active = true;
-    const profile = loadProfile();
-    const problem = profileProblem(profile);
-    if (problem) {
-      setBaskets(null);
-      setBasketError("Your Planner profile needs fixing first: " + problem);
-      return;
-    }
-    api<BasketResponse>("baskets", { profile: planProfile(profile, loadMemberRules()) })
-      .then((r) => {
-        if (!active) return;
-        setBaskets(r);
-        setBasketError("");
-      })
-      .catch((e) => {
-        if (!active) return;
-        setBaskets(null);
-        setBasketError((e as Error).message);
-      });
-    return () => {
-      active = false;
-    };
-  }, [version]);
-
-  useEffect(() => {
-    let active = true;
-    setSummary(null);
-    setSummaryError("");
-    if (!/^\d{4}-\d{2}$/.test(month)) return;
-    api<Summary>("ledger/summary?month=" + encodeURIComponent(month))
-      .then((s) => active && setSummary(s))
-      .catch((e) => active && setSummaryError((e as Error).message));
-    return () => {
-      active = false;
-    };
-  }, [month, version]);
 
   async function save(ev: React.FormEvent) {
     ev.preventDefault();
@@ -320,8 +309,8 @@ export default function Goals() {
       const saved = await api<Goals>("goals", body, "PUT");
       setGoals(saved);
       setDraft(toDraft(saved));
-      setGoalsNotice("Goals saved. The baskets below now use them.");
-      setVersion((v) => v + 1);
+      setGoalsNotice(savedNote);
+      onSaved?.(saved);
     } catch (e) {
       setGoalsNotice("Could not save your goals. " + (e as Error).message);
     } finally {
@@ -330,9 +319,8 @@ export default function Goals() {
   }
 
   return (
-    <div className="planner goals">
       <section>
-        <small>01 / YOUR GOALS</small>
+        <small>Your goals</small>
         <h2>Monthly goal and selling rhythm</h2>
         {!draft ? (
           <p>{goalsNotice || "Loading your goals."}</p>
@@ -453,29 +441,45 @@ export default function Goals() {
         )}
       </section>
 
+  );
+}
+
+export default function Goals() {
+  const [goals, setGoals] = useState<Goals | null>(null);
+  const [month, setMonth] = useState(thisMonth);
+  const [summary, setSummary] = useState<Summary | null>(null);
+  const [summaryError, setSummaryError] = useState("");
+  const [version, setVersion] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    setSummary(null);
+    setSummaryError("");
+    if (!/^\d{4}-\d{2}$/.test(month)) return;
+    api<Summary>("ledger/summary?month=" + encodeURIComponent(month))
+      .then((s) => active && setSummary(s))
+      .catch((e) => active && setSummaryError((e as Error).message));
+    return () => {
+      active = false;
+    };
+  }, [month, version]);
+
+  return (
+    <div className="planner goals">
+      <GoalsSettings
+        savedNote="Goals saved. The baskets below now use them."
+        onLoaded={setGoals}
+        onSaved={(g) => {
+          setGoals(g);
+          setVersion((v) => v + 1);
+        }}
+      />
       <NamedGoals version={version} />
 
-      <section>
-        <small>03 / BASKET PLAN</small>
-        <h2>One shopping trip, one cash limit</h2>
-        <p>
-          Everything in a basket is bought on one shopping trip: one shared journey and one cash
-          limit for the whole basket. Your cash, carry limit, maximum units, transport and stricter
-          thresholds come from the Planner tab.
-        </p>
-        <p className="notice">
-          Sample data: illustrative Leeds offers with modelled sale totals. A basket is never a buy
-          alert.
-        </p>
-        <button type="button" onClick={() => setVersion((v) => v + 1)}>
-          Recalculate
-        </button>
-        {basketError && <p role="alert">{basketError}</p>}
-        {baskets && <BasketPlan plan={baskets} />}
-      </section>
+      <BasketSection version={version} />
 
       <section>
-        <small>04 / THIS MONTH</small>
+        <small>This month</small>
         <h2>Progress this month</h2>
         <label className="planner-month">
           Month
@@ -496,37 +500,105 @@ export default function Goals() {
   );
 }
 
+/** Several items on one shopping trip, under one cash limit. Shown on the
+ * Trip planner; uses the goals timing and the Planner profile. */
+export function BasketSection({ version = 0 }: { version?: number }) {
+  const [baskets, setBaskets] = useState<BasketResponse | null>(null);
+  const [basketError, setBasketError] = useState("");
+  const [run, setRun] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    const profile = loadProfile();
+    const problem = profileProblem(profile);
+    if (problem) {
+      setBaskets(null);
+      setBasketError("Your Planner profile needs fixing first: " + problem);
+      return;
+    }
+    api<BasketResponse>("baskets", { profile: planProfile(profile, loadMemberRules()) })
+      .then((r) => {
+        if (!active) return;
+        setBaskets(r);
+        setBasketError("");
+      })
+      .catch((e) => {
+        if (!active) return;
+        setBaskets(null);
+        setBasketError((e as Error).message);
+      });
+    return () => {
+      active = false;
+    };
+  }, [version, run]);
+
+  return (
+    <section id="basket-plan">
+      <small>Basket plan</small>
+      <h2>One shopping trip, one cash limit</h2>
+      <p>
+        Everything in a basket is bought on one shopping trip: one shared journey and one cash
+        limit for the whole basket. Your cash, carry limit, maximum units and transport come from the
+        planner above, and your stricter thresholds from Profile and settings.
+      </p>
+      <p className="notice">
+        Sample data: illustrative Leeds offers with modelled sale totals. A basket is never a buy
+        alert.
+      </p>
+      <button type="button" onClick={() => setRun((v) => v + 1)}>
+        Recalculate
+      </button>
+      {basketError && <p role="alert">{basketError}</p>}
+      {baskets && <BasketPlan plan={baskets} />}
+    </section>
+  );
+}
+
 function BasketPlan({ plan }: { plan: BasketResponse }) {
   const c = plan.constraints;
   const pick = plan.baskets.find((b) => b.recommended) || (plan.bestSingle?.recommended ? plan.bestSingle : null);
   const singleShown = plan.bestSingle && plan.baskets.some((b) => b.id === plan.bestSingle!.id);
   return (
     <>
-      <dl className="planner-figures">
-        <dt>Cash limit for the whole basket</dt>
-        <dd>{money(c.budget)}</dd>
-        <dt>Load limit</dt>
-        <dd>
-          {c.carry} kg
-          {c.carry !== c.carryEntered ? ` (your ${c.carryEntered} kg, ${byMode(c.transport)})` : ""}
-        </dd>
-        <dt>Units on one trip</dt>
-        <dd>
-          up to {c.unitCap} (maximum units {c.quantity}, storage {c.storage})
-        </dd>
-        <dt>Each item, first purchase</dt>
-        <dd>
-          at most {plural(c.trialUnits, "unit")} (trial batch), and no more than its sales rate
-          supports in {plural(c.sellWindowWeeks, "week")}
-        </dd>
-        <dt>Storage limit</dt>
-        <dd>
-          {plural(c.storage, "unit")}, the smaller of Planner {c.profileStorage} and goals {c.goalsStorage}
-        </dd>
-        <dt>Transport</dt>
-        <dd>{c.transport}</dd>
-        <dt>Hourly target</dt>
-        <dd>{money(c.hourlyTarget)} an hour</dd>
+      <dl className="planner-figures goals-limits">
+        <div>
+          <dt>Cash limit for the whole basket</dt>
+          <dd>{money(c.budget)}</dd>
+        </div>
+        <div>
+          <dt>Load limit</dt>
+          <dd>
+            {c.carry} kg
+            {c.carry !== c.carryEntered ? ` (your ${c.carryEntered} kg, ${byMode(c.transport)})` : ""}
+          </dd>
+        </div>
+        <div>
+          <dt>Units on one trip</dt>
+          <dd>
+            up to {c.unitCap} (maximum units {c.quantity}, storage {c.storage})
+          </dd>
+        </div>
+        <div>
+          <dt>Each item, first purchase</dt>
+          <dd>
+            at most {plural(c.trialUnits, "unit")} (trial batch), and no more than its sales rate
+            supports in {plural(c.sellWindowWeeks, "week")}
+          </dd>
+        </div>
+        <div>
+          <dt>Storage limit</dt>
+          <dd>
+            {plural(c.storage, "unit")}, the smaller of Planner {c.profileStorage} and goals {c.goalsStorage}
+          </dd>
+        </div>
+        <div>
+          <dt>Transport</dt>
+          <dd>{c.transport}</dd>
+        </div>
+        <div>
+          <dt>Hourly target</dt>
+          <dd>{money(c.hourlyTarget)} an hour</dd>
+        </div>
       </dl>
       <p className="muted">{plan.approximation}</p>
       {plan.rules.ignored.length > 0 && (
@@ -545,11 +617,13 @@ function BasketPlan({ plan }: { plan: BasketResponse }) {
         units can take longer to sell, so each basket shows its own payout.
       </p>
       {c.fareMissing && (
-        <p className="notice warn">
-          No public transport fare is entered in the Planner. A blank fare is never counted as free:
-          each item's profit per unit, the basket's contribution and its earnings per hour are{" "}
-          {FARE_UNKNOWN}, so nothing is put in a basket. Enter your return fare (or tick that your
-          travel is free) in the Planner, then recalculate.
+        <p className="notice warn planner-ranking" role="status">
+          No public transport fare is entered in the Planner, so your fare is {FARE_NOT_KNOWN}. Baskets
+          are still built under your cash limit and ranked on contribution before your fare: the cash
+          needed is shown plus your fare, and profit per unit, contribution and earnings per hour
+          before your fare. A blank fare is never counted as free, so no basket is recommended until
+          you enter your return fare (or tick that your travel is free) in the Planner and
+          recalculate.
         </p>
       )}
       {plan.timing.cash.status === "late" && (
@@ -563,14 +637,10 @@ function BasketPlan({ plan }: { plan: BasketResponse }) {
           Best fit for your profile: {basketTitle(pick)}. This is sample data and still not a buy
           alert.
         </p>
-      ) : c.fareMissing && plan.excluded.some((e) => e.fareNeeded) ? (
+      ) : c.fareMissing && plan.baskets.length ? (
         <p className="warn">
-          Enter your return fare in the Planner to see whether these trips meet your thresholds:{" "}
-          {plan.excluded
-            .filter((e) => e.fareNeeded)
-            .map((e) => e.name)
-            .join(", ")}
-          .
+          Top before your fare: {basketTitle(plan.baskets[0])}. Its travel cost is still to be added:
+          enter your return fare in the Planner to see which basket is the best fit after travel.
         </p>
       ) : plan.baskets.length ? (
         <p className="warn">
@@ -590,7 +660,7 @@ function BasketPlan({ plan }: { plan: BasketResponse }) {
           may exist.
         </p>
       )}
-      {plan.baskets.length > 0 && <h3>Top baskets</h3>}
+      {plan.baskets.length > 0 && <h3>{c.fareMissing ? "Top baskets before your fare" : "Top baskets"}</h3>}
       {plan.baskets.map((b, i) => (
         <BasketCard key={b.id} basket={b} rank={i + 1} />
       ))}
@@ -613,7 +683,7 @@ function BasketPlan({ plan }: { plan: BasketResponse }) {
           <p className="muted">
             These never enter a basket: each item must be inside every buying threshold that
             applies to you, including at least the minimum profit per unit after its share of the
-            journey.
+            journey{c.fareMissing ? " (while your fare is not known yet, before it: these fail even before your fare, or for another reason)" : ""}.
           </p>
           <ul>
             {plan.excluded
@@ -626,30 +696,12 @@ function BasketPlan({ plan }: { plan: BasketResponse }) {
           </ul>
         </>
       )}
-      {plan.excluded.some((e) => e.fareNeeded) && (
-        <>
-          <h3>Waiting for your public transport fare</h3>
-          <p className="muted">
-            These clear your buying thresholds before travel. With your fare as their share of the
-            journey they may not, so they are not in any basket until you enter it.
-          </p>
-          <ul>
-            {plan.excluded
-              .filter((e) => e.fareNeeded)
-              .map((e) => (
-                <li key={e.sku}>
-                  {e.name} at {e.shop}: {e.reason}.
-                </li>
-              ))}
-          </ul>
-        </>
-      )}
-      {plan.excluded.some((e) => !e.rejected && !e.fareNeeded) && (
+      {plan.excluded.some((e) => !e.rejected) && (
         <>
           <h3>Not in any basket</h3>
           <ul>
             {plan.excluded
-              .filter((e) => !e.rejected && !e.fareNeeded)
+              .filter((e) => !e.rejected)
               .map((e) => (
                 <li key={e.sku}>
                   {e.name} at {e.shop}: {e.reason}.
@@ -667,6 +719,16 @@ const basketTitle = (b: Basket) => b.items.map((it) => it.units + " × " + it.na
 function BasketCard({ basket: b, rank }: { basket: Basket; rank?: number }) {
   const e = b.economics;
   const late = b.timing.cash.status === "late";
+  // While the public transport fare is blank the figures are before the
+  // fare and labelled so; the travel cost reads "not known yet".
+  const bt = b.beforeTravel ?? null;
+  const pending = bt !== null;
+  const kpiGain = (pending ? bt?.contribution : e.contribution) ?? 0;
+  const fig = (
+    known: number | null | undefined,
+    before: number | null | undefined,
+    options?: Parameters<typeof fareDependent>[3],
+  ) => fareDependent(known, before, pending, options);
   return (
     <article className={"planner-basket" + (b.recommended ? " recommended" : "")}>
       <p className="planner-badges">
@@ -674,6 +736,8 @@ function BasketCard({ basket: b, rank }: { basket: Basket; rank?: number }) {
         <span className="badge sample">Sample</span>
         {b.recommended ? (
           <span className="badge ok">Best fit for your profile</span>
+        ) : pending ? (
+          <span className="badge warn">Fare {FARE_NOT_KNOWN}</span>
         ) : (
           <span className="badge warn">Not recommended</span>
         )}
@@ -686,9 +750,38 @@ function BasketCard({ basket: b, rank }: { basket: Basket; rank?: number }) {
         {b.journey.extraShops
           ? `, including ${b.journey.extraShops} extra shop${b.journey.extraShops === 1 ? "" : "s"}`
           : ""}
-        . {plural(b.units, "unit")}, {b.weightKg} kg. Storage used: {b.storage.used} of{" "}
+        . {pending ? `Fare: ${FARE_NOT_KNOWN}. ` : ""}
+        {plural(b.units, "unit")}, {b.weightKg} kg. Storage used: {b.storage.used} of{" "}
         {plural(b.storage.limit, "unit")}.
       </p>
+      <div className="planner-kpis">
+        <div className="planner-kpi">
+          <small>Cash needed</small>
+          <b>{fig(e.cashRequired, bt?.cashRequired, { plus: true })}</b>
+          <span>before any payout</span>
+        </div>
+        <div className={"planner-kpi" + (kpiGain > 0 ? " gain" : kpiGain < 0 ? " loss" : "")}>
+          <small>If every unit sells</small>
+          <b>{fig(e.contribution, bt?.contribution)}</b>
+          <span>
+            {pending
+              ? fig(null, bt?.hourly, { unit: " an hour" })
+              : e.hourly === null
+                ? "earnings an hour not known"
+                : money(e.hourly) + " an hour"}
+          </span>
+        </div>
+        <div className="planner-kpi">
+          <small>If nothing sells</small>
+          <b>{fig(b.downside.nothingSells, bt?.unsoldLoss)}</b>
+          <span>the most you could lose</span>
+        </div>
+        <div className={"planner-kpi" + (late ? " loss" : "")}>
+          <small>Cash back</small>
+          <b>{b.timing.payout.date ? dateTime(b.timing.payout.date) : "Not scheduled"}</b>
+          <span>{late ? `${plural(b.timing.cash.daysLate ?? 0, "day")} late` : paymentText(b.timing.payoutDays, b.timing.payout.date)}</span>
+        </div>
+      </div>
       <div className="scroll">
         <table>
           <thead>
@@ -727,10 +820,20 @@ function BasketCard({ basket: b, rank }: { basket: Basket; rank?: number }) {
                   </span>
                 </td>
                 <td className="num">{it.units}</td>
-                <td className="num">{money(it.cashRequired)}</td>
-                <td className="num">{money(it.travelShare)}</td>
-                <td className="num">{pounds(it.unitProfit)}</td>
-                <td className="num">{it.returnOnCost === null ? "not known" : percent(it.returnOnCost)}</td>
+                <td className="num">
+                  {fig(it.cashRequired, it.beforeTravel?.cashRequired, { plus: true, share: true })}
+                </td>
+                <td className="num">{fig(it.travelShare, null)}</td>
+                <td className="num">{fig(it.unitProfit, it.beforeTravel?.unitProfit)}</td>
+                <td className="num">
+                  {pending
+                    ? typeof it.beforeTravel?.returnOnCost === "number"
+                      ? percent(it.beforeTravel.returnOnCost) + " " + BEFORE_FARE
+                      : "not known"
+                    : it.returnOnCost === null
+                      ? "not known"
+                      : percent(it.returnOnCost)}
+                </td>
                 <td>
                   <TierBadge tier={it.opportunity.tier} />
                 </td>
@@ -742,11 +845,13 @@ function BasketCard({ basket: b, rank }: { basket: Basket; rank?: number }) {
       <p className="muted">
         Main uncertainty: {[...new Set(b.items.map((it) => it.mainUncertainty))].join("; ")}.
       </p>
+      <details className="basket-breakdown">
+        <summary>Full costs, downside and timing</summary>
       <div className="grid2">
         <dl className="planner-figures">
           <dt>Cash required before payout</dt>
           <dd>
-            <strong>{money(e.cashRequired)}</strong>
+            <strong>{fig(e.cashRequired, bt?.cashRequired, { plus: true })}</strong>
           </dd>
           <dt>Stock</dt>
           <dd>{money(e.costs.stock)}</dd>
@@ -759,25 +864,25 @@ function BasketCard({ basket: b, rank }: { basket: Basket; rank?: number }) {
           <dt>Returns allowance</dt>
           <dd>{money(e.costs.returns)}</dd>
           <dt>Travel (one journey)</dt>
-          <dd>{money(e.costs.travel)}</dd>
+          <dd>{fig(e.costs.travel, null)}</dd>
         </dl>
         <dl className="planner-figures">
           <dt>Contribution if every unit sells</dt>
           <dd>
-            <strong>{money(e.contribution)}</strong>
+            <strong>{fig(e.contribution, bt?.contribution)}</strong>
           </dd>
           <dt>Active hours</dt>
           <dd>{hours(e.activeMinutes)}</dd>
           <dt>Earnings per hour</dt>
-          <dd>{e.hourly === null ? "not known" : money(e.hourly) + " an hour"}</dd>
+          <dd>{fig(e.hourly, bt?.hourly, { unit: " an hour" })}</dd>
           <dt>Loss if nothing sells</dt>
-          <dd>{money(b.downside.nothingSells)}</dd>
+          <dd>{fig(b.downside.nothingSells, bt?.unsoldLoss)}</dd>
           <dt>
             {typeof b.downside.halfSellsUnits === "number"
               ? `If only ${b.downside.halfSellsUnits} of ${b.units} sell`
               : "If only half of each item sells"}
           </dt>
-          <dd>{money(b.downside.halfSells)}</dd>
+          <dd>{fig(b.downside.halfSells, bt?.halfSells)}</dd>
           <dt>Days until the last unit sells</dt>
           <dd>
             {b.timing.daysToSell === null
@@ -802,10 +907,13 @@ function BasketCard({ basket: b, rank }: { basket: Basket; rank?: number }) {
           </dd>
         </dl>
       </div>
+      </details>
       {b.reasons.length > 0 && (
         <ul className="checks">
           {b.reasons.map((r) => (
-            <li key={r}>{r}</li>
+            <li key={r} className={r === TRAVEL_NOTE ? "planner-pending" : undefined}>
+              {r}
+            </li>
           ))}
         </ul>
       )}
@@ -949,7 +1057,7 @@ function NamedGoals({ version }: { version: number }) {
 
   return (
     <section>
-      <small>02 / WHAT THE MONEY IS FOR</small>
+      <small>What the money is for</small>
       <h2>Named goals and deadlines</h2>
       <p>
         Name what the money is for, such as a hobby, fuel or a bill like car insurance. A goal with a

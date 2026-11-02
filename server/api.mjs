@@ -1,8 +1,23 @@
 import { createServer } from "node:http";
 import { database } from "./db.mjs";
 import { createApi } from "./app.mjs";
+import { accessConfig } from "./access.mjs";
+import { accounts, neonStore } from "./accounts.mjs";
 
 const port = Number(process.env.PORT || 4174);
-createServer(createApi(database())).listen(port, "127.0.0.1", () =>
-  console.log("Bounty API listening on http://127.0.0.1:" + port),
+let access;
+try {
+  access = accessConfig();
+} catch (error) {
+  console.error("Bounty API not started: " + error.message);
+  process.exit(1);
+}
+const { listenHost, publicHosts, password, databaseUrl, inviteCode } = access;
+const members = databaseUrl ? accounts(await neonStore(databaseUrl), { inviteCode }) : null;
+createServer(createApi(database(), { publicHosts, password, members })).listen(port, listenHost, () =>
+  console.log(
+    `Bounty API listening on ${listenHost}:${port}` +
+      (publicHosts.length ? ` for ${publicHosts.join(", ")}` : "") +
+      (members ? ", member sign-in required" : password ? ", password required" : ""),
+  ),
 );
