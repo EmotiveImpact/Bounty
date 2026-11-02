@@ -84,11 +84,11 @@
   text-align: right;
 }
 .evidence-row.status-exact {
-  border-left: 3px solid var(--brand);
+  border: 1px solid var(--brand);
   padding-left: 10px;
 }
 .evidence-row.status-research {
-  border-left: 3px solid var(--note-line);
+  border: 1px solid var(--note-line);
   padding-left: 10px;
 }
 .confirm {

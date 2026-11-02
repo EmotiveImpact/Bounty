@@ -16,7 +16,7 @@
   display: grid;
   gap: 4px;
   border: 1px solid var(--line);
-  border-left: 4px solid var(--brand);
+  border: 1px solid var(--brand);
   border-radius: 10px;
   background: var(--surface-2);
   padding: 10px 14px;
@@ -162,7 +162,7 @@ label.inline {
 /* "Don't make the trip" lines and notices. */
 .stop {
   display: block;
-  border-left: 4px solid var(--fail);
+  border: 1px solid var(--fail);
   background: var(--fail-soft);
   color: var(--fail-ink);
   padding: 8px 12px;
@@ -177,7 +177,7 @@ label.inline {
   margin: 8px 0;
 }
 .stop-notices li {
-  border-left: 4px solid var(--fail);
+  border: 1px solid var(--fail);
   background: var(--fail-soft);
   border-radius: 8px;
   padding: 8px 12px;
@@ -194,7 +194,7 @@ label.inline {
    The same green as a reopen notice (var(--brand) on var(--pass-soft)). */
 .go-note {
   display: block;
-  border-left: 4px solid var(--brand);
+  border: 1px solid var(--brand);
   background: var(--pass-soft);
   color: var(--brand);
   border-radius: 8px;
@@ -209,12 +209,12 @@ label.inline {
 /* The pilot audit line while it is a caution (not validated, or not yet
    signed off). */
 .prevalidation {
-  border-left: 4px solid var(--note-line);
+  border: 1px solid var(--note-line);
 }
 /* After a sign-off that stands, the same line is a plain result: neutral,
    neither a caution nor a go (var(--ink) on var(--info-soft)). */
 .validation-result {
-  border-left: 4px solid var(--line-2);
+  border: 1px solid var(--line-2);
   border-radius: 8px;
   background: var(--info-soft);
   padding: 8px 12px;
@@ -315,7 +315,7 @@ label.inline {
   color: var(--brand);
 }
 .category-warning {
-  border-left: 4px solid var(--note-line);
+  border: 1px solid var(--note-line);
 }
 .match-notes {
   margin: 0;
@@ -329,7 +329,7 @@ label.inline {
   display: grid;
   gap: 6px;
   border: 1px solid var(--line);
-  border-left: 4px solid var(--note-line);
+  border: 1px solid var(--note-line);
   border-radius: 8px;
   padding: 8px 12px;
   margin: 8px 0;

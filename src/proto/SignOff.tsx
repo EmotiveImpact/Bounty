@@ -44,7 +44,7 @@ export default function SignOff({
   ticked: Deal[];
   trip: Record<string, number>;
   onBack: () => void;
-  onDone: (added: number) => void;
+  onDone: (added: number, note?: string) => void;
 }) {
   const [rows, setRows] = useState<Row[]>(() =>
     ticked.map((d) => ({
@@ -99,16 +99,29 @@ export default function SignOff({
         );
         entryIds.push(res.id);
       }
+      // The purchases are saved by now, so a refused receipt must not leave
+      // the person stuck: pressing Add again would record them twice.
+      let receiptNote = "";
       if (file) {
-        await api("ledger/trips/" + id + "/proofs", {
-          label: ("Receipt " + date).slice(0, 120),
-          mediaType: file.type,
-          data: await readBase64(file),
-          // One item: the receipt proves that purchase. Several: the whole trip.
-          entryId: entryIds.length === 1 ? entryIds[0] : undefined,
-        });
+        try {
+          await api("ledger/trips/" + id + "/proofs", {
+            label: ("Receipt " + date).slice(0, 120),
+            mediaType: file.type,
+            data: await readBase64(file),
+            // One item: the receipt proves that purchase. Several: the whole trip.
+            entryId: entryIds.length === 1 ? entryIds[0] : undefined,
+          });
+        } catch (err) {
+          receiptNote =
+            " The receipt was not attached (" +
+            (err as Error).message +
+            "). Add it in Stock.";
+        }
       }
-      onDone(parsed.reduce((a, r) => a + (r.n as number), 0));
+      onDone(
+        parsed.reduce((a, r) => a + (r.n as number), 0),
+        receiptNote,
+      );
     } catch (err) {
       setError((err as Error).message);
       setBusy(false);
@@ -156,14 +169,18 @@ export default function SignOff({
               </div>
             ))}
           </div>
-          <label className="so-file">
+          <div className="so-file">
             <span>Receipt photo (optional)</span>
-            <input
-              type="file"
-              accept="image/jpeg,image/png,application/pdf"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            />
-          </label>
+            <label className="so-filebtn">
+              <input
+                type="file"
+                accept="image/jpeg,image/png,application/pdf"
+                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              />
+              {file ? "Change photo" : "Add receipt photo"}
+            </label>
+            {file && <small className="so-filename">{file.name}</small>}
+          </div>
           <div className="so-total">
             <span>You paid</span>
             <b>{bad ? "–" : money(total)}</b>

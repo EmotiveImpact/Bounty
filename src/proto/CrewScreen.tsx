@@ -71,7 +71,10 @@ export const CREW: CrewMember[] = [
   },
 ];
 
-const photo = (id: string) => `/crew/${id}.jpg`;
+// The standing photo for the line-up on Deals; the action pose on the Crew
+// page. Each picture is shown once per screen, and the other crew pictures
+// (welcome card, empty screens, plans) are kept for those places only.
+const photo = (id: string, pose = false) => `/crew/${id}${pose ? "-pose" : ""}.jpg`;
 
 /** One character a day, the same for everyone on that London date. */
 export function crewOfTheDay(date = new Date()): CrewMember {
@@ -90,7 +93,6 @@ export function CrewBand({ go }: { go: (v: "crew") => void }) {
         <h2 className="k-display">Every kind of flipper. One crew.</h2>
         <p>Students, side hustlers and full-timers, all hunting the same shelves. Share a find, earn points, climb the levels.</p>
         <div className="cr-today">
-          <img src={photo(today.id)} alt="" loading="lazy" />
           <div>
             <b>{today.name}’s tip for today</b>
             <span>{today.tip}</span>
@@ -102,9 +104,13 @@ export function CrewBand({ go }: { go: (v: "crew") => void }) {
       </div>
       <div className="cr-band-row" aria-hidden="true">
         {CREW.map((c) => (
-          <figure key={c.id} style={{ ["--k-tint" as string]: `var(--k-${c.tint})` }}>
+          <figure
+            key={c.id}
+            className={c.id === today.id ? "today" : undefined}
+            style={{ ["--k-tint" as string]: `var(--k-${c.tint})` }}
+          >
             <img src={photo(c.id)} alt="" loading="lazy" />
-            <figcaption>{c.name.replace("The ", "")}</figcaption>
+            <figcaption>{c.name.replace("The ", "")}{c.id === today.id && <small>Today’s tip</small>}</figcaption>
           </figure>
         ))}
       </div>
@@ -173,7 +179,7 @@ export default function CrewScreen({ go }: { go: Go }) {
         {CREW.map((c) => (
           <article key={c.id} className="cr-card" style={{ ["--k-tint" as string]: `var(--k-${c.tint})` }}>
             <div className="cr-photo">
-              <img src={photo(c.id)} alt={`${c.name}, one of the Bounty crew`} loading="lazy" />
+              <img src={photo(c.id, true)} alt={`${c.name}, one of the Bounty crew`} loading="lazy" />
             </div>
             <div className="cr-body">
               <h2 className="k-display">{c.name}</h2>
