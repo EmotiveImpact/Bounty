@@ -27,7 +27,13 @@ function raw(base, { method = "GET", path, headers = {}, body = "" }) {
 }
 
 test("the local default needs no password and no public hosts", () => {
-  assert.deepEqual(accessConfig({}), { listenHost: "127.0.0.1", publicHosts: [], password: null });
+  assert.deepEqual(accessConfig({}), {
+    listenHost: "127.0.0.1",
+    publicHosts: [],
+    password: null,
+    databaseUrl: null,
+    inviteCode: null,
+  });
 });
 
 test("listening beyond this machine or naming public hosts needs a long password", () => {

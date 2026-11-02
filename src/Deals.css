@@ -66,15 +66,8 @@
 }
 .deals-sample {
   margin: 0;
-  font-size: 14.5px;
-  padding: 12px 16px;
-  border-width: 2px;
+  font-size: 13.5px;
 }
-.deals-sample strong {
-  display: block;
-  font-size: 16px;
-}
-
 
 .deals-grid {
   display: grid;
@@ -447,12 +440,7 @@
     padding: 2px 7px 2px 5px;
   }
   .deals-tag {
-    top: auto;
-    right: auto;
-    left: 6px;
-    bottom: 8px;
-    font-size: 10.5px;
-    padding: 2px 7px;
+    display: none;
   }
   .deals-body {
     padding: 10px 12px 12px;
@@ -472,7 +460,105 @@
     padding-right: max(16px, env(safe-area-inset-right, 0px));
   }
 }
-.deals-panel-head .badge {
-  display: table;
-  margin: 3px 0 4px;
+
+/* Sort strip and the Simple or Pro switch share one row. */
+.deals-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.deals-verdict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  font-size: 13px;
+}
+.deals-answer {
+  display: grid;
+  gap: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 14px;
+  color: var(--ink-2);
+  justify-items: start;
+}
+/* Pro view: a dense table that scrolls sideways inside its own box on phones. */
+.deals-pro {
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.deals-pro table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  min-width: 860px;
+}
+.deals-pro th,
+.deals-pro td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: middle;
+}
+.deals-pro thead th {
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: var(--surface-2);
+  font-weight: 700;
+}
+.deals-pro tbody tr:last-child th,
+.deals-pro tbody tr:last-child td {
+  border-bottom: 0;
+}
+.deals-pro .n {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.deals-pro .retail {
+  color: var(--retail);
+  font-weight: 600;
+}
+.deals-pro .sold {
+  color: var(--sold);
+  font-weight: 600;
+}
+.deals-pro .gain {
+  color: var(--pass);
+  font-weight: 700;
+}
+.deals-pro .loss {
+  color: var(--fail);
+  font-weight: 700;
+}
+.deals-pro tbody th {
+  background: none;
+}
+.deals-pro tbody th small {
+  display: block;
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 12.5px;
+}
+.deals-pro-name,
+.deals-pro-name:hover:not(:disabled) {
+  border: 0;
+  background: none;
+  padding: 0;
+  font-weight: 650;
+  color: var(--ink);
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: var(--line-2);
+  text-underline-offset: 3px;
 }

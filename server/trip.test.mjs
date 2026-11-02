@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { journey, tripEconomics, lowerMedian } from "./trip.mjs";
 import { evaluateAlert } from "./alerts.mjs";
+import { suitability } from "./suitability.mjs";
 
 const base = {
   units: 4,
@@ -93,6 +94,8 @@ const passing = {
   now: "2026-10-31T12:00:00Z",
   localStockConfirmed: true,
   availability: "in_stock",
+  // The price applies at the branch checked (round 5).
+  priceAtBranch: true,
   promotion: null,
   shippingKnown: true,
   recentIndependentSales: 3,
@@ -102,6 +105,13 @@ const passing = {
   displayPermitted: true,
   meetsThresholds: true,
   units: 3,
+  // The trip fits the person making it (round 5): three 0.9 kg units by car.
+  suitability: suitability({
+    units: 3,
+    unitKg: 0.9,
+    cashRequired: 4800,
+    profile: { transport: "Car", carryKg: 5, cashAvailable: 10000, storageUnits: 10 },
+  }).checks,
 };
 
 test("alerts require every check and explain each failure", () => {

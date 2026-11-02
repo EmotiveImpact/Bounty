@@ -117,6 +117,28 @@
   margin: 12px 0;
   justify-self: start;
 }
+/* A refund asks whether the item came back: one radio choice per line. */
+.ledger-form .ledger-choice {
+  margin: 12px 0 0;
+}
+.ledger-choice label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 6px 0;
+  font-size: 14px;
+}
+.ledger-form .ledger-choice input {
+  width: auto;
+  flex-shrink: 0;
+  margin: 4px 0 0;
+  padding: 0;
+}
+/* The hint under "Date the item came back", on its own row. */
+.ledger-form .ledger-form-hint {
+  margin: 4px 0 0;
+  font-size: 13px;
+}
 .ledger-form input[type="file"] {
   padding: 6px 0;
   border: 0;

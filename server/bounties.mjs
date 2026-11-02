@@ -37,6 +37,9 @@ import {
 } from "./opportunity.mjs";
 import { AUDIT_TARGET, CHECK_VALID_DAYS, latestCheck, progress as auditProgress } from "./audit.mjs";
 import { HAND_CARRY_KG, accessNeeds } from "./catalog.mjs";
+// Whether a trip fits a member's own transport, carry limit, cash and
+// storage (round 5, finding 4).
+import { profileLoadLimit, readTripProfile, suitability as tripSuitability, tripProfile } from "./suitability.mjs";
 import { normaliseBarcode, sellerName } from "./matching.mjs";
 import { displayPermitted } from "./evidence.mjs";
 import { stripMetadata } from "./metadata.mjs";
@@ -132,15 +135,40 @@ const TABLES = [
  alerts_opt_in INTEGER NOT NULL DEFAULT 0,
  alert_localities TEXT NOT NULL DEFAULT '[]',
  rules TEXT NOT NULL DEFAULT '{}',
- created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+ created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ transport TEXT,
+ carry_kg REAL,
+ storage_units INTEGER,
+ seller_name TEXT,
+ seller_key TEXT,
+ seller_confirmed_at TEXT
 )`,
+    // transport, carry_kg and storage_units are the member's own trip
+    // profile (round 5): how they travel (trip.mjs MODES), the most they can
+    // carry in kg and the units they can store at home. NULL is not known,
+    // never zero: such a member is asked to confirm it and never told to go.
+    // seller_name (round 5b) is their marketplace seller name (for example
+    // their eBay user name) as they gave it, so their own listings of units
+    // bought through a bounty count once; NULL is not known. seller_key is
+    // its matching key (sellerKey: NFKC, Unicode lower case, spaces
+    // collapsed), unique across members; matching uses only the key.
+    // seller_confirmed_at is when the operator confirmed the name belongs to
+    // the member, cleared whenever the name changes: until then their
+    // listings count in full.
     columns: [
       "id", "name", "locality", "paid_tier", "paid_until", "alerts_opt_in", "alert_localities", "rules", "created",
+      "transport", "carry_kg", "storage_units", "seller_name", "seller_key", "seller_confirmed_at",
     ],
     types: {
       alerts_opt_in: "INTEGER NOT NULL DEFAULT 0",
       alert_localities: "TEXT NOT NULL DEFAULT '[]'",
       rules: "TEXT NOT NULL DEFAULT '{}'",
+      transport: "TEXT",
+      carry_kg: "REAL",
+      storage_units: "INTEGER",
+      seller_name: "TEXT",
+      seller_key: "TEXT",
+      seller_confirmed_at: "TEXT",
     },
   },
   {
@@ -371,6 +399,34 @@ const TABLES = [
       claim_id: "INTEGER",
     },
   },
+  {
+    // Units bought through a completed claim that no longer count against
+    // the resale demand for the item (round 5): kind "sold" or "returned"
+    // (to the shop), recorded by the member who made the claim, or
+    // "reconciled", recorded by the operator with a reason. recorded_by is
+    // "member" or "operator"; member_id is the member who recorded it.
+    // Append-only: the units released on a claim never exceed the units
+    // bought through it.
+    name: "claim_releases",
+    sql: `CREATE TABLE IF NOT EXISTS claim_releases (
+ id INTEGER PRIMARY KEY,
+ claim_id INTEGER NOT NULL REFERENCES claims(id),
+ kind TEXT NOT NULL,
+ units INTEGER NOT NULL,
+ reason TEXT,
+ recorded_by TEXT NOT NULL,
+ member_id INTEGER REFERENCES members(id),
+ created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`,
+    columns: ["id", "claim_id", "kind", "units", "reason", "recorded_by", "member_id", "created"],
+    types: {
+      claim_id: "INTEGER",
+      kind: "TEXT NOT NULL DEFAULT ''",
+      units: "INTEGER NOT NULL DEFAULT 0",
+      recorded_by: "TEXT NOT NULL DEFAULT ''",
+      member_id: "INTEGER",
+    },
+  },
 ];
 
 /**
@@ -382,6 +438,7 @@ export function schema(db) {
     db.exec(table.sql);
     addMissingColumns(db, table.name, table.columns, { created: "TEXT", ...table.types });
   }
+  sellerKeys(db);
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS claims_one_active
  ON claims(bounty_id, member_id) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS claims_bounty ON claims(bounty_id, status);
@@ -393,7 +450,30 @@ CREATE INDEX IF NOT EXISTS alerts_member ON alerts(member_id, created);
 CREATE INDEX IF NOT EXISTS notices_member ON notices(member_id, created);
 CREATE INDEX IF NOT EXISTS notices_bounty ON notices(bounty_id, kind, superseded_at);
 CREATE INDEX IF NOT EXISTS promotion_answers_member ON promotion_answers(member_id, retailer);
-CREATE INDEX IF NOT EXISTS bounties_barcode ON bounties(barcode, status);`);
+CREATE INDEX IF NOT EXISTS bounties_barcode ON bounties(barcode, status);
+CREATE INDEX IF NOT EXISTS claim_releases_claim ON claim_releases(claim_id);
+CREATE UNIQUE INDEX IF NOT EXISTS members_seller_key ON members(seller_key) WHERE seller_key IS NOT NULL;`);
+}
+
+/**
+ * Fills in the matching key for seller names stored without one (round 5b),
+ * in member order. A name whose key another member already has keeps no key
+ * (its listings count in full) and loses any confirmation, so the unique
+ * index can be built.
+ */
+function sellerKeys(db) {
+  const rows = db.prepare("SELECT id, seller_name FROM members WHERE seller_name IS NOT NULL AND seller_key IS NULL ORDER BY id").all();
+  if (!rows.length) return;
+  const taken = new Set(db.prepare("SELECT seller_key FROM members WHERE seller_key IS NOT NULL").all().map((r) => r.seller_key));
+  const set = db.prepare("UPDATE members SET seller_key = ? WHERE id = ?");
+  const clear = db.prepare("UPDATE members SET seller_confirmed_at = NULL WHERE id = ?");
+  for (const r of rows) {
+    const key = sellerKey(r.seller_name);
+    if (key && !taken.has(key)) {
+      taken.add(key);
+      set.run(key, r.id);
+    } else clear.run(r.id);
+  }
 }
 
 // --------------------------------------------------------------- helpers
@@ -604,9 +684,27 @@ function memberFields(body, current) {
     ? { ...current, alert_localities: json(current.alert_localities, []), rules: memberRules(current) }
     : {
         name: null, locality: null, paid_tier: null, paid_until: null, alerts_opt_in: 0, alert_localities: [],
-        rules: {},
+        rules: {}, transport: null, carry_kg: null, storage_units: null, seller_name: null, seller_key: null,
+        seller_confirmed_at: null,
       };
   if (has("rules")) next.rules = memberRulesInput(body.rules);
+  // The member's trip profile (round 5): each field given is validated, and
+  // a blank one ("" or null) clears it to not known, never zero.
+  const trip = readTripProfile(
+    Object.fromEntries(MEMBER_PROFILE_FIELDS.filter(has).map((k) => [k, body[k]])),
+    { prefix: "", fields: MEMBER_PROFILE_FIELDS.filter(has) },
+  );
+  if (has("transport")) next.transport = trip?.transport ?? null;
+  if (has("carryKg")) next.carry_kg = trip?.carryKg ?? null;
+  if (has("storageUnits")) next.storage_units = trip?.storageUnits ?? null;
+  // Their marketplace seller name (round 5b): optional, a blank clears it.
+  if (has("sellerName")) {
+    next.seller_name = sellerNameInput(body.sellerName);
+    const key = next.seller_name === null ? null : sellerKey(next.seller_name);
+    // A new or changed name needs the operator to confirm it again.
+    if (key !== (current?.seller_key ?? null)) next.seller_confirmed_at = null;
+    next.seller_key = key;
+  }
   if (!current || has("name")) next.name = text(body.name, "name", 80);
   if (has("locality")) next.locality = text(body.locality, "locality", 120, { optional: true });
   if (has("alertsOptIn")) next.alerts_opt_in = bool(body.alertsOptIn, "alertsOptIn") ? 1 : 0;
@@ -622,6 +720,69 @@ function memberFields(body, current) {
   }
   if (!next.paid_tier) next.paid_until = null;
   return next;
+}
+
+/**
+ * A marketplace seller name from a request: null when blank; otherwise 1 to
+ * 64 characters with no control characters, and a seller name a listing
+ * can carry (not a listing id such as "listing:123"), or a 400.
+ */
+export const SELLER_NAME_ERROR =
+  "Your marketplace seller name must be the name your listings show, such as your eBay user name, in 64 characters or fewer.";
+export const SELLER_NAME_TAKEN =
+  "Another member already gave this seller name. Each member's listings are matched by their own seller name, so check the spelling.";
+
+function sellerNameInput(value) {
+  if (value === undefined || value === null || (typeof value === "string" && value.trim() === "")) return null;
+  if (typeof value !== "string") fail(SELLER_NAME_ERROR);
+  const name = value.trim();
+  if (name.length > 64 || /[\u0000-\u001f\u007f]/.test(name) || sellerKey(name) === null) fail(SELLER_NAME_ERROR);
+  return name;
+}
+
+/**
+ * Refuses a seller name whose matching key (sellerKey) another member
+ * already has (409): fullwidth, accented-case or spaced copies match the
+ * same listings, so they are the same name.
+ */
+function uniqueSellerName(db, key, memberId = null) {
+  if (key === null) return;
+  const taken = db.prepare("SELECT id FROM members WHERE seller_key = ? AND id IS NOT ?").get(key, memberId);
+  if (taken) fail(SELLER_NAME_TAKEN, 409);
+}
+
+/** Runs a member write, turning the unique seller key index into the plain 409. */
+function sellerWrite(fn) {
+  try {
+    return fn();
+  } catch (error) {
+    if (/UNIQUE constraint failed: members\.seller_key/.test(String(error?.message))) fail(SELLER_NAME_TAKEN, 409);
+    throw error;
+  }
+}
+
+/**
+ * The operator confirms that a member's seller name is theirs (round 5b),
+ * for example from their marketplace profile or one of their listings.
+ * sellerName must be the name the member gave now (compared by its
+ * matching key), so a name changed since the operator looked is not
+ * confirmed (409). withdraw: true clears a confirmation. Until a name is
+ * confirmed the member's listings count in full.
+ */
+export function confirmSellerName(db, memberId, { sellerName: given, withdraw = false } = {}, { now }) {
+  const at = iso(clock(now));
+  const member = requireMember(db, memberId);
+  if (withdraw === true) {
+    db.prepare("UPDATE members SET seller_confirmed_at = NULL WHERE id = ?").run(member.id);
+    return getMember(db, member.id);
+  }
+  if (!member.seller_key) fail("This member has given no marketplace seller name to confirm.", 409);
+  const key = typeof given === "string" ? sellerKey(given) : null;
+  if (!key) fail("Send the seller name you checked, as the member gave it.");
+  if (key !== member.seller_key)
+    fail(`The member's seller name is now "${member.seller_name}", not the name you checked. Check it again before confirming.`, 409);
+  db.prepare("UPDATE members SET seller_confirmed_at = ? WHERE id = ?").run(at, member.id);
+  return getMember(db, member.id);
 }
 
 const getMember = (db, memberId) =>
@@ -648,6 +809,15 @@ export function memberView(db, member, { now }) {
     // (API units), and the thresholds that result.
     rules: memberRules(member),
     effectiveRules: pick(effectiveRules(memberRules(member)), MEMBER_RULE_KEYS),
+    // How they travel, how much they can carry and the units they can store
+    // at home (round 5), each null when not known. The cash they can spend
+    // is asked with each claim.
+    profile: memberProfileView(member, homeStock(db, member.id, { now })),
+    // Their marketplace seller name (round 5b), or null when not given, and
+    // when the operator confirmed it (null until then: their listings count
+    // in full).
+    sellerName: typeof member.seller_name === "string" ? member.seller_name : null,
+    sellerConfirmedAt: member.seller_key && member.seller_confirmed_at ? member.seller_confirmed_at : null,
     created: member.created,
     paid: {
       label: "Paid early access",
@@ -677,32 +847,173 @@ export function memberView(db, member, { now }) {
 export function createMember(db, body, { now }) {
   clock(now);
   const m = memberFields(body, null);
-  const result = db
-    .prepare(
-      `INSERT INTO members(name, locality, paid_tier, paid_until, alerts_opt_in, alert_localities, rules, created)
- VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      m.name, m.locality, m.paid_tier, m.paid_until, m.alerts_opt_in, JSON.stringify(m.alert_localities),
-      JSON.stringify(m.rules), now,
-    );
+  uniqueSellerName(db, m.seller_key);
+  const result = sellerWrite(() =>
+    db
+      .prepare(
+        `INSERT INTO members(name, locality, paid_tier, paid_until, alerts_opt_in, alert_localities, rules, created,
+ transport, carry_kg, storage_units, seller_name, seller_key, seller_confirmed_at)
+ VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+      )
+      .run(
+        m.name, m.locality, m.paid_tier, m.paid_until, m.alerts_opt_in, JSON.stringify(m.alert_localities),
+        JSON.stringify(m.rules), now, m.transport, m.carry_kg, m.storage_units, m.seller_name, m.seller_key,
+      ),
+  );
   return getMember(db, Number(result.lastInsertRowid));
 }
 
-/** Updates name, locality, alert opt-in and localities, stricter thresholds or the paid tier. */
+/** Updates name, locality, alert opt-in and localities, stricter thresholds, the trip profile or the paid tier. */
 export function updateMember(db, memberId, body, { now }) {
   clock(now);
   const current = requireMember(db, memberId);
   const m = memberFields(body, current);
-  db.prepare(
-    `UPDATE members SET name = ?, locality = ?, paid_tier = ?, paid_until = ?, alerts_opt_in = ?, alert_localities = ?,
- rules = ? WHERE id = ?`,
-  ).run(
-    m.name, m.locality, m.paid_tier, m.paid_until, m.alerts_opt_in, JSON.stringify(m.alert_localities),
-    JSON.stringify(m.rules), current.id,
+  uniqueSellerName(db, m.seller_key, current.id);
+  sellerWrite(() =>
+    db
+      .prepare(
+        `UPDATE members SET name = ?, locality = ?, paid_tier = ?, paid_until = ?, alerts_opt_in = ?, alert_localities = ?,
+ rules = ?, transport = ?, carry_kg = ?, storage_units = ?, seller_name = ?, seller_key = ?, seller_confirmed_at = ? WHERE id = ?`,
+      )
+      .run(
+        m.name, m.locality, m.paid_tier, m.paid_until, m.alerts_opt_in, JSON.stringify(m.alert_localities),
+        JSON.stringify(m.rules), m.transport, m.carry_kg, m.storage_units, m.seller_name, m.seller_key,
+        m.seller_confirmed_at ?? null, current.id,
+      ),
   );
   return getMember(db, current.id);
 }
+
+// ------------------------------------------------------- trip profile
+
+/** The member profile fields as requests name them. Cash is asked per claim. */
+export const MEMBER_PROFILE_FIELDS = Object.freeze(["transport", "carryKg", "storageUnits"]);
+
+/**
+ * A member's stored trip profile with the cash they can spend on one trip:
+ * { transport, carryKg, cashAvailable, storageUnits, heldUnits } for
+ * suitability.mjs. Each value is null when not known (cashAvailable is
+ * undefined-safe: null unless given). storageUnits is the room they gave
+ * at home in all (round 5b, second verification: the total, counting the
+ * space units bought through bounties take up); room (homeStock) is { held,
+ * claimed }: the units they bought through bounties and have not recorded
+ * as sold or returned, and the units in their other live claims, which take
+ * up some of it (a number is read as held).
+ */
+export function memberTripProfile(member, cashAvailable = null, room = {}) {
+  const r = typeof room === "number" ? { held: room } : (room ?? {});
+  return tripProfile({
+    transport: member?.transport ?? null,
+    carryKg: typeof member?.carry_kg === "number" ? member.carry_kg : null,
+    cashAvailable,
+    storageUnits: Number.isSafeInteger(member?.storage_units) ? member.storage_units : null,
+    heldUnits: r.held ?? 0,
+    claimedUnits: r.claimed ?? 0,
+  });
+}
+
+/**
+ * What takes up a member's room at home for a trip on `bountyId` (round 5b,
+ * second verification): { held, claimed }. held is stockHeld; claimed the
+ * units in their live claims on other live bounties (not sample ones), so
+ * two claims cannot each count the same free room. before: a claim row ({
+ * id, created }): only claims made before it count, so when two claims
+ * would not both fit, the later one is the one that fails its re-check.
+ */
+/**
+ * homeStock for a member on a bounty: when they hold a live claim on it,
+ * only their claims made before that one count (as its re-check counts
+ * them), otherwise all their other live claims.
+ */
+export function roomFor(db, bounty, memberId, now) {
+  const own = db
+    .prepare("SELECT id, created FROM claims WHERE bounty_id = ? AND member_id = ? AND status = 'active' AND expires_at > ? ORDER BY id DESC LIMIT 1")
+    .get(bounty.id, memberId, iso(clock(now)));
+  return homeStock(db, memberId, { bountyId: bounty.id, before: own ?? null, now });
+}
+
+export function homeStock(db, memberId, { bountyId = null, before = null, now }) {
+  const at = iso(clock(now));
+  const rows = db
+    .prepare(
+      `SELECT c.id, c.units, c.created FROM claims c JOIN bounties b ON b.id = c.bounty_id
+ WHERE c.member_id = ? AND c.status = 'active' AND c.expires_at > ? AND b.sample = 0 AND c.bounty_id IS NOT ?`,
+    )
+    .all(memberId, at, bountyId)
+    .filter((c) => isCount(c.units))
+    .filter((c) => !before || c.created < before.created || (c.created === before.created && c.id < before.id));
+  return { held: stockHeld(db, memberId), claimed: rows.reduce((n, c) => n + c.units, 0) };
+}
+
+/**
+ * Units a member bought through bounties and has not recorded as sold or
+ * returned (nor the operator reconciled), across every live bounty: stock
+ * at their home that takes up the room they gave for storage (round 5b).
+ * Units released in any way are left out.
+ */
+export function stockHeld(db, memberId) {
+  const rows = db
+    .prepare(
+      "SELECT c.id, c.units FROM claims c JOIN bounties b ON b.id = c.bounty_id WHERE c.member_id = ? AND c.status = 'completed' AND b.sample = 0",
+    )
+    .all(memberId)
+    .filter((r) => isCount(r.units));
+  if (!rows.length) return 0;
+  const released = releasedOn(db, rows.map((r) => r.id));
+  return rows.reduce((n, r) => n + r.units - Math.min(r.units, released.get(r.id)?.total ?? 0), 0);
+}
+
+/**
+ * The profile as the API shows it: values, what is missing and the load
+ * limit. room (homeStock, when known) gives the room now: storageUnits is
+ * the room at home in all, and units held from bounties and units in live
+ * claims are taken off it (round 5b, second verification), as on the card.
+ */
+export function memberProfileView(member, room = null) {
+  const p = memberTripProfile(member, null, room ?? {});
+  const missing = MEMBER_PROFILE_FIELDS.filter((k) => p[k] === null);
+  const held = room ? p.heldUnits : null;
+  const claimed = room ? p.claimedUnits : null;
+  const roomNow = room && p.storageUnits !== null ? Math.max(0, p.storageUnits - held - claimed) : null;
+  const taken = [
+    held > 0 ? `${plural(held, "unit")} bought through bounties and not yet recorded as sold or returned` : "",
+    claimed > 0 ? `${plural(claimed, "unit")} in your live claims` : "",
+  ].filter(Boolean);
+  const storage =
+    roomNow === null
+      ? "units you buy through bounties take up some of your room at home until you record them as sold or returned"
+      : `room at home for ${plural(roomNow, "more unit")} now${taken.length ? `, after ${taken.join(", and ")}` : ""}`;
+  return {
+    transport: p.transport,
+    carryKg: p.carryKg,
+    storageUnits: p.storageUnits,
+    heldUnits: held,
+    claimedUnits: claimed,
+    roomNow,
+    complete: missing.length === 0,
+    missing,
+    loadLimitKg: profileLoadLimit(p),
+    note: missing.length
+      ? profileNeeded(missing)
+      : `Load limit ${profileLoadLimit(p)} kg; ${storage}. The cash you can spend is asked when you claim.`,
+  };
+}
+
+// What a member with no complete profile is told instead of "go", naming
+// only the values still missing (round 5b, second verification).
+const NEEDED_WORDS = Object.freeze({
+  transport: "your transport",
+  carryKg: "how much you can carry (kg)",
+  storageUnits: "how many units you have room for at home in all",
+});
+export function profileNeeded(missing = MEMBER_PROFILE_FIELDS) {
+  const listed = MEMBER_PROFILE_FIELDS.filter((k) => Array.isArray(missing) && missing.includes(k));
+  const fields = listed.length ? listed : MEMBER_PROFILE_FIELDS;
+  const words = fields.map((k) => NEEDED_WORDS[k]);
+  const list = words.length <= 1 ? words.join("") : `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`;
+  return `Confirm ${list}, in your member profile, so trips can be checked against ${fields.length === 1 ? "it" : "them"}. Until then no trip is shown to you as one to make`;
+}
+export const PROFILE_NEEDED = profileNeeded();
 
 export const listMembers = (db) =>
   db.prepare("SELECT * FROM members ORDER BY name COLLATE NOCASE, id").all().map(plain);
@@ -715,12 +1026,28 @@ export const listMembers = (db) =>
  * so distribution is capped by the units on the shelf and by the resale
  * demand left after competing sellers' listings. Any unknown or invalid input
  * gives 0 (fail closed).
+ *
+ * earlierUnits (round 5, optional): units bought through earlier bounties for
+ * the same item that have not been recorded as sold or returned, plus units
+ * held in live claims on them (earlierAllocation). They are on their way to
+ * the same buyers, so they come off the demand like competing listings.
+ * Absent (undefined) means none; anything else that is not a count,
+ * null included, gives 0.
+ *
+ * ownListings (round 5b, optional): competing listings that are members'
+ * own units, already counted as earlier units or as units bought through
+ * this bounty (ownListings()), so they are counted once. Never more than
+ * competingListings; absent or not a count leaves every listing counted.
  */
-export function distributionCap({ availableUnits, salesPerWeek, sellWindowWeeks, competingListings } = {}) {
-  if (!isCount(availableUnits) || !isPositive(salesPerWeek) || !isPositive(sellWindowWeeks) || !isCount(competingListings))
+export function distributionCap({ availableUnits, salesPerWeek, sellWindowWeeks, competingListings, earlierUnits, ownListings } = {}) {
+  const earlier = earlierUnits === undefined ? 0 : earlierUnits;
+  if (!isCount(availableUnits) || !isPositive(salesPerWeek) || !isPositive(sellWindowWeeks) || !isCount(competingListings) || !isCount(earlier))
     return 0;
+  // Members' own listings of units already counted (round 5b) count once;
+  // anything that is not a count leaves every listing counted.
+  const own = isCount(ownListings) ? Math.min(ownListings, competingListings) : 0;
   const demand = Math.floor(salesPerWeek * sellWindowWeeks + 1e-9);
-  return Math.min(availableUnits, Math.max(0, demand - competingListings));
+  return Math.min(availableUnits, Math.max(0, demand - (competingListings - own) - earlier));
 }
 
 /**
@@ -772,8 +1099,22 @@ function lookupOf(estimate, lookup) {
  * them a check made after purchases would take those units off twice.
  * basis.demand is the cap before any shelf limit: the resale demand left
  * after competing listings, never more than the operator's limit.
+ *
+ * options.earlier (round 5): earlierAllocation for the bounty, the units
+ * earlier bounties for the item still have against its demand (bought and
+ * not recorded as sold or returned, or held in a live claim). They come off
+ * the demand like competing listings (used.earlierUnits), never off the
+ * operator's limit or the shelf, and the notes say so in plain words. The
+ * bounty's own purchases are not among them: claimSeats takes those off.
+ *
+ * options.owners (round 5b): listingOwners for the bounty. Competing
+ * listings that are members' own units bought through bounties for the item
+ * (ownListings, matched by their seller name) are counted once
+ * (used.ownListings); evidence.listingsBySeller keeps the competition's
+ * listings per seller so a later read can match them again.
  */
-function capBasis(entered, estimate, lookup = null, { boughtBefore = 0 } = {}) {
+function capBasis(entered, estimate, lookup = null, { boughtBefore = 0, earlier = null, owners = null } = {}) {
+  const earlierUnits = isCount(earlier?.units) ? earlier.units : 0;
   const counted = evidencedUnits(estimate.stock);
   const before = counted === null || !isCount(boughtBefore) ? 0 : boughtBefore;
   const units = counted === null ? null : counted + before;
@@ -783,6 +1124,8 @@ function capBasis(entered, estimate, lookup = null, { boughtBefore = 0 } = {}) {
   const looked = lookupOf(estimate, lookup);
   const limit = isCount(entered.availableUnits) ? entered.availableUnits : null;
   const knownListings = isCount(listings) && (listings > 0 || looked !== null) ? listings : null;
+  const bySeller = knownListings !== null && Array.isArray(estimate.competition?.bySeller) ? estimate.competition.bySeller : null;
+  const own = ownListings(bySeller, owners ?? [], knownListings);
   // One sell window for the cap and the buy-alert gate: an operator's longer
   // window is capped at the gate's (OPPORTUNITY_RULES.sellWindowWeeks).
   const gateWeeks = OPPORTUNITY_RULES.sellWindowWeeks;
@@ -792,6 +1135,8 @@ function capBasis(entered, estimate, lookup = null, { boughtBefore = 0 } = {}) {
     salesPerWeek: rate === null ? null : Math.min(entered.salesPerWeek, rate),
     sellWindowWeeks: weeks,
     competingListings: knownListings,
+    earlierUnits,
+    ownListings: own.units,
   };
   const notes = [];
   if (isPositive(entered.sellWindowWeeks) && entered.sellWindowWeeks > gateWeeks)
@@ -829,11 +1174,20 @@ function capBasis(entered, estimate, lookup = null, { boughtBefore = 0 } = {}) {
     );
   else if (knownListings === 0)
     notes.push(`An asking-price lookup (${looked.provider}, ${humanTime(looked.fetched)}) found no competing listings`);
+  const earlierText = earlierNote(earlier);
+  if (earlierText) notes.push(earlierText);
+  const ownText = ownListingsNote(own, knownListings);
+  if (ownText) notes.push(ownText);
+  const unnamedText = unnamedSellerNote(own);
+  if (unnamedText) notes.push(unnamedText);
   return {
     entered,
     evidence: {
       unitsSeen: counted,
       boughtBefore: before,
+      earlierUnits,
+      ownListings: own.units,
+      listingsBySeller: bySeller,
       salesPerWeek: rate === null ? null : round2(rate),
       confirmedSales: isCount(estimate.sample?.count) ? estimate.sample.count : null,
       competingListings: knownListings,
@@ -855,6 +1209,520 @@ function capBasis(entered, estimate, lookup = null, { boughtBefore = 0 } = {}) {
 function demandCap(used, limit = null) {
   const demand = distributionCap({ ...used, availableUnits: Number.MAX_SAFE_INTEGER });
   return isCount(limit) ? Math.min(limit, demand) : demand;
+}
+
+// ------------------------------------------- resale demand across bounties
+
+// Round 5: the resale demand for an item belongs to the item, not to one
+// bounty, so withdrawing a bounty (or letting it expire) and opening another
+// never starts again from the full demand. Units bought through a claim count
+// against the demand until they are released on evidence: the member who
+// bought them records them as sold or returned, or the operator records a
+// reconciliation with a reason (claim_releases). Without a record they stay
+// allocated (fail closed). No ledger trip is linked to a claim today, so the
+// ledger cannot release them.
+
+export const RELEASE_KINDS = Object.freeze(["sold", "returned", "reconciled"]);
+const noReleases = () => ({ sold: 0, returned: 0, reconciled: 0, total: 0 });
+
+/** Units released on each completed claim: Map claim id -> { sold, returned, reconciled, total }. */
+function releasedOn(db, claimIds) {
+  const out = new Map();
+  if (!claimIds.length) return out;
+  const rows = db
+    .prepare(
+      `SELECT claim_id, kind, COALESCE(SUM(units), 0) AS n FROM claim_releases
+ WHERE claim_id IN (${claimIds.map(() => "?").join(", ")}) GROUP BY claim_id, kind`,
+    )
+    .all(...claimIds);
+  for (const r of rows) {
+    // Only a known kind releases anything (fail closed).
+    if (!RELEASE_KINDS.includes(r.kind) || !isCount(r.n)) continue;
+    const e = out.get(r.claim_id) ?? noReleases();
+    e[r.kind] += r.n;
+    e.total += r.n;
+    out.set(r.claim_id, e);
+  }
+  return out;
+}
+
+/**
+ * A completed claim's units against the demand for its item: { bought,
+ * released: { sold, returned, reconciled }, outstanding }. Outstanding is
+ * the units bought less the units released, never below 0. An active or
+ * ended claim that bought nothing has nothing outstanding.
+ */
+export function claimAllocation(db, claim) {
+  const bought = claim?.status === "completed" && isCount(claim.units) ? claim.units : 0;
+  const r = bought ? (releasedOn(db, [claim.id]).get(claim.id) ?? noReleases()) : noReleases();
+  return {
+    bought,
+    released: { sold: r.sold, returned: r.returned, reconciled: r.reconciled },
+    outstanding: Math.max(0, bought - Math.min(bought, r.total)),
+  };
+}
+
+/**
+ * The units earlier live bounties for the same item still have against its
+ * resale demand (round 5): every bounty that is not a sample, has the same
+ * canonical barcode and was opened before this one (a lower id; options
+ * for a bounty not yet created have no id), whatever its status (open,
+ * withdrawn or expired) and its retailer or locality, since the item resells
+ * to the same buyers wherever it was bought. Units bought through completed
+ * claims count until released (claimAllocation); units in live claims count
+ * until the claim lapses, is released or is marked as bought.
+ *
+ * Not scoped by variant or condition: a GTIN already names one variant,
+ * every bounty buys new retail stock, and splitting by the variant text
+ * would let a differently written variant start again from the full demand
+ * (fail open).
+ *
+ * Returns { units, outstanding, held, bought, released: { sold, returned,
+ * reconciled }, bounties: [id], heldOn: [id], claims: [{ id, bountyId,
+ * memberId, units, released, outstanding, endedAt }] } where units =
+ * outstanding + held, bounties are the bounties with units outstanding,
+ * heldOn those with live claims, and claims lists the completed claims with
+ * units still outstanding, oldest first.
+ */
+export function earlierAllocation(db, bounty, now) {
+  const out = { units: 0, outstanding: 0, held: 0, bought: 0, released: { sold: 0, returned: 0, reconciled: 0 }, bounties: [], heldOn: [], claims: [] };
+  if (!bounty || bounty.sample) return out;
+  // A live bounty stores the canonical GTIN (createBounty), as boughtAtBranch reads it.
+  const gtin = normaliseBarcode(bounty.barcode);
+  if (!gtin) return out;
+  const before = Number.isSafeInteger(bounty.id) ? bounty.id : Number.MAX_SAFE_INTEGER;
+  const ids = db.prepare("SELECT id FROM bounties WHERE sample = 0 AND barcode = ? AND id < ?").all(gtin, before).map((b) => b.id);
+  if (!ids.length) return out;
+  const rows = db
+    .prepare(
+      `SELECT id, bounty_id, member_id, units, status, ended_at FROM claims WHERE bounty_id IN (${ids.map(() => "?").join(", ")})
+ AND (status = 'completed' OR (status = 'active' AND expires_at > ?)) ORDER BY ended_at, id`,
+    )
+    .all(...ids, iso(clock(now)));
+  const done = rows.filter((c) => c.status === "completed" && isCount(c.units) && c.units > 0);
+  const released = releasedOn(db, done.map((c) => c.id));
+  const counted = new Set();
+  const heldOn = new Set();
+  for (const c of rows) {
+    if (c.status === "active") {
+      if (!isCount(c.units)) continue;
+      out.held += c.units;
+      heldOn.add(c.bounty_id);
+      continue;
+    }
+    if (!(isCount(c.units) && c.units > 0)) continue;
+    const r = released.get(c.id) ?? noReleases();
+    const outstanding = Math.max(0, c.units - Math.min(c.units, r.total));
+    out.bought += c.units;
+    for (const k of ["sold", "returned", "reconciled"]) out.released[k] += r[k];
+    if (outstanding === 0) continue;
+    out.outstanding += outstanding;
+    counted.add(c.bounty_id);
+    out.claims.push({
+      id: c.id,
+      bountyId: c.bounty_id,
+      memberId: c.member_id,
+      units: c.units,
+      released: { sold: r.sold, returned: r.returned, reconciled: r.reconciled },
+      outstanding,
+      endedAt: c.ended_at,
+    });
+  }
+  out.units = out.outstanding + out.held;
+  out.bounties = [...counted].sort((a, b) => a - b);
+  out.heldOn = [...heldOn].sort((a, b) => a - b);
+  return out;
+}
+
+const earlierWhere = (n) => (n > 1 ? "earlier bounties" : "an earlier bounty");
+
+/**
+ * The plain words for units earlier bounties still have against the
+ * demand for the item, or null when there are none: "3 units bought
+ * through an earlier bounty for this item have not been recorded as sold
+ * or returned, so they still count against the demand for it".
+ */
+export function earlierNote(e) {
+  if (!isObject(e) || !(e.units > 0)) return null;
+  const parts = [];
+  if (e.outstanding > 0)
+    parts.push(
+      `${plural(e.outstanding, "unit")} bought through ${earlierWhere(e.bounties?.length ?? 1)} for this item ${e.outstanding === 1 ? "has" : "have"} not been recorded as sold or returned, so ${e.outstanding === 1 ? "it still counts" : "they still count"} against the demand for it`,
+    );
+  if (e.held > 0)
+    parts.push(
+      `${plural(e.held, "unit")} ${e.held === 1 ? "is" : "are"} held in a claim on ${earlierWhere(e.heldOn?.length ?? 1)} for this item, so ${e.held === 1 ? "it counts" : "they count"} against the demand for it until the claim lapses or is released`,
+    );
+  return parts.join(". ");
+}
+
+/** How units from earlier bounties stop counting, in plain words, or null. */
+export function earlierRelease(e) {
+  if (!isObject(e) || !(e.units > 0)) return null;
+  const parts = [];
+  if (e.outstanding > 0)
+    parts.push(
+      "Units bought stop counting once the member who bought them records them as sold or returned, or the operator records a reconciliation with a reason",
+    );
+  if (e.held > 0) parts.push("A claim stops counting when it lapses or is released, or counts as bought when it is marked as bought");
+  return parts.join(". ");
+}
+
+// ------------------------------------- members' own listings (round 5b)
+
+// A member who bought units through a bounty and lists them on eBay shows up
+// twice: their listings are counted as competing listings, and their units
+// as units from an earlier bounty (or as units bought through this one).
+// With their marketplace seller name on their profile, confirmed by the
+// operator, their own listings are counted once. Everything else counts in
+// full (fail closed): a listing by no stated seller or by a seller no member
+// gave, a listing with no known listing time, a listing from before the
+// unit it would match was bought, a member who gave no seller name or whose
+// name the operator has not confirmed, and a name that was already selling
+// the item before the member first bought it through a bounty.
+
+/**
+ * A seller name as compared: NFKC, Unicode lower case, spaces collapsed
+ * (matching.sellerName); null when none. Uniqueness and matching use only
+ * this key.
+ */
+export const sellerKey = (value) => {
+  const name = typeof value === "string" ? sellerName(value) : null;
+  return name ? name.toLowerCase() : null;
+};
+
+const timeMs = (value) => (typeof value === "string" && value ? Date.parse(value) : NaN);
+
+/**
+ * The earliest time (ms) each seller key was seen in the evidence as a
+ * seller of the item (any research row for the barcode: a sale or a
+ * listing, by its observed or listed time). Map key -> ms.
+ */
+function sellerFirstSeen(db, gtin, keys) {
+  const out = new Map();
+  if (!gtin || !keys.size) return out;
+  const rows = db
+    .prepare("SELECT barcode, seller, observed, listed FROM research WHERE seller IS NOT NULL AND barcode LIKE ?")
+    .all("%" + gtin.slice(-8));
+  for (const r of rows) {
+    if (normaliseBarcode(r.barcode) !== gtin) continue;
+    const key = sellerKey(r.seller);
+    if (!key || !keys.has(key)) continue;
+    for (const t of [timeMs(r.observed), timeMs(r.listed)])
+      if (Number.isFinite(t) && !(out.get(key) <= t)) out.set(key, t);
+  }
+  return out;
+}
+
+/**
+ * Members holding, or who held, units bought through bounties for the item:
+ * every completed claim on a live bounty with the same canonical barcode up
+ * to and including this one (a bounty not yet created has no id, so only
+ * earlier ones). Returns [{ memberId, name, seller, givenKey, confirmed,
+ * prior, key, firstBought, outstanding, claims: [{ bountyId, boughtAt,
+ * units, releases: [{ at, units }] }] }] sorted by member id (times in
+ * milliseconds). seller is the name as they gave it; givenKey its matching
+ * key; confirmed whether the operator confirmed it; prior whether that key
+ * was seen selling the item before the member's first purchase of it; key
+ * is givenKey only when confirmed and not prior (otherwise null: their
+ * listings count in full); outstanding is the units not yet recorded as
+ * sold, returned or reconciled now.
+ */
+export function listingOwners(db, bounty, now) {
+  if (!bounty || bounty.sample) return [];
+  const gtin = normaliseBarcode(bounty.barcode);
+  if (!gtin) return [];
+  const upTo = Number.isSafeInteger(bounty.id) ? bounty.id : Number.MAX_SAFE_INTEGER;
+  const at = iso(clock(now));
+  const claims = db
+    .prepare(
+      `SELECT c.id, c.bounty_id, c.member_id, c.units, c.ended_at FROM claims c JOIN bounties b ON b.id = c.bounty_id
+ WHERE b.sample = 0 AND b.barcode = ? AND b.id <= ? AND c.status = 'completed' AND c.units > 0 AND c.ended_at <= ?
+ ORDER BY c.ended_at, c.id`,
+    )
+    .all(gtin, upTo, at)
+    .filter((c) => isCount(c.units) && Number.isFinite(Date.parse(c.ended_at)));
+  if (!claims.length) return [];
+  const releases = db
+    .prepare(
+      `SELECT claim_id, kind, units, created FROM claim_releases WHERE claim_id IN (${claims.map(() => "?").join(", ")})
+ AND created <= ? ORDER BY created, id`,
+    )
+    .all(...claims.map((c) => c.id), at)
+    .filter((r) => RELEASE_KINDS.includes(r.kind) && isCount(r.units));
+  const byMember = new Map();
+  for (const c of claims) {
+    const own = releases
+      .filter((r) => r.claim_id === c.id && Number.isFinite(Date.parse(r.created)))
+      .map((r) => ({ at: Date.parse(r.created), units: r.units }));
+    const released = Math.min(c.units, own.reduce((n, r) => n + r.units, 0));
+    const entry = byMember.get(c.member_id) ?? { outstanding: 0, claims: [] };
+    entry.outstanding += c.units - released;
+    entry.claims.push({ bountyId: c.bounty_id, boughtAt: Date.parse(c.ended_at), units: c.units, releases: own });
+    byMember.set(c.member_id, entry);
+  }
+  const get = db.prepare("SELECT id, name, seller_name, seller_key, seller_confirmed_at FROM members WHERE id = ?");
+  const members = [...byMember.keys()].map((memberId) => get.get(memberId)).filter(Boolean);
+  const firstSeen = sellerFirstSeen(db, gtin, new Set(members.map((m) => m.seller_key).filter(Boolean)));
+  return members
+    .map((m) => {
+      const e = byMember.get(m.id);
+      const givenKey = typeof m.seller_key === "string" && m.seller_key ? m.seller_key : null;
+      const confirmed = Boolean(givenKey && m.seller_confirmed_at);
+      const firstBought = Math.min(...e.claims.map((c) => c.boughtAt));
+      const prior = Boolean(givenKey && firstSeen.get(givenKey) < firstBought);
+      return {
+        memberId: m.id,
+        name: m.name ?? null,
+        seller: typeof m.seller_name === "string" ? m.seller_name : null,
+        givenKey,
+        confirmed,
+        prior,
+        key: confirmed && !prior ? givenKey : null,
+        firstBought,
+        outstanding: e.outstanding,
+        claims: e.claims,
+      };
+    })
+    .sort((a, b) => a.memberId - b.memberId);
+}
+
+/** Why a member's own listings still count in full: "none", "unconfirmed" or "prior"; null when they count once. */
+const unmatchedReason = (o) => (o.key ? null : !o.givenKey ? "none" : o.prior ? "prior" : "unconfirmed");
+
+/**
+ * The note for a member viewing a bounty while units they bought through
+ * bounties for its item are outstanding and their listings would still
+ * count in full (no seller name, a name the operator has not confirmed, or
+ * a name already selling the item before they bought), when the cap counts
+ * competing listings (round 5b), or null.
+ */
+function viewerSellerNote(db, bounty, member, basis, now) {
+  if (!member || bounty.sample) return null;
+  const listings = basis?.used?.competingListings;
+  if (!isCount(listings) || listings === 0) return null;
+  const mine = listingOwners(db, bounty, now).find((o) => o.memberId === member.id);
+  const why = mine && mine.outstanding > 0 ? unmatchedReason(mine) : null;
+  if (!why) return null;
+  const n = mine.outstanding;
+  const lead = `You have ${plural(n, "unit")} of this item bought through bounties and not yet recorded as sold or returned`;
+  const twice = `If you list ${n === 1 ? "it" : "them"} for sale, ${n === 1 ? "it counts" : "they count"} twice against the demand: as competing listings and as units bought`;
+  if (why === "none")
+    return `${lead}, and your profile has no marketplace seller name. ${twice}. Add your seller name (for example your eBay user name) to your member profile and ask the operator to confirm it to stop that`;
+  if (why === "unconfirmed")
+    return `${lead}, and the operator has not yet confirmed your seller name "${mine.seller}". ${twice} until the operator checks it against your marketplace profile or one of your listings and confirms it`;
+  return `${lead}. Your seller name "${mine.seller}" was already selling this item before you bought it through a bounty, so listings under it count in full as competing listings`;
+}
+
+/**
+ * How many competing listings are members' own units (round 5b), so they
+ * are counted once. bySeller is the resale competition's listings per
+ * stated seller (matching.competition: each listing once, with when it was
+ * last seen and when it was listed), owners listingOwners.
+ *
+ * Only an owner with a key (a seller name the operator confirmed, not seen
+ * selling the item before their first purchase) has listings left out, and
+ * only listings with a known listing time. Listings are matched to units
+ * per sighting: the listings last seen at a time t may be left out only up
+ * to the units the member held at t (bought at or before t, less what was
+ * released by t), each matched to a unit bought at or before the listing
+ * was listed, and each listing used once. So a listing first seen after
+ * every unit was released, one listed before the unit it would match was
+ * bought, and listings beyond the units held when they were seen all count.
+ *
+ * Returns { units, members: [{ memberId, seller, listings, own }], unnamed:
+ * [{ memberId, name, outstanding, reason }] }: units is never more than
+ * competingListings (0 when that is not a count); unnamed are members with
+ * units outstanding whose listings still count in full (reason "none",
+ * "unconfirmed" or "prior"), listed only while there are competing listings.
+ */
+export function ownListings(bySeller, owners, competingListings) {
+  const out = { units: 0, members: [], unnamed: [] };
+  if (!isCount(competingListings) || competingListings === 0 || !Array.isArray(owners)) return out;
+  out.unnamed = owners
+    .filter((o) => o.outstanding > 0 && unmatchedReason(o))
+    .map((o) => ({ memberId: o.memberId, name: o.name, outstanding: o.outstanding, reason: unmatchedReason(o) }));
+  const seen = new Map();
+  for (const entry of Array.isArray(bySeller) ? bySeller : []) {
+    const key = sellerKey(entry?.seller);
+    if (!key || !Array.isArray(entry.seen)) continue;
+    const times = entry.seen.filter((l) => isObject(l) && Number.isFinite(timeMs(l.observed)));
+    seen.set(key, [...(seen.get(key) ?? []), ...times]);
+  }
+  const used = new Set();
+  for (const o of owners) {
+    if (!o.key || used.has(o.key) || !seen.has(o.key)) continue;
+    used.add(o.key);
+    const listings = seen.get(o.key);
+    // Listings with a known listing time, grouped by when they were seen.
+    const bySighting = new Map();
+    for (const l of listings) {
+      const listed = timeMs(l.listed);
+      if (!Number.isFinite(listed)) continue;
+      const t = timeMs(l.observed);
+      bySighting.set(t, [...(bySighting.get(t) ?? []), listed]);
+    }
+    let own = 0;
+    for (const [t, listedTimes] of bySighting) {
+      // The units held at t, by purchase.
+      const pool = o.claims
+        .filter((c) => c.boughtAt <= t)
+        .map((c) => ({
+          boughtAt: c.boughtAt,
+          left: c.units - Math.min(c.units, c.releases.filter((r) => r.at <= t).reduce((k, r) => k + r.units, 0)),
+        }))
+        .sort((a, b) => a.boughtAt - b.boughtAt);
+      for (const listed of listedTimes.sort((a, b) => a - b)) {
+        const unit = pool.find((p) => p.left > 0 && p.boughtAt <= listed);
+        if (!unit) continue;
+        unit.left -= 1;
+        own += 1;
+      }
+    }
+    own = Math.min(own, listings.length);
+    out.members.push({ memberId: o.memberId, seller: o.seller, listings: listings.length, own });
+    out.units += own;
+  }
+  out.units = Math.min(out.units, competingListings);
+  return out;
+}
+
+/**
+ * The operator's list of members holding units of the item (round 5b):
+ * [{ memberId, name, sellerName, confirmed, prior, outstanding, status }],
+ * status in words: what still stops their listings counting once.
+ */
+function sellerNamesView(db, bounty, now) {
+  return listingOwners(db, bounty, now)
+    .filter((o) => o.outstanding > 0)
+    .map((o) => {
+      const why = unmatchedReason(o);
+      return {
+        memberId: o.memberId,
+        name: o.name,
+        sellerName: o.seller,
+        confirmed: o.confirmed,
+        prior: o.prior,
+        outstanding: o.outstanding,
+        status:
+          why === "none"
+            ? "No seller name given: any of their units listed for sale count twice."
+            : why === "prior"
+              ? "This seller name was already selling the item before they bought it through a bounty, so its listings count in full."
+              : why === "unconfirmed"
+                ? "Not confirmed yet: check the name against their marketplace profile or one of their listings, then confirm it. Until then their listings count in full."
+                : "Confirmed: their listings with a listing time after they bought are counted once, up to the units they hold.",
+      };
+    });
+}
+
+/** The plain words for listings counted once, or null: no names, as every viewer may see the cap notes. */
+export function ownListingsNote(own, listings) {
+  if (!isObject(own) || !(own.units > 0)) return null;
+  return `${own.units} of the ${plural(listings, "competing listing")} ${own.units === 1 ? "is a member's own unit" : "are members' own units"} bought through bounties for this item (matched by the seller name on their profile, confirmed by the operator), so ${own.units === 1 ? "it is" : "they are"} counted once, not again as competing listings`;
+}
+
+/** The plain words for members whose own listings still count in full, or null. */
+export function unnamedSellerNote(own) {
+  const list = isObject(own) && Array.isArray(own.unnamed) ? own.unnamed : [];
+  const count = (reason) => list.filter((u) => u.reason === reason).length;
+  const holding = (n) => `${plural(n, "member")} holding units bought through bounties for this item`;
+  const has = (n) => (n === 1 ? "has" : "have");
+  const parts = [];
+  const none = count("none");
+  if (none)
+    parts.push(
+      `${holding(none)} ${has(none)} given no marketplace seller name, so any of those units listed for sale count twice: as competing listings and as units bought. Adding the seller name (for example the eBay user name) to the member profile, once the operator confirms it, stops their own listings counting twice`,
+    );
+  const unconfirmed = count("unconfirmed");
+  if (unconfirmed)
+    parts.push(
+      `${holding(unconfirmed)} ${has(unconfirmed)} a seller name the operator has not yet confirmed, so any of those units listed for sale still count twice until the operator checks the name against the member's marketplace profile or a listing and confirms it`,
+    );
+  const prior = count("prior");
+  if (prior)
+    parts.push(
+      `${holding(prior)} gave a seller name that was already selling this item before they bought it through a bounty, so listings under it count in full as competing listings`,
+    );
+  return parts.length ? parts.join(". ") : null;
+}
+
+/** The completed claim a release is recorded on, or an error. */
+function boughtClaim(db, claimId, action) {
+  const found = getClaim(db, id(claimId, "claimId")) ?? fail("Claim not found", 404);
+  if (found.status !== "completed")
+    fail(
+      found.status === "active"
+        ? `This claim has not been marked as bought, so nothing bought through it can be ${action}: release it or mark it as bought first`
+        : `This claim ended without a purchase (${found.status}), so nothing bought through it can be ${action}`,
+      409,
+    );
+  return found;
+}
+
+const outstandingRefusal = (state, asked) =>
+  state.outstanding === 0
+    ? "Every unit bought through this claim is already recorded as sold, returned or reconciled"
+    : `Only ${plural(state.outstanding, "unit")} bought through this claim ${state.outstanding === 1 ? "is" : "are"} not yet recorded as sold, returned or reconciled, so ${asked} cannot be recorded`;
+
+/**
+ * Records units bought through a member's own completed claim as sold or
+ * returned to the shop (round 5), so they stop counting against the resale
+ * demand for the item. Only the member who made the claim (403), only a
+ * claim marked as bought (409), and never more than is outstanding (409).
+ * sold and returned are whole numbers (blank means none); at least one unit.
+ * Each kind is stored as its own row with the time and the member.
+ */
+export function recordResale(db, { claimId, memberId, sold, returned, now }) {
+  const at = iso(clock(now));
+  const count = (value, name) => (value === undefined || value === null || value === "" ? 0 : int(value, name, 0, BOUNTY_RULES.maxAvailableUnits));
+  return transaction(db, () => {
+    const found = getClaim(db, id(claimId, "claimId")) ?? fail("Claim not found", 404);
+    if (found.member_id !== id(memberId, "memberId"))
+      fail("Only the member who made a claim can record its units as sold or returned", 403);
+    boughtClaim(db, found.id, "recorded as sold or returned");
+    const s = count(sold, "sold");
+    const r = count(returned, "returned");
+    if (s + r === 0) fail("Enter the units sold or returned: at least 1");
+    const state = claimAllocation(db, found);
+    if (s + r > state.outstanding) fail(outstandingRefusal(state, plural(s + r, "unit")), 409);
+    const put = db.prepare(
+      "INSERT INTO claim_releases(claim_id, kind, units, reason, recorded_by, member_id, created) VALUES(?, ?, ?, NULL, 'member', ?, ?)",
+    );
+    if (s) put.run(found.id, "sold", s, found.member_id, at);
+    if (r) put.run(found.id, "returned", r, found.member_id, at);
+    return { claim: found, ...claimAllocation(db, found) };
+  });
+}
+
+/**
+ * The operator's reconciliation of units bought through a completed claim
+ * (round 5): units the operator has evidence are no longer heading to the
+ * resale market (for example a sale the member reported another way), with
+ * a reason, stored with the time and "operator". Never more than is
+ * outstanding (409). The route checks that the caller is the operator.
+ */
+export function reconcileClaim(db, { claimId, units, reason, now }) {
+  const at = iso(clock(now));
+  return transaction(db, () => {
+    const found = boughtClaim(db, claimId, "reconciled");
+    const n = int(units, "units", 1, BOUNTY_RULES.maxAvailableUnits);
+    const why = text(reason, "reason", 300);
+    const state = claimAllocation(db, found);
+    if (n > state.outstanding) fail(outstandingRefusal(state, plural(n, "unit")), 409);
+    db.prepare(
+      "INSERT INTO claim_releases(claim_id, kind, units, reason, recorded_by, member_id, created) VALUES(?, 'reconciled', ?, ?, 'operator', NULL, ?)",
+    ).run(found.id, n, why, at);
+    return { claim: found, ...claimAllocation(db, found) };
+  });
+}
+
+/** Every release recorded on a claim, oldest first, for the card. */
+function releasesOf(db, claimId) {
+  return db
+    .prepare("SELECT kind, units, reason, recorded_by, member_id, created FROM claim_releases WHERE claim_id = ? ORDER BY created, id")
+    .all(claimId)
+    .map((r) => ({ kind: r.kind, units: r.units, reason: r.reason ?? null, recordedBy: r.recorded_by, at: r.created }));
 }
 
 // ------------------------------------------------------- estimate snapshot
@@ -1047,9 +1915,13 @@ function estimateShelfUnits(estimate) {
  * check counted, the figures are worked out again for the units left
  * instead of failing the shelf-units check for the whole bounty. Nor is it
  * more than the cap less units already bought (options.completed).
+ *
+ * Round 5: options.earlier (earlierAllocation) takes the units earlier
+ * bounties for the item still have against its demand off the cap first
+ * (capBasis), so a replacement bounty's figures are for what is left.
  */
-function unitsPlan(entered, estimate, lookup, { boughtBefore = 0, completed = 0 } = {}) {
-  const basis = capBasis(entered, estimate, lookup, { boughtBefore });
+function unitsPlan(entered, estimate, lookup, { boughtBefore = 0, completed = 0, earlier = null, owners = null } = {}) {
+  const basis = capBasis(entered, estimate, lookup, { boughtBefore, earlier, owners });
   const tightened = estimate?.opportunity?.trialUnits;
   const trial =
     Number.isSafeInteger(tightened) && tightened >= 1 ? Math.min(BOUNTY_RULES.maxClaimUnits, tightened) : BOUNTY_RULES.maxClaimUnits;
@@ -1078,24 +1950,45 @@ function unitsPlan(entered, estimate, lookup, { boughtBefore = 0, completed = 0 
 /**
  * The unit plan for a new bounty, so the route can re-run the estimate for
  * the units one member can claim before creating it. Validates the bounty
- * fields like createBounty.
+ * fields like createBounty. With options.db, the units earlier bounties for
+ * the item still have against its demand come off the cap (round 5), as
+ * createBounty counts them.
  */
-export function planForInput(input, estimate, { lookup = null, now } = {}) {
+export function planForInput(input, estimate, { lookup = null, now, db = null } = {}) {
   const f = bountyFields(input, clock(now));
   return unitsPlan(
     { availableUnits: f.availableUnits, salesPerWeek: f.salesPerWeek, sellWindowWeeks: f.sellWindowWeeks },
     estimate,
     lookup,
+    db
+      ? {
+          earlier: earlierAllocation(db, { barcode: estimate?.offer?.gtin }, now),
+          owners: listingOwners(db, { barcode: estimate?.offer?.gtin }, now),
+        }
+      : {},
   );
 }
 
 /**
  * The unit plan for re-checking a live bounty with a fresh estimate. With
  * options.db, the units bought through the bounty count as refreshBounty
- * counts them (before the estimate's stock check, and in all).
+ * counts them (before the estimate's stock check, and in all), and so do
+ * the units earlier bounties for the item still have against its demand
+ * (round 5).
  */
-export function planForBounty(bounty, estimate, { lookup = null, db = null } = {}) {
-  return unitsPlan(enteredOf(bounty), estimate, lookup, db ? boughtOn(db, bounty, estimate) : {});
+export function planForBounty(bounty, estimate, { lookup = null, db = null, now = null } = {}) {
+  return unitsPlan(
+    enteredOf(bounty),
+    estimate,
+    lookup,
+    db
+      ? {
+          ...boughtOn(db, bounty, estimate),
+          earlier: earlierAllocation(db, bounty, now ?? new Date().toISOString()),
+          owners: listingOwners(db, bounty, now ?? new Date().toISOString()),
+        }
+      : {},
+  );
 }
 
 /**
@@ -1147,7 +2040,7 @@ function estimateSnapshot(estimate, request, at, lookup = null, plan = null) {
     match: estimate.match ?? null,
     sample: sample ? { ...sample, sellers, dates: saleDates(estimate.sample) } : null,
     competition: pick(estimate.competition, [
-      "activeListings", "sellers", "lowestAsking", "lowestAskingIncludesShipping", "checkedAt", "note",
+      "activeListings", "sellers", "lowestAsking", "lowestAskingIncludesShipping", "checkedAt", "note", "bySeller",
     ]),
     economics: e
       ? pick(e, [
@@ -1259,7 +2152,11 @@ function bountyFields(input, at) {
  * on the stock check. A sample bounty needs it, has no estimate, is
  * labelled Sample everywhere, can never alert and can never be claimed.
  * Only one live bounty may be open per barcode, because the cap shares out
- * the resale demand for the item and two bounties would double it.
+ * the resale demand for the item and two bounties would double it. Units
+ * earlier bounties for the barcode still have against the demand (bought
+ * and not recorded as sold or returned, or held in a live claim) come off
+ * the cap (earlierAllocation, round 5), so a replacement never starts again
+ * from the full demand.
  */
 export function createBounty(db, input, { estimate = null, request = null, lookup = null, now } = {}) {
   const at = clock(now);
@@ -1301,8 +2198,14 @@ export function createBounty(db, input, { estimate = null, request = null, looku
     if (!gtin) fail("The estimate's offer has no valid barcode, so it cannot become a bounty");
     if (offer.retailer && normaliseLocality(offer.retailer) !== normaliseLocality(f.retailer))
       fail(`retailer must match the offer's retailer (${offer.retailer})`);
-    const basis = capBasis(entered, estimate, lookup);
-    const plan = unitsPlan(entered, estimate, lookup);
+    // The resale demand belongs to the item (round 5): units earlier bounties
+    // for it still have against the demand come off this bounty's cap.
+    const earlier = earlierAllocation(db, { barcode: gtin }, now);
+    // Members' own listings of units they bought through earlier bounties
+    // count once (round 5b).
+    const owners = listingOwners(db, { barcode: gtin }, now);
+    const basis = capBasis(entered, estimate, lookup, { earlier, owners });
+    const plan = unitsPlan(entered, estimate, lookup, { earlier, owners });
     const alert = alertFrom(estimate, plan);
     row = {
       ...f,
@@ -1409,8 +2312,10 @@ export function refreshBounty(db, bountyId, estimate, now, { lookup = null, clai
     return settled(db, bounty.id, now);
   }
   // Units bought through this bounty before the new stock check stay held
-  // against the cap but are not on the shelf it counted (round 4, N3).
-  const bought = boughtOn(db, bounty, estimate);
+  // against the cap but are not on the shelf it counted (round 4, N3), and
+  // units earlier bounties for the item still have against its demand come
+  // off it (round 5).
+  const bought = { ...boughtOn(db, bounty, estimate), earlier: earlierAllocation(db, bounty, now), owners: listingOwners(db, bounty, now) };
   const basis = capBasis(entered, estimate, lookup, bought);
   const plan = unitsPlan(entered, estimate, lookup, bought);
   const alert = alertFrom(estimate, plan);
@@ -1463,6 +2368,8 @@ function storeClaimChecks(db, claimChecks, at) {
       checkedAt: iso(at),
       ok: check.ok === true,
       reasons: Array.isArray(check.reasons) ? check.reasons.map(String) : [],
+      // Values the member has still to give (memberTripCheck confirm, round 5b).
+      confirm: Array.isArray(check.confirm) && check.confirm.length ? check.confirm.map(String) : null,
       ...(fresh ? {} : { outOfDate: true }),
     };
     n += put.run(JSON.stringify(figures), item.claimId).changes;
@@ -1664,11 +2571,17 @@ export function claimedUnits(db, bountyId, now) {
   return { active: row.active, completed: row.completed, committed: row.active + row.completed };
 }
 
-/** Why no units are left: a zero cap from the evidence, or a full one. */
-const capFullMessage = (bounty) =>
-  bounty.cap === 0
-    ? "The distribution cap is 0: the evidence leaves no units to share."
-    : "The distribution cap for this bounty is fully claimed.";
+/**
+ * Why no units are left: a zero cap from the evidence, or a full one. With
+ * earlier (capNow's), units earlier bounties for the item still have against
+ * its demand are named when they are why the cap is lower (round 5).
+ */
+const capFullMessage = (bounty, earlier = null) => {
+  const owed = earlier?.binding ? earlierNote(earlier) : null;
+  if (bounty.cap === 0)
+    return owed ? `The distribution cap is 0: ${owed}.` : "The distribution cap is 0: the evidence leaves no units to share.";
+  return "The distribution cap for this bounty is fully claimed." + (owed ? ` ${upperFirst(owed)}.` : "");
+};
 
 /** open, withdrawn or expired at `now`. */
 export function bountyStatus(bounty, now) {
@@ -1689,6 +2602,26 @@ export function releaseFor(db, bounty, member, now) {
   };
 }
 
+// The branch check the figures were costed from (the snapshot's offer is
+// dated at its time and carries its shelf price), and the newest later check
+// at the bounty's branch that recorded a shelf price: { pricedBy, newer },
+// each a check or null.
+function branchShelfPrice(db, bounty, o, now) {
+  const none = { pricedBy: null, newer: null };
+  if (!bounty.barcode || !tableExists(db, "availability_checks")) return none;
+  const read = (since, until) =>
+    latestCheck(db, bounty.barcode, bounty.retailer, since, { locality: bounty.locality, until, priced: true });
+  try {
+    const t = typeof o.observed === "string" && o.observed.includes("T") ? Date.parse(o.observed) : NaN;
+    const at = Number.isFinite(t) ? read(iso(t), iso(t)) : null;
+    const pricedBy = at && Number.isSafeInteger(o.price) && at.price_pence === o.price ? at : null;
+    const from = pricedBy ? Date.parse(pricedBy.checked_at) : Date.parse(json(bounty.estimate, null)?.stock?.checkedAt);
+    const newer = Number.isFinite(from) ? read(iso(from + 1), iso(clock(now))) : null;
+    return { pricedBy, newer };
+  } catch {
+    return none;
+  }
+}
 /**
  * The offer as the evidence holds it now, for a live bounty: the research
  * row the estimate used, read again, or for an Open Prices offer the newest
@@ -1699,11 +2632,19 @@ export function releaseFor(db, bounty, member, now) {
  * Returns null when there is no evidence table to read (the snapshot then
  * stands), or { gone, price, observed, rose, fell, was, sourceId } where
  * was is the price the figures use.
+ *
+ * Shelf prices on branch checks (round 5): when the figures use the shelf
+ * price recorded on a branch check (estimate.mjs priceAtBranch), the price
+ * now is the newest later check at the bounty's branch that recorded one,
+ * and the offer's own price elsewhere no longer decides. Otherwise a later
+ * branch check with a higher shelf price than the figures use is a rise
+ * too. A check with no price is never read, so it changes nothing here.
  */
 export function offerNow(db, bounty, now = new Date().toISOString()) {
   if (bounty.sample) return null;
   const o = json(bounty.estimate, null)?.offer;
   if (!o?.provider || o.sourceId === undefined || o.sourceId === null) return null;
+  const shelf = branchShelfPrice(db, bounty, o, now);
   let row;
   try {
     if (o.provider === "openprices") {
@@ -1722,11 +2663,21 @@ export function offerNow(db, bounty, now = new Date().toISOString()) {
   }
   const was = Number.isSafeInteger(o.price) ? o.price : null;
   if (!row) return { gone: true, price: null, observed: null, rose: false, fell: false, was, sourceId: null };
-  const price = Number.isSafeInteger(row.price) && row.price > 0 ? row.price : null;
+  let price = Number.isSafeInteger(row.price) && row.price > 0 ? row.price : null;
+  let observed = row.observed ?? null;
+  if (price !== null && shelf.pricedBy) {
+    // Costed at the branch's shelf price: the newest shelf price there
+    // decides, never the offer's price at the shop where it was seen.
+    price = shelf.newer ? shelf.newer.price_pence : was;
+    observed = shelf.newer ? shelf.newer.checked_at : o.observed;
+  } else if (price !== null && shelf.newer && shelf.newer.price_pence > Math.max(price, was ?? 0)) {
+    price = shelf.newer.price_pence;
+    observed = shelf.newer.checked_at;
+  }
   return {
     gone: price === null,
     price,
-    observed: row.observed ?? null,
+    observed,
     rose: price !== null && was !== null && price > was,
     fell: price !== null && was !== null && price < was,
     was,
@@ -1992,13 +2943,35 @@ function shelfCount(db, bounty, live, report = latestReport(db, bounty.id)) {
  * shelf limit (capBasis's demand, lowered by sales and competition now).
  * A newer shelf count lowers the units to share to that count plus the
  * units bought through the bounty before it (round 4, N3).
+ *
+ * Round 5: the units earlier bounties for the item still have against its
+ * demand (earlierAllocation, returned as earlier) are read now and come off
+ * the demand like competing listings, so the cap and demand fall while they
+ * are outstanding and rise again, up to the re-check's own figures, once
+ * they are released.
  */
 export function capNow(db, bounty, now, live = liveEvidence(db, bounty, now)) {
   const stored = json(bounty.cap_basis, null);
   const base = isObject(stored?.live?.base) ? stored.live.base : stored;
-  if (bounty.sample || !isObject(base?.used)) return { cap: bounty.cap, changed: false, basis: stored, notes: [], demand: bounty.cap };
-  const baseCap = Number.isSafeInteger(base.cap) ? base.cap : bounty.cap;
-  const used = { ...base.used };
+  if (bounty.sample || !isObject(base?.used))
+    return { cap: bounty.cap, changed: false, basis: stored, notes: [], demand: bounty.cap, earlier: null };
+  // Units earlier bounties for the item still have against its demand, read
+  // now (round 5). The re-check's own cap and demand are worked out again
+  // without the units it counted, so a release recorded since raises the
+  // cap back and units still outstanding keep it down.
+  const earlier = earlierAllocation(db, bounty, now);
+  const baseEarlier = isCount(base.used.earlierUnits) ? base.used.earlierUnits : 0;
+  // Members' own listings among the competing listings the re-check counted,
+  // matched now (round 5b): a seller name added, or units bought or released
+  // since, change how many count once.
+  const baseOwn = isCount(base.used.ownListings) ? base.used.ownListings : 0;
+  const bySeller = Array.isArray(base.evidence?.listingsBySeller) ? base.evidence.listingsBySeller : null;
+  const owners = listingOwners(db, bounty, now);
+  const own = ownListings(bySeller, owners, base.used.competingListings);
+  const cross = baseEarlier > 0 || baseOwn > 0 || own.units > 0;
+  const evidenceOnly = { ...base.used, earlierUnits: 0, ownListings: own.units };
+  const baseCap = cross ? distributionCap(evidenceOnly) : Number.isSafeInteger(base.cap) ? base.cap : bounty.cap;
+  const used = { ...base.used, earlierUnits: earlier.units, ownListings: own.units };
   const notes = [];
   const drop = [];
   const days = BOUNTY_RULES.saleWindowDays;
@@ -2069,13 +3042,36 @@ export function capNow(db, bounty, now, live = liveEvidence(db, bounty, now)) {
   // The cap before any shelf limit (round 4, N3), lowered only by demand
   // that changed since the re-check (sales, competition, the sell window).
   const limit = isCount(base.entered?.availableUnits) ? base.entered.availableUnits : null;
-  const baseDemand = isCount(base.demand) ? base.demand : demandCap(base.used, limit);
-  if (!notes.length) {
+  const baseDemand =
+    cross ? demandCap(evidenceOnly, limit) : isCount(base.demand) ? base.demand : demandCap(base.used, limit);
+  // The earlier bounties' units as they stand now replace the re-check's note.
+  const earlierText = earlierNote(earlier);
+  if (earlierText || baseEarlier !== earlier.units) drop.push(/earlier bount/);
+  if (earlierText) notes.push(earlierText);
+  // So do the members' own listings and who gave no seller name (round 5b).
+  const ownText = ownListingsNote(own, used.competingListings);
+  const unnamedText = unnamedSellerNote(own);
+  const baseNotes = Array.isArray(base.notes) ? base.notes : [];
+  if (ownText || unnamedText || baseOwn !== own.units || baseNotes.some((n) => OWN_NOTE.test(n))) drop.push(OWN_NOTE);
+  if (ownText) notes.push(ownText);
+  if (unnamedText) notes.push(unnamedText);
+  if (!notes.length && baseEarlier === earlier.units && baseOwn === own.units) {
     const back = baseCap !== bounty.cap || stored !== base;
-    return { cap: baseCap, changed: back, basis: base, notes, demand: baseDemand };
+    return { cap: baseCap, changed: back, basis: base, notes, demand: baseDemand, earlier: { ...earlier, capWithout: baseCap, binding: false } };
   }
   const cap = Math.min(baseCap, distributionCap(used));
   const demand = Math.min(baseDemand, demandCap(used, limit));
+  // What the cap would be without the earlier bounties' units, so messages
+  // say when those units are why the cap is lower.
+  // Without them their owners' listings would count as competing listings
+  // (only units bought through this bounty would still be matched).
+  const ownHere = ownListings(
+    bySeller,
+    owners.map((o) => ({ ...o, claims: o.claims.filter((c) => c.bountyId === bounty.id) })).filter((o) => o.claims.length),
+    used.competingListings,
+  );
+  earlier.capWithout = Math.min(baseCap, distributionCap({ ...used, earlierUnits: 0, ownListings: ownHere.units }));
+  earlier.binding = earlier.capWithout > cap;
   const basis = {
     ...base,
     used,
@@ -2085,10 +3081,12 @@ export function capNow(db, bounty, now, live = liveEvidence(db, bounty, now)) {
     live: { base, at: stored?.live?.at && sameNotes(stored.live.notes, notes) ? stored.live.at : iso(clock(now)), notes },
   };
   const changed = cap !== bounty.cap || !sameNotes(stored?.live?.notes, notes);
-  return { cap, changed, basis, notes, demand };
+  return { cap, changed, basis, notes, demand, earlier };
 }
 
 const sameNotes = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+// The cap notes about members' own listings (ownListingsNote, unnamedSellerNote).
+const OWN_NOTE = /counted once, not again as competing listings|given no marketplace seller name|operator has not yet confirmed|already selling this item before/;
 
 /** Puts capNow's result on a bounty row in memory, so the rest of a read uses it. */
 function applyCap(bounty, result) {
@@ -2136,6 +3134,11 @@ function claimSeats(db, bounty, now, live, cap = capNow(db, bounty, now, live)) 
   const byShelf = isCount(shelf.units) && shelfRoom <= evidenceRoom;
   const room = Math.min(evidenceRoom, shelfRoom);
   const when = shelf.at ? ` (latest ${checkWord(shelf.source)}, ${humanTime(shelf.at)}${shelf.boughtSince ? `, less ${plural(shelf.boughtSince, "unit")} members bought since` : ""})` : "";
+  // Units earlier bounties for the item still have against its demand, when
+  // they are why the evidence leaves less (round 5).
+  const owed = cap.earlier?.binding
+    ? `, after ${plural(cap.earlier.units, "unit")} from ${earlierWhere(new Set([...(cap.earlier.bounties ?? []), ...(cap.earlier.heldOn ?? [])]).size)} for this item that still count against the demand for it`
+    : "";
   const phrase = byShelf
     ? room === 0
       ? `no units are left on the shelf${when}`
@@ -2143,8 +3146,8 @@ function claimSeats(db, bounty, now, live, cap = capNow(db, bounty, now, live)) 
     : shelf.units === null && shelf.at
       ? `the latest ${checkWord(shelf.source)} (${humanTime(shelf.at)}) recorded no unit count, so the units on the shelf are not known`
       : room === 0
-        ? "the evidence now leaves no units to share"
-        : `the evidence now supports only ${plural(room, "unit")} for this bounty`;
+        ? `the evidence now leaves no units to share${owed}`
+        : `the evidence now supports only ${plural(room, "unit")} for this bounty${owed}`;
   const kept = new Map();
   const beyond = new Map();
   let used = 0;
@@ -2209,6 +3212,13 @@ function ownFigureFailures(db, bounty, now) {
   for (const c of rows) {
     const f = json(c.figures, null);
     if (!isObject(f) || f.ok !== false) continue;
+    // Only values the member has not given are missing (round 5b): ask for
+    // them, and never say the figures failed.
+    const asked = confirmAsk(c, f);
+    if (asked) {
+      out.set(c.member_id, asked);
+      continue;
+    }
     const reasons = Array.isArray(f.reasons) && f.reasons.length ? f.reasons.join("; ") : "they could not be worked out again";
     const price = Number.isSafeInteger(f.unitCost) ? `at ${pounds(f.unitCost)} a unit ` : "";
     const journey =
@@ -2230,6 +3240,54 @@ function ownFigureFailures(db, bounty, now) {
     });
   }
   return out;
+}
+
+/** The cash stored with a claim's terms (pence), or null when it stores none. */
+function claimCash(c) {
+  const terms = json(c?.terms, null);
+  return isObject(terms) && Number.isSafeInteger(terms.cashAvailable) && terms.cashAvailable >= 0 ? terms.cashAvailable : null;
+}
+
+const CONFIRM_FIELDS = Object.freeze(["transport", "carryKg", "storageUnits", "cashAvailable"]);
+const CONFIRM_WORDS = Object.freeze({ transport: "transport", carryKg: "carrying limit", storageUnits: "storage at home" });
+// The same values, short, for the badge: "Confirm your storage and cash".
+const CONFIRM_LABELS = Object.freeze({ transport: "transport", carryKg: "carrying limit", storageUnits: "storage", cashAvailable: "cash" });
+const listAnd = (items) => (items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`);
+
+/**
+ * The "confirm" entry for a claim whose last re-check failed only on values
+ * the member has not given (memberTripCheck confirm, round 5b), or null.
+ * A claim made before the cash was asked for stores none, so the re-check
+ * asks for it: through "Check my figures" under the claim, never as figures
+ * that failed. { claim, ref, message, reason, confirm }: reason
+ * "cash-unknown" when only the cash is missing, otherwise
+ * "profile-unknown". One notice per claim and set of missing values.
+ */
+function confirmAsk(c, f) {
+  const fields = Array.isArray(f?.confirm) ? CONFIRM_FIELDS.filter((k) => f.confirm.includes(k)) : [];
+  if (!fields.length) return null;
+  const cash = fields.includes("cashAvailable");
+  const profile = fields.filter((k) => k !== "cashAvailable").map((k) => CONFIRM_WORDS[k]);
+  const what = [profile.length ? `your ${listAnd(profile)} in your member profile` : "", cash ? "the cash you can spend on this trip" : ""]
+    .filter(Boolean)
+    .join(" and ");
+  // Saving the profile checks the claim again (PATCH /api/members/:id), as
+  // does saving the cash under the claim, in either order (round 5b).
+  const how = cash
+    ? `Your claim stores no cash figure (it was made before the cash was asked for), and a blank is never counted as zero or as enough: enter the cash under your claim and choose Save cash and check my figures${
+        profile.length ? ", and save the rest in your member profile" : ""
+      }`
+    : "A blank is never counted as zero or as enough: save them in your member profile and your claim is checked again at once";
+  return {
+    claim: c,
+    ref: `confirm:${c.id}:${fields.join(",")}`,
+    reason: cash && !profile.length ? "cash-unknown" : "profile-unknown",
+    confirm: fields,
+    // The badge names only what is still missing (never "and cash" once the
+    // cash is stored).
+    label: `Confirm your ${listAnd(fields.map((k) => CONFIRM_LABELS[k]))}`,
+    message: `${TERMS.stop} yet: confirm ${what}. ${how}. Every other check on your figures for ${plural(c.units, "unit")} passed on the latest evidence (${humanTime(f.checkedAt)})`,
+  };
 }
 
 /**
@@ -2267,6 +3325,93 @@ function declinedHolders(db, bounty, now) {
 }
 
 const SAMPLE_BLOCKER = "Sample bounty: illustrative figures only, so there is nothing to claim, buy or alert";
+
+// ------------------------------------------- the member's own fit (round 5)
+
+/** The units a bounty's figures are for, or null when it has none. */
+function figureUnits(bounty) {
+  const snapshot = json(bounty.estimate, null);
+  const units = snapshot?.economics?.units ?? snapshot?.units?.figures;
+  return Number.isSafeInteger(units) && units >= 1 ? units : null;
+}
+
+/**
+ * Whether a bounty's trip fits a member's stored profile for `units`
+ * (round 5, finding 4): one unit and every unit within their load limit
+ * and the units within their storage. The cash they can spend is asked
+ * with each claim, so it is not checked here. Returns the suitability.mjs
+ * result plus { units, complete, partial, figures }: complete is false while
+ * a profile value is not known; partial is true when fewer units fit than
+ * asked but at least one does. room is homeStock: units they already have
+ * at home from bounties and units in their other live claims, which take up
+ * storage room (round 5b).
+ */
+export function bountyFit(bounty, member, units, room = {}) {
+  const o = json(bounty.opportunity, null) ?? {};
+  const n = Number.isSafeInteger(units) && units >= 1 ? units : 1;
+  const fit = tripSuitability({ units: n, unitKg: o.weightKg ?? null, profile: memberTripProfile(member, null, room), cash: false });
+  const most = fit.maxUnits.all;
+  return {
+    ...fit,
+    units: n,
+    complete: fit.missing.length === 0,
+    partial: !fit.ok && Number.isSafeInteger(most) && most >= 1 && most < n,
+    figures: figureUnits(bounty),
+  };
+}
+
+/**
+ * The units a member would take on a bounty, for their fit: their live
+ * claim's units, otherwise the units the figures are for, no more than
+ * their trial allowance (at least 1).
+ */
+function offeredUnits(db, bounty, member, now) {
+  const active = db
+    .prepare("SELECT units FROM claims WHERE bounty_id = ? AND member_id = ? AND status = 'active' AND expires_at > ? ORDER BY id DESC LIMIT 1")
+    .get(bounty.id, member.id, iso(clock(now)));
+  if (active && Number.isSafeInteger(active.units)) return { units: active.units, holding: true };
+  const figures = figureUnits(bounty) ?? 1;
+  const allowance = bounty.sample ? figures : trialAllowance(db, bounty, member, now).allowance;
+  return { units: Math.max(1, Math.min(figures, allowance > 0 ? allowance : figures)), holding: false };
+}
+
+/**
+ * A member's fit as a trip state, or null when the trip fits them: state
+ * "confirm-profile" while their profile is not complete (never go), or
+ * "does-not-fit" (go false) with what does not fit and, when fewer units
+ * would, how many.
+ */
+function fitTripState(db, bounty, memberId, now) {
+  const member = getMember(db, memberId);
+  if (!member || bounty.sample) return null;
+  const { units, holding } = offeredUnits(db, bounty, member, now);
+  const fit = bountyFit(bounty, member, units, roomFor(db, bounty, member.id, now));
+  if (fit.ok) return null;
+  if (!fit.complete)
+    return {
+      state: "confirm-profile",
+      go: false,
+      // Names only what is still missing (round 5b).
+      label: `Confirm your ${listAnd(MEMBER_PROFILE_FIELDS.filter((k) => fit.missing.includes(k)).map((k) => CONFIRM_LABELS[k]))}`,
+      headline: `${TERMS.stop} yet: ${lowerFirst(profileNeeded(fit.missing))}`,
+      reason: "profile-unknown",
+      fit,
+    };
+  const most = fit.maxUnits.all;
+  return {
+    state: "does-not-fit",
+    go: false,
+    // A partial fit names how many of the units fit (round 5b).
+    label: fit.partial ? `${most} of the ${units} units fit you` : "Does not fit your transport or storage",
+    headline: fit.partial
+      ? `${TERMS.stop} for ${plural(units, "unit")}: ${fit.reasons.join("; ")}. ${
+          holding ? `Release your claim and claim ${most} instead, if your own figures pass for ${most}` : `Check your own figures for ${plural(most, "unit")} before you claim`
+        }`
+      : `${TERMS.stop}: ${fit.reasons.join("; ")}`,
+    reason: "does-not-fit",
+    fit,
+  };
+}
 
 /**
  * Whether the branch stock check behind a live bounty has lapsed at `now`.
@@ -2615,18 +3760,21 @@ export function tripBlockers(db, bounty, now, live = liveEvidence(db, bounty, no
  * and then left: the read returns with the blockers worked out (deferred
  * true) and the notices go out on the next read or re-check. Callers that
  * write anyway pass read: false. Returns { bountyId, stopped, reasons,
- * noticesSent, reopened, deferred, over, headline, room, active }.
+ * noticesSent, reopened, deferred, over, headline, room, active, earlier }
+ * (earlier: capNow's units from earlier bounties for the item, round 5).
  */
 export function syncTrip(db, bounty, now, live = null, { read = true } = {}) {
   const out = {
     bountyId: bounty.id, stopped: false, reasons: [], noticesSent: 0, reopened: 0, deferred: false,
-    over: false, headline: null, room: null, active: null,
+    over: false, headline: null, room: null, active: null, earlier: null,
   };
   if (bounty.sample || bountyStatus(bounty, now) !== "open") return out;
   const evidence = live ?? liveEvidence(db, bounty, now);
   const at = iso(clock(now));
   const cap = capNow(db, bounty, now, evidence);
   applyCap(bounty, cap);
+  // Units earlier bounties for the item still have against its demand (round 5).
+  out.earlier = cap.earlier;
   const writes = [];
   if (cap.changed)
     writes.push(() =>
@@ -2662,7 +3810,7 @@ export function syncTrip(db, bounty, now, live = null, { read = true } = {}) {
     const stops = new Map();
     for (const [memberId, o] of declined) stops.set(memberId, { reason: "promotion-declined", ref: o.ref, message: o.message });
     for (const [memberId, o] of own)
-      if (!stops.has(memberId)) stops.set(memberId, { reason: "own-figures", ref: o.ref, message: o.message });
+      if (!stops.has(memberId)) stops.set(memberId, { reason: o.reason ?? "own-figures", ref: o.ref, message: o.message });
     for (const [memberId, o] of seats.beyond)
       if (!stops.has(memberId)) stops.set(memberId, { reason: "over-claimed", ref: o.ref, message: o.message });
     for (const [memberId, stop] of stops) {
@@ -3063,6 +4211,20 @@ export function journeyInput(input) {
 }
 
 /**
+ * The cash a member can spend on this trip before any payout, in pence,
+ * from a claim or claim check (round 5): required, and a blank is never
+ * zero or enough.
+ */
+export function cashInput(input) {
+  const v = isObject(input) ? input.cashAvailable : undefined;
+  if (v === undefined || v === null || v === "")
+    fail(
+      "Enter the cash you can spend on this trip (pence), before any payout: the stock, packaging, postage and your journey are paid before you are. A blank is never counted as zero or as enough",
+    );
+  return int(v, "cashAvailable", 0, 10_000_000);
+}
+
+/**
  * A member's own hourly floor and cash date for a claim, both optional:
  * { hourlyFloor, cashNeededBy }. hourlyFloor is pence an active hour and
  * cashNeededBy a calendar date (YYYY-MM-DD), today or later in the UK. A
@@ -3101,6 +4263,9 @@ export function claimTerms(bounty, terms = null) {
   return {
     hourlyFloor: mine,
     cashNeededBy: typeof terms?.cashNeededBy === "string" && terms.cashNeededBy ? terms.cashNeededBy : null,
+    // The cash the member said they can spend on the trip (round 5), or
+    // null when a claim stored none.
+    cashAvailable: Number.isSafeInteger(terms?.cashAvailable) && terms.cashAvailable >= 0 ? terms.cashAvailable : null,
     floor: { used, mine, operator },
   };
 }
@@ -3115,7 +4280,9 @@ export function claimTerms(bounty, terms = null) {
 export function memberRequest(bounty, member, { units, journey, qualifies = false, terms = null }) {
   const request = storedRequest(bounty);
   if (!isObject(request)) return null;
-  const { cashNeededBy: _operatorDate, cashNeededDays: _operatorDays, ...rest } = request;
+  // The operator's cash date and any profile in the stored request are not
+  // the member's: their own profile is checked by memberTripCheck.
+  const { cashNeededBy: _operatorDate, cashNeededDays: _operatorDays, profile: _profile, carryKg: _carry, ...rest } = request;
   const own = claimTerms(bounty, terms);
   return {
     ...rest,
@@ -3136,9 +4303,17 @@ export function memberRequest(bounty, member, { units, journey, qualifies = fals
  * it. The sell window is the operator's, never longer than the buy-alert
  * gate's (OPPORTUNITY_RULES.sellWindowWeeks); salesPerWeekLimit is the
  * operator's own sales estimate, which can only lower the evidenced rate.
+ *
+ * Round 5: earlier is the units earlier bounties for the item still have
+ * against its demand (earlierAllocation: bought and not recorded as sold
+ * or returned, or held in a live claim) and earlierNote says so in words.
+ * They are ahead of the member's units for the same buyers. owners
+ * (listingOwners, round 5b) lets the competing listings that are members'
+ * own units count once.
  */
 export function sharedDemand(db, bounty, member, now) {
   const held = claimedUnits(db, bounty.id, now);
+  const earlier = earlierAllocation(db, bounty, now);
   const mine = member
     ? db
         .prepare(
@@ -3153,6 +4328,11 @@ export function sharedDemand(db, bounty, member, now) {
   return {
     committed: held.committed,
     mine,
+    earlier: earlier.units,
+    earlierNote: earlierNote(earlier),
+    // Members holding units bought through bounties for the item, so their
+    // own listings count once (round 5b, ownListings).
+    owners: listingOwners(db, bounty, now),
     sellWindowWeeks: isPositive(entered.sellWindowWeeks) ? Math.min(entered.sellWindowWeeks, gate) : gate,
     salesPerWeekLimit: isPositive(entered.salesPerWeek) ? entered.salesPerWeek : null,
     now,
@@ -3174,6 +4354,7 @@ const soonWords = (days) =>
   days <= 0 ? "within a day" : days < 14 ? `in about ${plural(days, "day")}` : `in about ${plural(Math.round(days / 7), "week")}`;
 const weeksWords = (weeks) => `${weeks.toLocaleString("en-GB")} week${weeks === 1 ? "" : "s"}`;
 const upperFirst = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+const lowerFirst = (s) => s.charAt(0).toLowerCase() + s.slice(1);
 
 /**
  * Competing listings from an estimate result: its demand's count (null when
@@ -3193,24 +4374,31 @@ function competingOf(result) {
  * bounty (sharedDemand): those units compete for the same buyers, so they
  * count as competing listings for demand, and the member's units sell after
  * them. Returns { info, reasons }: info { committed, mine, others,
- * salesPerWeek, sellWindowWeeks, competingListings, demand, demandLeft,
- * sellDays, payoutDate, cashNeededBy, note } and the failures (demand left
- * for their units, payout after their own cash date, food shelf life).
+ * earlier, salesPerWeek, sellWindowWeeks, competingListings, demand,
+ * demandLeft, sellDays, payoutDate, cashNeededBy, note } and the failures
+ * (demand left for their units, payout after their own cash date, food
+ * shelf life). Round 5: the units earlier bounties for the item still have
+ * against its demand (shared.earlier) are ahead of theirs too.
  */
 function sharedTrip(result, { units, shared, cashNeededBy }) {
   const committed = isCount(shared?.committed) ? shared.committed : 0;
   const mine = Math.min(committed, isCount(shared?.mine) ? shared.mine : 0);
   const others = committed - mine;
+  const earlier = isCount(shared?.earlier) ? shared.earlier : 0;
+  const ahead = committed + earlier;
   const weeks = isPositive(shared?.sellWindowWeeks) ? shared.sellWindowWeeks : OPPORTUNITY_RULES.sellWindowWeeks;
   const count = result?.sample?.count;
   const evidenced = isCount(count) && count > 0 ? (count * 7) / BOUNTY_RULES.saleWindowDays : null;
   const rate =
     evidenced === null ? null : isPositive(shared?.salesPerWeekLimit) ? Math.min(evidenced, shared.salesPerWeekLimit) : evidenced;
   const listings = competingOf(result);
-  const demand = claimDemandUnits({ salesPerWeek: rate, competingListings: listings }, weeks);
-  const left = demand === null ? null : Math.max(0, demand - committed);
+  // Members' own listings of units already ahead of theirs count once
+  // (round 5b); a result without listings per seller leaves every one counted.
+  const own = ownListings(result?.competition?.bySeller, Array.isArray(shared?.owners) ? shared.owners : [], listings);
+  const demand = claimDemandUnits({ salesPerWeek: rate, competingListings: listings === null ? null : listings - own.units }, weeks);
+  const left = demand === null ? null : Math.max(0, demand - ahead);
   const median = result?.sample?.daysToSell;
-  const sellDays = Number.isFinite(median) ? claimSellDays({ units: committed + units, daysToSell: median, salesPerWeek: rate }) : null;
+  const sellDays = Number.isFinite(median) ? claimSellDays({ units: ahead + units, daysToSell: median, salesPerWeek: rate }) : null;
   const goals = result?.payout?.goals;
   const payout =
     sellDays === null || !isObject(goals)
@@ -3222,24 +4410,37 @@ function sharedTrip(result, { units, shared, cashNeededBy }) {
           deliveryDays: goals.deliveryDays,
           payoutDelayDays: goals.payoutDelayDays,
         }).date;
-  const who =
+  const onThis =
     others > 0
       ? `Other members have already claimed ${plural(others, "unit")}${mine > 0 ? ` and you have claimed or bought ${mine}` : ""}.`
       : mine > 0
         ? `You have already claimed or bought ${plural(mine, "unit")} on this bounty.`
         : "";
+  const fromEarlier =
+    earlier > 0
+      ? typeof shared?.earlierNote === "string" && shared.earlierNote
+        ? `${upperFirst(shared.earlierNote)}.`
+        : `${plural(earlier, "unit")} from earlier bounties for this item still count against the demand for it.`
+      : "";
+  const who = [onThis, fromEarlier].filter(Boolean).join(" ");
   const yours = units === 1 ? "your unit is" : `the last of your ${units} units is`;
   const sell = sellDays === null || rate === null ? null : `At ${rateWords(rate)}, ${yours} likely to sell ${soonWords(sellDays)}`;
   const lead = who ? who + " " : "";
   const reasons = [];
   const gateDemandFailed = Array.isArray(result?.alert?.checks) && result.alert.checks.some((c) => c?.id === "demand" && c.ok !== true);
-  if (left !== null && units > left && (committed > 0 || !gateDemandFailed))
+  if (left !== null && units > left && (ahead > 0 || !gateDemandFailed))
     reasons.push(
       `${lead}${sell ? sell + ", but s" : "S"}ales support about ${plural(demand, "unit")} within ${weeksWords(weeks)} after competing listings${
-        committed > 0 ? (left === 0 ? ", and those are already claimed" : `, so only ${plural(left, "more unit")} can be claimed`) : ""
+        ahead > 0
+          ? left === 0
+            ? earlier > 0
+              ? ", and the units above already take all of them"
+              : ", and those are already claimed"
+            : `, so only ${plural(left, "more unit")} can be claimed`
+          : ""
       }`,
     );
-  if (cashNeededBy && committed > 0) {
+  if (cashNeededBy && ahead > 0) {
     if (payout === null)
       reasons.push(
         `${lead}The payout date for your ${units === 1 ? "unit" : "units"} cannot be worked out, so it cannot be checked against ${humanDate(cashNeededBy)}, when you need the cash`,
@@ -3247,7 +4448,7 @@ function sharedTrip(result, { units, shared, cashNeededBy }) {
     else if (payout > cashNeededBy)
       reasons.push(`${lead}${upperFirst(yours)} likely to be paid out on ${humanDate(payout)}, after ${humanDate(cashNeededBy)}, when you need the cash`);
   }
-  if (shared?.food && shared.bestBefore && sellDays !== null && committed > 0) {
+  if (shared?.food && shared.bestBefore && sellDays !== null && ahead > 0) {
     const need = CATEGORY_RULES.food.minShelfLifeDays;
     const daysLeft = Math.floor((Date.parse(shared.bestBefore) - clock(shared.now)) / DAY);
     if (Number.isFinite(daysLeft) && daysLeft - sellDays < need)
@@ -3260,9 +4461,11 @@ function sharedTrip(result, { units, shared, cashNeededBy }) {
       committed,
       mine,
       others,
+      earlier,
       salesPerWeek: rate === null ? null : round2(rate),
       sellWindowWeeks: weeks,
       competingListings: listings,
+      ownListings: own.units,
       demand,
       demandLeft: left,
       sellDays,
@@ -3276,6 +4479,33 @@ function sharedTrip(result, { units, shared, cashNeededBy }) {
 
 const HOURLY_FLOOR_REASON = "Below the hourly floor or working time unknown";
 
+/** Whether a suitability check fails only because the member left a value blank. */
+function memberBlank(id, missing) {
+  const has = (k) => Array.isArray(missing) && missing.includes(k);
+  if (id === "cash-available") return has("cashAvailable");
+  if (id === "one-unit-load" || id === "total-load") return has("transport") || has("carryKg");
+  if (id === "storage-space") return has("storageUnits");
+  return false;
+}
+
+/**
+ * Whether a member's own trip fits them (round 5, finding 4), from the
+ * estimate re-run for them: suitability.mjs at their units, the unit
+ * weight, the cash the trip needs before payout (unknown while a money
+ * input is blank) and their profile ({ transport, carryKg, cashAvailable,
+ * storageUnits }, memberTripProfile). A missing profile fails every check.
+ */
+export function memberFit(result, { units, journey = null, profile = null } = {}) {
+  const r = isObject(result) && !result.error ? result : null;
+  const e = isObject(r?.economics) ? r.economics : null;
+  const weight = r?.opportunity?.weightKg ?? r?.inputs?.weightKg ?? null;
+  const fromEstimate = isObject(r?.suitability) && Object.hasOwn(r.suitability, "cashRequired");
+  const blanks = Array.isArray(r?.missingInputs) && r.missingInputs.length > 0;
+  const cashRequired = fromEstimate ? r.suitability.cashRequired : blanks ? null : (e?.cashRequired ?? null);
+  const travel = Number.isSafeInteger(e?.costs?.travel) ? e.costs.travel : Number.isSafeInteger(journey?.cost) ? journey.cost : 0;
+  return tripSuitability({ units, unitKg: weight, cashRequired, cashFixed: travel, profile });
+}
+
 /**
  * Whether a member's own trip passes, from the estimate re-run for them
  * (memberRequest): { ok, units, journey, figures, reasons, shared, floor,
@@ -3287,7 +4517,7 @@ const HOURLY_FLOOR_REASON = "Below the hourly floor or working time unknown";
  * (sharedTrip). terms is claimTerms(bounty, the member's own terms).
  * Unknown figures fail closed.
  */
-export function memberTripCheck(result, { units, journey, shared = null, terms = null }) {
+export function memberTripCheck(result, { units, journey, shared = null, terms = null, profile = null }) {
   const reasons = [];
   const e = isObject(result) && !result.error ? result.economics : null;
   const o = isObject(result?.opportunity) ? result.opportunity : {};
@@ -3311,9 +4541,20 @@ export function memberTripCheck(result, { units, journey, shared = null, terms =
   }
   const together = shared ? sharedTrip(result, { units, shared, cashNeededBy: terms?.cashNeededBy ?? null }) : null;
   if (e && together) for (const r of together.reasons) if (!reasons.includes(r)) reasons.push(r);
+  // The trip must fit the member: their load limit, cash and storage
+  // (round 5). Unknown fails, so a member with no profile is never told go.
+  const fit = memberFit(result, { units, journey, profile });
+  for (const r of fit.reasons) if (!reasons.includes(r)) reasons.push(r);
   const unitProfit = Number.isSafeInteger(o.unitProfit) ? o.unitProfit : e && e.units ? Math.floor(e.contribution / e.units) : null;
+  // When the only failures are values the member has not given (the cash
+  // they can spend, their transport, carry limit or storage), the trip is
+  // waiting for them to confirm those, not failing on the evidence: confirm
+  // lists the fields (round 5b). Any other failure leaves it null.
+  const blanks = new Set(fit.checks.filter((c) => !c.ok && !c.known && memberBlank(c.id, fit.missing)).map((c) => c.detail));
+  const confirm = reasons.length > 0 && reasons.every((r) => blanks.has(r)) ? fit.missing.slice() : null;
   return {
     ok: reasons.length === 0,
+    confirm,
     units,
     journey,
     figures: e
@@ -3336,6 +4577,8 @@ export function memberTripCheck(result, { units, journey, shared = null, terms =
     shared: together?.info ?? null,
     floor,
     cashNeededBy: terms?.cashNeededBy ?? null,
+    // Load, cash and storage for this member (suitability.mjs).
+    fit: { ok: fit.ok, known: fit.known, checks: fit.checks, maxUnits: fit.maxUnits, loadLimitKg: fit.loadLimitKg, missing: fit.missing },
   };
 }
 
@@ -3408,8 +4651,16 @@ export function memberTripText(check) {
  * A member who said they do not qualify for the price, or who used a
  * first-order offer at this retailer (said so, or bought at such a price),
  * is refused whatever qualifiesForPromotion says (standing.refusal).
+ *
+ * Round 5: the units must fit the member (memberFit): one unit and every
+ * unit within their load limit (their stored transport and carry limit),
+ * the cash the trip needs before payout within cashAvailable (the cash they
+ * said they can spend on this trip, required) and the units within their
+ * storage at home. A member with no stored profile is refused with a
+ * request to confirm it. cashAvailable is stored with the claim's terms so
+ * a re-check uses it again.
  */
-export function claim(db, { bountyId, memberId, units, journey, check, qualifiesForPromotion = false, terms = null, now }) {
+export function claim(db, { bountyId, memberId, units, journey, check, qualifiesForPromotion = false, terms = null, cashAvailable = null, now }) {
   const at = clock(now);
   return transaction(db, () => {
     expireClaims(db, now);
@@ -3418,6 +4669,8 @@ export function claim(db, { bountyId, memberId, units, journey, check, qualifies
     if (!Number.isSafeInteger(units) || units < 1 || units > max)
       fail(`units must be a whole number from 1 to ${max}: a claim is at most a trial batch until a verified trade exists`);
     const count = units;
+    // The cash they can spend on this trip: required, never zero (round 5).
+    const cash = cashInput({ cashAvailable });
     const member = requireMember(db, memberId);
     // The evidence read again, as the card reads it: the cap worked out now
     // (capNow) and the units left on the shelf after the claims ahead
@@ -3472,9 +4725,12 @@ export function claim(db, { bountyId, memberId, units, journey, check, qualifies
             ? `Nothing is left to claim: ${seats.phrase}, and members have already claimed ${plural(held.active, "unit")}.`
             : `Only ${plural(remaining, "unit")} can be claimed: ${seats.phrase}, and members have already claimed ${plural(held.active, "unit")}.`
           : remaining === 0
-            ? capFullMessage(bounty) +
+            ? capFullMessage(bounty, liveCap.earlier) +
                 " A claim reserves attention, not retailer stock, so the cap limits how many people are sent."
-            : `Only ${remaining} unit${remaining === 1 ? " remains" : "s remain"} under this bounty's distribution cap.`,
+            : `Only ${remaining} unit${remaining === 1 ? " remains" : "s remain"} under this bounty's distribution cap.` +
+              // Units earlier bounties for the item still have against its
+              // demand, when they are why (round 5).
+              (liveCap.earlier?.binding ? ` ${upperFirst(earlierNote(liveCap.earlier))}.` : ""),
         409,
       );
     const own = memberTripCheck(check, {
@@ -3482,6 +4738,7 @@ export function claim(db, { bountyId, memberId, units, journey, check, qualifies
       journey: trip,
       shared: sharedDemand(db, bounty, member, now),
       terms: claimTerms(bounty, terms),
+      profile: memberTripProfile(member, cash, homeStock(db, member.id, { bountyId: bounty.id, now })),
     });
     if (!own.ok) fail(memberTripText(own), 409);
     if (promotion?.needsMemberConfirmation && qualifiesForPromotion === true && standing?.answer !== "qualifies")
@@ -3495,7 +4752,7 @@ export function claim(db, { bountyId, memberId, units, journey, check, qualifies
       .run(
         bounty.id, member.id, count, iso(at), iso(at + BOUNTY_RULES.claimHours * HOUR), promotion?.condition ?? null,
         promotion && qualifies ? 1 : 0, trip.cost, trip.minutes, JSON.stringify(own.figures),
-        JSON.stringify({ hourlyFloor: terms?.hourlyFloor ?? null, cashNeededBy: terms?.cashNeededBy ?? null }),
+        JSON.stringify({ hourlyFloor: terms?.hourlyFloor ?? null, cashNeededBy: terms?.cashNeededBy ?? null, cashAvailable: cash }),
       );
     return getClaim(db, Number(result.lastInsertRowid));
   });
@@ -3510,6 +4767,24 @@ function activeClaimFor(db, claimId, memberId, now) {
     fail("Only the member who made a claim can change it", 403);
   if (found.status !== "active") fail(`This claim is already ${found.status}`, 409);
   return found;
+}
+
+/**
+ * Stores the cash the member who holds an active claim can spend on this
+ * trip (round 5b): a claim made before the cash was asked for stores none,
+ * so its re-check asks for it. cashAvailable is pence, required (cashInput:
+ * a blank is never zero). Only the claim's member, only while it is active.
+ * The caller re-checks the bounty, so the claim's figures use it at once.
+ */
+export function setClaimCash(db, { claimId, memberId, cashAvailable, now }) {
+  return transaction(db, () => {
+    const found = activeClaimFor(db, claimId, memberId, now);
+    const cash = cashInput({ cashAvailable });
+    const terms = json(found.terms, null);
+    const next = { ...(isObject(terms) ? terms : { hourlyFloor: null, cashNeededBy: null }), cashAvailable: cash };
+    db.prepare("UPDATE claims SET terms = ? WHERE id = ?").run(JSON.stringify(next), found.id);
+    return getClaim(db, found.id);
+  });
 }
 
 /** Releases an active claim, freeing its units for other members. */
@@ -3830,8 +5105,18 @@ export function verifyReport(db, reportId, accurate, { now, recordCheck = null }
  * it into an alert. A member who said they do not qualify, or that they
  * already used a first-order offer at the retailer, is not alerted.
  *
- * Returns { bountyId, sent, asked, notAlerted, blockers, exposure,
- * nextReleaseAt, promotion, warning }.
+ * Round 5: each member's own profile decides (bountyFit, for the units the
+ * figures are for, no more than their trial allowance). A member with no
+ * stored transport, carry limit or storage gets a kind "profile" entry
+ * asking them to confirm it (no figures, not counted in exposure), listed
+ * in confirm; completing the profile and calling again for them turns it
+ * into the alert. A member whose profile the trip does not fit (a unit
+ * heavier than their load limit, more units than it or their storage
+ * allows) is not alerted, with the reason. The cash they can spend is
+ * checked when they claim.
+ *
+ * Returns { bountyId, sent, asked, confirm, notAlerted, blockers,
+ * exposure, nextReleaseAt, promotion, warning }.
  */
 export function dispatchAlerts(db, bountyId, now, { memberId = null } = {}) {
   const at = clock(now);
@@ -3863,13 +5148,16 @@ export function dispatchAlerts(db, bountyId, now, { memberId = null } = {}) {
     };
     const blockers = [...tripBlockers(db, bounty, now, live)];
     if (!blockers.length && synced.over && synced.headline) blockers.push(synced.headline);
-    if (remaining <= 0) blockers.push(capFullMessage(bounty));
+    if (remaining <= 0) blockers.push(capFullMessage(bounty, synced.earlier));
     const promotion = promotionOf(bounty);
     const validation = bounty.sample ? null : validationStatus(db, bounty.locality);
     const result = {
       bountyId: bounty.id,
       sent: [],
       asked: [],
+      // Members asked to confirm their transport, carry limit and storage
+      // first (round 5): an inbox entry with no figures, never a go alert.
+      confirm: [],
       notAlerted: [],
       blockers,
       exposure,
@@ -3948,7 +5236,13 @@ export function dispatchAlerts(db, bountyId, now, { memberId = null } = {}) {
         if (!next || release.releaseAt < next) next = release.releaseAt;
         continue;
       }
-      due.push({ member, release, ask: Boolean(standing && !standing.confirmed), asked: earlier.get(member.id) === "question" });
+      due.push({
+        member,
+        release,
+        ask: Boolean(standing && !standing.confirmed),
+        asked: earlier.get(member.id) === "question",
+        before: earlier.get(member.id) ?? null,
+      });
     }
     // Earlier window first; within a window, more earned reputation first.
     due.sort(
@@ -3965,19 +5259,61 @@ export function dispatchAlerts(db, bountyId, now, { memberId = null } = {}) {
       `UPDATE alerts SET kind = 'alert', tier = ?, via = ?, release_at = ?, reputation = ?, promotion = ?, warning = ?, created = ?
  WHERE bounty_id = ? AND member_id = ?`,
     );
+    // An earlier entry (a question or a request to confirm the profile)
+    // becomes this one, so a member has one entry per bounty.
+    const setKind = db.prepare(
+      `UPDATE alerts SET kind = ?, tier = ?, via = ?, release_at = ?, reputation = ?, promotion = ?, warning = ?, created = ?
+ WHERE bounty_id = ? AND member_id = ?`,
+    );
     let used = 0;
-    for (const { member, release, ask, asked } of due) {
+    for (const { member, release, ask, asked, before } of due) {
       const who = { memberId: member.id, name: member.name };
       if (ask) {
         if (asked) {
           result.notAlerted.push({ ...who, reason: "Asked whether they qualify for the promotion price: waiting for their answer" });
           continue;
         }
-        insert.run(
-          bounty.id, member.id, release.tier.id, release.via, release.releaseAt, release.points,
-          promotion?.condition ?? null, result.warning, "question", iso(at),
-        );
+        if (before)
+          setKind.run(
+            "question", release.tier.id, release.via, release.releaseAt, release.points, promotion?.condition ?? null,
+            result.warning, iso(at), bounty.id, member.id,
+          );
+        else
+          insert.run(
+            bounty.id, member.id, release.tier.id, release.via, release.releaseAt, release.points,
+            promotion?.condition ?? null, result.warning, "question", iso(at),
+          );
         result.asked.push({ ...who, condition: promotion?.condition ?? null });
+        continue;
+      }
+      // The member's own transport, carry limit and storage (round 5). With
+      // no stored profile they are asked to confirm it (no figures, not
+      // counted in exposure); a profile the trip does not fit gets nothing.
+      // The cash they can spend is asked when they claim.
+      const fit = bountyFit(bounty, member, offeredUnits(db, bounty, member, now).units, roomFor(db, bounty, member.id, now));
+      if (!fit.complete) {
+        if (before === "profile") {
+          result.notAlerted.push({ ...who, reason: "Asked to confirm their transport, carry limit and storage: waiting for them" });
+          continue;
+        }
+        if (before)
+          setKind.run(
+            "profile", release.tier.id, release.via, release.releaseAt, release.points, promotion?.condition ?? null,
+            result.warning, iso(at), bounty.id, member.id,
+          );
+        else
+          insert.run(
+            bounty.id, member.id, release.tier.id, release.via, release.releaseAt, release.points,
+            promotion?.condition ?? null, result.warning, "profile", iso(at),
+          );
+        result.confirm.push({ ...who, missing: fit.missing });
+        continue;
+      }
+      if (!fit.ok) {
+        result.notAlerted.push({
+          ...who,
+          reason: `Does not fit the member's own transport, carrying limit or storage for ${plural(fit.units, "unit")}. Their check reads: ${fit.reasons.join("; ")}`,
+        });
         continue;
       }
       if (used >= exposure.budget) {
@@ -3988,7 +5324,7 @@ export function dispatchAlerts(db, bountyId, now, { memberId = null } = {}) {
         continue;
       }
       used++;
-      if (asked)
+      if (before)
         upgrade.run(
           release.tier.id, release.via, release.releaseAt, release.points, promotion?.condition ?? null, result.warning,
           iso(at), bounty.id, member.id,
@@ -4025,7 +5361,11 @@ export function dispatchAlerts(db, bountyId, now, { memberId = null } = {}) {
  * viewer's own figures failing, or a promotion price that is no longer
  * theirs), "sample", "expired" or "withdrawn". headline is the "Don't make
  * the trip" line and reason the first blocker's id (blockerList),
- * "over-claimed", "own-figures" or "promotion-declined" (round 4, N2: a
+ * "over-claimed", "own-figures", "cash-unknown" or "profile-unknown"
+ * (round 5b: a holder whose re-check failed only on values they have not
+ * given, state "confirm-cash" or "confirm-profile", told to confirm them
+ * through Check my figures, never that their figures failed), or
+ * "promotion-declined" (round 4, N2: a
  * holder who bought at a first-order price at the retailer, or answered
  * "not" or "used", label "This price is not available to you").
  * options.memberId: the viewer, so a holder who keeps their units while
@@ -4055,7 +5395,15 @@ export function tripState(db, bounty, now, list = blockerList(db, bounty, now), 
   if (declined)
     return { state: "blocked", go: false, label: "This price is not available to you", headline: declined.message, reason: "promotion-declined" };
   const own = memberId === null ? null : ownFigureFailures(db, bounty, now).get(memberId);
+  if (own?.reason === "cash-unknown")
+    return { state: "confirm-cash", go: false, label: "Confirm the cash you can spend", headline: own.message, reason: own.reason };
+  if (own?.reason === "profile-unknown")
+    return { state: "confirm-profile", go: false, label: own.label, headline: own.message, reason: own.reason, confirm: own.confirm };
   if (own) return { state: "blocked", go: false, label: "Your figures no longer pass", headline: own.message, reason: "own-figures" };
+  // The member's own transport, carry limit and storage (round 5): a member
+  // with no stored profile, or whom the trip does not fit, is never told go.
+  const unfit = memberId === null ? null : fitTripState(db, bounty, memberId, now);
+  if (unfit) return unfit;
   const s = seats ?? claimSeats(db, bounty, now, live ?? liveEvidence(db, bounty, now));
   if (s.over) {
     const kept = memberId === null ? null : s.kept.get(memberId);
@@ -4129,17 +5477,21 @@ export function figuresLabel(snapshot) {
 
 /**
  * The access needs for a live bounty (PRD journey 3), from its unit weight
- * and the units on the shelf now. The bounty does not know a member's carry
- * limit, so a hand-carried load (HAND_CARRY_KG) is assumed.
+ * and the units on the shelf now. With a member whose carry limit is
+ * stored (round 5) their own limit is used; otherwise a hand-carried load
+ * (HAND_CARRY_KG) is assumed.
  */
-function accessFor(bounty, shelfUnits) {
+function accessFor(bounty, shelfUnits, member = null) {
   if (bounty.sample) return [];
   const o = json(bounty.opportunity, null) ?? {};
+  const own = memberTripProfile(member).carryKg;
   return accessNeeds(
     { weight: o.weightKg, stock: shelfUnits?.units ?? null, stockChecked: shelfUnits?.at ?? null, storageNeeds: null },
-    { carry: HAND_CARRY_KG },
+    { carry: own ?? HAND_CARRY_KG },
   ).map((n) =>
-    n.id === "vehicle-required" ? { ...n, detail: `One unit weighs ${o.weightKg} kg, more than one person can carry by hand` } : n,
+    n.id === "vehicle-required" && own === null
+      ? { ...n, detail: `One unit weighs ${o.weightKg} kg, more than one person can carry by hand` }
+      : n,
   );
 }
 
@@ -4362,8 +5714,12 @@ export function memberAlerts(db, memberId, { now, cache = new Map() }) {
     // The entry follows the member's answer: a price they said they do not
     // qualify for, or a first-order offer they used here, is not for them.
     if (standing?.declined) return declinedAlert(db, a, bounty, member, { display, standing, list, live, now });
-    const kind = a.kind === "question" ? "question" : "alert";
+    // kind "profile" (round 5): the member was asked to confirm their
+    // transport, carry limit and storage first, so no figures are shown.
+    const kind = a.kind === "question" ? "question" : a.kind === "profile" ? "profile" : "alert";
     const showFigures = display.permitted && kind === "alert" && (!standing || standing.confirmed);
+    const trip = tripState(db, bounty, now, list, { memberId: member.id, live });
+    const profileView = kind === "profile" ? memberProfileView(member, homeStock(db, member.id, { now })) : null;
     const opportunity = json(bounty.opportunity, null);
     const checked = checkedLabels(bounty, snapshot, live, shelfUnits);
     return {
@@ -4387,7 +5743,7 @@ export function memberAlerts(db, memberId, { now, cache = new Map() }) {
       via: a.via,
       label: a.via === "paid" ? "Paid early access" : "Earned release",
       bountyStatus: bountyStatus(bounty, now),
-      trip: tripState(db, bounty, now, list, { memberId: member.id, live }),
+      trip,
       shelf: shelfNow(db, bounty, live),
       promotion:
         condition && display.permitted
@@ -4404,7 +5760,18 @@ export function memberAlerts(db, memberId, { now, cache = new Map() }) {
           ? standing?.confirmed
             ? "You said you qualify. The full alert with the figures follows while there is room under the cap."
             : "Answer the question to see the figures. Nothing is shown or claimed until you say you qualify."
-          : null,
+          : kind === "profile"
+            ? profileView.complete
+              ? trip.state === "does-not-fit"
+                ? "Your profile is complete, but this trip does not fit it as planned, so no alert with figures follows for it."
+                : "Your profile is complete. The full alert with the figures follows if the trip fits it and there is room under the cap."
+              : // The trip line already asks for the profile: say it once.
+                trip.state === "confirm-profile"
+                ? null
+                : `${profileNeeded(profileView.missing)}.`
+            : null,
+      // What the member's profile still needs (kind "profile" only).
+      profile: profileView,
       figures:
         showFigures && snapshot?.economics
           ? {
@@ -4419,7 +5786,7 @@ export function memberAlerts(db, memberId, { now, cache = new Map() }) {
       warning: bounty.sample ? null : validationStatus(db, bounty.locality, cache).warning,
       category: display.permitted ? (snapshot?.category ?? null) : null,
       attributes: display.permitted ? attributeNotes(snapshot?.offer) : [],
-      accessNeeds: accessFor(bounty, shelfUnits),
+      accessNeeds: accessFor(bounty, shelfUnits, member),
       notices: memberNotices(db, member.id, { bountyId: bounty.id }),
     };
   });
@@ -4550,7 +5917,7 @@ function boughtAtBranch(db, bounty, at) {
  * qualify. The exact-match check names the match attributes the source did
  * not state (attributeNotes).
  */
-function liveChecks(stored, { shelf, lapse, live, offerStale, display, promotion, viewer, confirmed, attributes, list = [], shelfUnits = null, units = null }) {
+function liveChecks(stored, { shelf, lapse, live, offerStale, display, promotion, viewer, confirmed, attributes, list = [], shelfUnits = null, units = null, earlier = null }) {
   const none = live?.check && live.check.in_stock !== 1 ? live.check : null;
   return stored.map((c) => {
     // Demand and the shelf count as they stand now (R3Q3, R3B1).
@@ -4559,6 +5926,10 @@ function liveChecks(stored, { shelf, lapse, live, offerStale, display, promotion
         return { ...c, ok: false, detail: "Competing listings are not known now, so demand for these units is not shown" };
       const aged = list.find((b) => b.id === "demand-aged");
       if (aged) return { ...c, ok: false, detail: aged.text };
+      // Units earlier bounties for the item still have against its demand
+      // (round 5): the check's own figure does not count them.
+      const owed = earlierNote(earlier);
+      if (owed) return { ...c, detail: `${c.detail ? withStop(c.detail) + " " : ""}${upperFirst(owed)}` };
     }
     if (c.id === "shelf-units" && Number.isSafeInteger(shelfUnits?.units) && Number.isSafeInteger(units) && shelfUnits.units < units)
       return { ...c, ok: false, detail: `Only about ${shelfUnits.units} likely left on the shelf, fewer than the ${units} planned` };
@@ -4627,6 +5998,38 @@ function liveChecks(stored, { shelf, lapse, live, offerStale, display, promotion
     }
     return c;
   });
+}
+
+/**
+ * Units earlier bounties for the item still have against its demand, for
+ * the card (round 5): { units, outstanding, held, bought, released, note,
+ * release, binding, claims } from capNow's earlier, or null when there are
+ * none. claims are the completed claims with units outstanding: every one
+ * for the operator (with the member's name), only their own for a member,
+ * none for a visitor.
+ */
+function earlierView(db, e, { isOperator = false, me = null } = {}) {
+  if (!isObject(e) || !(e.units > 0)) return null;
+  const name = db.prepare("SELECT name FROM members WHERE id = ?");
+  return {
+    units: e.units,
+    outstanding: e.outstanding,
+    held: e.held,
+    bought: e.bought,
+    released: e.released,
+    bounties: e.bounties,
+    note: earlierNote(e),
+    release: earlierRelease(e),
+    binding: e.binding === true,
+    capWithout: Number.isSafeInteger(e.capWithout) ? e.capWithout : null,
+    claims: (e.claims ?? [])
+      .filter((c) => isOperator || c.memberId === me)
+      .map((c) => ({
+        ...c,
+        mine: c.memberId === me,
+        memberName: isOperator || c.memberId === me ? (name.get(c.memberId)?.name ?? null) : null,
+      })),
+  };
 }
 
 /**
@@ -4705,16 +6108,21 @@ export function bountyView(db, bounty, { viewer = { kind: "public" }, now, cache
   const list = blockerList(db, bounty, now, live);
   const blockers = list.map((b) => b.text);
   const trip = tripState(db, bounty, now, list, { memberId: viewer.kind === "member" ? viewer.member.id : null, live });
-  const claims = db
+  const claimRows = db
     .prepare(
       `SELECT c.*, m.name AS member_name FROM claims c JOIN members m ON m.id = c.member_id
  WHERE c.bounty_id = ? ORDER BY c.created DESC, c.id DESC`,
     )
     .all(bounty.id)
     .map(plain)
-    .filter((c) => isOperator || c.member_id === me)
+    .filter((c) => isOperator || c.member_id === me);
+  // Units bought through each completed claim that are released (recorded
+  // as sold, returned or reconciled) and still outstanding (round 5).
+  const releasedHere = releasedOn(db, claimRows.filter((c) => c.status === "completed").map((c) => c.id));
+  const claims = claimRows
     .map((c) => {
       const active = c.status === "active" && Date.parse(c.expires_at) > at;
+      const r = c.status === "completed" ? (releasedHere.get(c.id) ?? noReleases()) : null;
       return {
         id: c.id,
         memberId: c.member_id,
@@ -4731,11 +6139,21 @@ export function bountyView(db, bounty, { viewer = { kind: "public" }, now, cache
         figures: hidden ? null : json(c.figures, null),
         // A live claim on a bounty that cannot send anyone on a trip now.
         paused: active && !trip.go,
+        // The cash the member said they can spend on this trip (their own
+        // claims only), and whether a live claim stores none: a claim made
+        // before the cash was asked for (round 5b) asks for it under the claim.
+        cashAvailable: c.member_id === me ? claimCash(c) : null,
+        needsCash: active && claimCash(c) === null,
+        // Round 5: for units bought, what is recorded as sold, returned or
+        // reconciled, and what still counts against the demand for the item.
+        released: r ? { sold: r.sold, returned: r.returned, reconciled: r.reconciled } : null,
+        outstanding: r ? Math.max(0, c.units - Math.min(c.units, r.total)) : null,
+        releases: r && r.total > 0 ? releasesOf(db, c.id) : [],
       };
     });
   const alertBlockers = [...blockers];
   if (!blockers.length && synced.over && synced.headline) alertBlockers.push(synced.headline);
-  if (remaining <= 0) alertBlockers.push(capFullMessage(bounty));
+  if (remaining <= 0) alertBlockers.push(capFullMessage(bounty, synced.earlier));
   const sentRow = db
     .prepare(
       "SELECT COALESCE(SUM(kind = 'alert'), 0) AS alerts, COALESCE(SUM(kind = 'question'), 0) AS questions FROM alerts WHERE bounty_id = ?",
@@ -4804,6 +6222,33 @@ export function bountyView(db, bounty, { viewer = { kind: "public" }, now, cache
       // this bounty is not for you" (or do not qualify, or bought at it).
       if (standing?.declined && !active) own.push(standing.notForYou);
     }
+    // The member's own transport, carry limit and storage (round 5): for
+    // their live claim's units, otherwise the units the figures are for.
+    // With no stored profile, or when not even one unit fits, they cannot
+    // claim; when fewer units fit, the claim is limited to those.
+    const fitUnits = bounty.sample ? null : offeredUnits(db, bounty, viewer.member, now);
+    const fit = fitUnits
+      ? bountyFit(bounty, viewer.member, fitUnits.units, roomFor(db, bounty, viewer.member.id, now))
+      : null;
+    if (fit && !blockers.length && !active) {
+      if (!fit.complete) own.push(profileNeeded(fit.missing));
+      else if (!(fit.maxUnits.all >= 1)) own.push(...fit.reasons);
+    }
+    const fitMost = fit && fit.complete && Number.isSafeInteger(fit.maxUnits.all) ? fit.maxUnits.all : fit ? 0 : null;
+    // What sets the most they can claim now, in words (round 5b): the
+    // smallest of their trial batch, what is left under the cap and what
+    // fits their load limit and room at home.
+    const fitWords =
+      fit && fit.complete && fitMost !== null
+        ? fit.maxUnits.load === fitMost && fit.maxUnits.storage === fitMost
+          ? "what fits your load limit and your room at home"
+          : fit.maxUnits.storage === fitMost
+            ? "what fits your room at home"
+            : "what fits your load limit"
+        : null;
+    let claimLimit = { units: trial.allowance, words: "your trial batch" };
+    if (remaining < claimLimit.units) claimLimit = { units: remaining, words: "what is left under the cap" };
+    if (fitWords && fitMost < claimLimit.units) claimLimit = { units: fitMost, words: fitWords };
     viewerInfo = {
       memberId: viewer.member.id,
       release,
@@ -4814,7 +6259,39 @@ export function bountyView(db, bounty, { viewer = { kind: "public" }, now, cache
       blockers: own,
       ruleFailures: hidden ? ruleFailures.map(() => "Fails one of your stricter thresholds") : ruleFailures,
       trial,
-      maxClaimUnits: Math.max(0, Math.min(trial.allowance, remaining)),
+      maxClaimUnits: Math.max(0, Math.min(trial.allowance, remaining, fitMost ?? Infinity)),
+      claimLimit: claimLimit.words,
+      // The member's stored trip profile and whether this trip fits it
+      // (load and storage; the cash they can spend is checked when they
+      // claim). checks are suitability.mjs checks in plain words.
+      profile: memberProfileView(viewer.member, homeStock(db, viewer.member.id, { now })),
+      fit: fit
+        ? {
+            ok: fit.ok,
+            complete: fit.complete,
+            units: fit.units,
+            figures: fit.figures,
+            partial: fit.partial,
+            maxUnits: fit.complete ? fit.maxUnits.all : null,
+            missing: fit.missing,
+            loadLimitKg: fit.loadLimitKg,
+            checks: fit.checks,
+            note: !fit.complete
+              ? profileNeeded(fit.missing)
+              : fit.partial
+                ? `At most ${plural(fit.maxUnits.all, "unit")} ${fit.maxUnits.all === 1 ? "fits" : "fit"} your profile${
+                    fit.figures !== null && fit.figures > fit.maxUnits.all ? `, and the figures on this card are for ${fit.figures}: check your own figures for ${plural(fit.maxUnits.all, "unit")} before you claim` : ""
+                  }`
+                : null,
+            // A holder's cash is the figure stored with their claim (round 5b).
+            cash:
+              active && claimCash(claimRows.find((c) => c.id === active.id)) !== null
+                ? `The cash you can spend on this trip is the ${pounds(claimCash(claimRows.find((c) => c.id === active.id)))} stored with your claim, checked with your figures, not here: change it under your claim if it is wrong`
+                : active
+                  ? "Your claim stores no cash you can spend on this trip yet: enter it under your claim, and it is checked with your figures"
+                  : "The cash you can spend on this trip is asked when you claim and checked against the cash the trip needs before any payout",
+          }
+        : null,
       promotion:
         promotion?.needsMemberConfirmation && !hidden
           ? {
@@ -4829,10 +6306,15 @@ export function bountyView(db, bounty, { viewer = { kind: "public" }, now, cache
       eligibility: hidden ? null : standing,
       stop: trip.go ? null : trip.headline,
       notices: memberNotices(db, viewer.member.id, { bountyId: bounty.id }),
+      // Units they bought through bounties for this item and have not
+      // recorded as sold or returned, with no seller name on their profile,
+      // while competing listings are counted: any they list count twice
+      // (round 5b).
+      sellerNote: viewerSellerNote(db, bounty, viewer.member, basis, now),
     };
   }
   const attributes = bounty.sample || hidden ? [] : attributeNotes(snapshot?.offer);
-  const checks = liveChecks(Array.isArray(snapshot?.alert?.checks) ? snapshot.alert.checks : [], {
+  const sharedChecks = liveChecks(Array.isArray(snapshot?.alert?.checks) ? snapshot.alert.checks : [], {
     shelf,
     lapse,
     live,
@@ -4845,7 +6327,18 @@ export function bountyView(db, bounty, { viewer = { kind: "public" }, now, cache
     list,
     shelfUnits,
     units: Number.isSafeInteger(snapshot?.economics?.units) ? snapshot.economics.units : (snapshot?.units?.figures ?? null),
+    earlier: synced.earlier,
   });
+  // For a member, the shared "checked for each member" line is their own
+  // load and storage checks (round 5); the cash is checked when they claim.
+  const memberFitChecks = viewerInfo?.fit
+    ? viewerInfo.fit.complete
+      ? viewerInfo.fit.checks
+      : [{ id: "member-fit", ok: false, detail: profileNeeded(viewerInfo.fit.missing) }]
+    : null;
+  const checks = memberFitChecks
+    ? [...sharedChecks.filter((c) => c.id !== "member-fit"), ...memberFitChecks]
+    : sharedChecks;
   const economics = figuresHidden ? null : (snapshot?.economics ?? null);
   const validation = bounty.sample ? null : validationStatus(db, bounty.locality, cache);
   const checked = checkedLabels(bounty, snapshot, live, shelfUnits);
@@ -4875,6 +6368,14 @@ export function bountyView(db, bounty, { viewer = { kind: "public" }, now, cache
     claimedUnits: held.active,
     completedUnits: held.completed,
     remaining,
+    // Round 5: units earlier bounties for the item still have against its
+    // demand, and how they stop counting (null when there are none).
+    earlier: earlierView(db, synced.earlier, { isOperator, me }),
+    // For the operator only (round 5b): members holding units bought through
+    // bounties for this item, with the seller name each gave and whether it
+    // is confirmed. Their listings count once only after the operator checks
+    // the name against their marketplace profile or a listing and confirms it.
+    sellerNames: isOperator && !bounty.sample ? sellerNamesView(db, bounty, now) : null,
     alert: {
       eligible: bounty.alert_eligible === 1,
       reasons: json(bounty.alert_reasons, []),
@@ -4912,7 +6413,7 @@ export function bountyView(db, bounty, { viewer = { kind: "public" }, now, cache
     mainUncertainty: hidden
       ? null
       : uncertaintyFor(bounty, snapshot, list, { showFigures: !figuresHidden, condition: standing?.declined ? null : promotion?.condition }),
-    accessNeeds: accessFor(bounty, shelfUnits),
+    accessNeeds: accessFor(bounty, shelfUnits, viewer.kind === "member" ? viewer.member : null),
     pressure: { sourcing, resale },
     shelf,
     shelfUnits,

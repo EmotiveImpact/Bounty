@@ -79,6 +79,7 @@ export function routes(db) {
       "POST",
       "/api/research/estimate",
       ({ body }) => estimateFromEvidence(db, body, { now: serverNow() }),
+      { read: true },
     ],
     [
       "POST",

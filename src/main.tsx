@@ -1,66 +1,48 @@
-import React, { useEffect, useState } from "react";
+import React from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
-import Deals from "./Deals";
+import "./look.css";
+import Scan from "./Scan";
 import Planner from "./Planner";
-import Goals from "./Goals";
+import { BasketSection } from "./Goals";
 import Research from "./Research";
 import { clearResearchDraft } from "./ResearchCalculator";
 import Bounties from "./Bounties";
 import Ledger from "./Ledger";
 import Sources from "./Sources";
+import ProtoApp, { type View } from "./proto/App";
+import SignIn, { type Member } from "./SignIn";
+import { reloadPlans } from "./plans";
+import { SIGN_IN_EVENT } from "./api";
 
-const TABS = {
-  Deals: {
-    title: "Deals near you",
-    lead: "Cheap in the shop, sells for more online. The biggest profit a unit comes first, and nothing needs setting up.",
-    view: Deals,
-  },
-  Planner: {
-    title: "Trip planner",
-    lead: "Optional. Add your travel, cash and carrying limit to see which trips fit you.",
-    view: Planner,
-  },
-  Goals: {
-    title: "Goals and baskets",
-    lead: "Optional. Plan against your dispatch days, storage, cash date and monthly target.",
-    view: Goals,
-  },
-  Research: {
-    title: "Source research",
-    lead: "Match an acquisition offer to exact sold evidence before planning a purchase.",
-    view: Research,
-  },
-  Bounties: {
-    title: "Bounties",
-    lead: "Share checked opportunities without flooding the store or the market.",
-    view: Bounties,
-  },
-  Ledger: {
-    title: "Outcome ledger",
-    lead: "Reconcile receipts, sales, payouts, costs and time against the prediction.",
-    view: Ledger,
-  },
-  Sources: {
-    title: "Sources and observations",
-    lead: "Source readiness, import history and dated UK price observations.",
-    view: Sources,
-  },
-} as const;
-type Tab = keyof typeof TABS;
-
-// The tab named in the address, or null. Only the tabs themselves count
-// (never inherited names such as "constructor"), and a malformed escape in
-// the hash is ignored rather than breaking the page.
-function tabFromHash(): Tab | null {
-  let hash: string;
-  try {
-    hash = decodeURIComponent(location.hash.slice(1));
-  } catch {
-    return null;
-  }
-  return Object.hasOwn(TABS, hash) ? (hash as Tab) : null;
+// The trip planner, with the several-items basket plan under it. Money has
+// its own screen in the new shell (proto/Money.tsx).
+function PlannerPage() {
+  return (
+    <>
+      <Planner />
+      <div className="planner goals">
+        <BasketSection />
+      </div>
+    </>
+  );
 }
+
+// Stock's full records, without the month summary and tax note that the
+// new Stock and Money screens already show.
+function StockRecords() {
+  return <Ledger bare />;
+}
+
+// The older screens, shown inside the new shell until each is ported.
+const LEGACY: Partial<Record<View, React.ComponentType>> = {
+  scan: Scan,
+  planner: PlannerPage,
+  research: Research,
+  tips: Bounties,
+  stock: StockRecords,
+  sources: Sources,
+};
 
 // Keeps a failure in one tab from blanking the whole page. onError lets a
 // tab forget state it saved for the session (the Research draft), so a
@@ -80,7 +62,8 @@ class TabBoundary extends React.Component<
     if (this.state.error)
       return (
         <p role="alert">
-          This tab hit an error and stopped ({this.state.error}). Reload the page, or choose another tab.
+          This tab hit an error and stopped ({this.state.error}). Reload the
+          page, or choose another tab.
         </p>
       );
     return this.props.children;
@@ -88,176 +71,72 @@ class TabBoundary extends React.Component<
 }
 
 // Tabs that keep a session draft to forget when they fail.
-const ON_ERROR: Partial<Record<string, () => void>> = { Research: clearResearchDraft };
+const ON_ERROR: Partial<Record<string, () => void>> = {
+  research: clearResearchDraft,
+};
 
-function App() {
-  const [tab, setTab] = useState<Tab>(() => tabFromHash() ?? "Deals");
-  // Follow in-page links such as the Planner's "Open the basket plan in Goals".
-  useEffect(() => {
-    const follow = () => {
-      const next = tabFromHash();
-      if (next) setTab(next);
-    };
-    window.addEventListener("hashchange", follow);
-    return () => window.removeEventListener("hashchange", follow);
+function legacy(view: View) {
+  const Screen = LEGACY[view];
+  if (!Screen) return null;
+  return (
+    <TabBoundary key={view} onError={ON_ERROR[view]}>
+      <Screen />
+    </TabBoundary>
+  );
+}
+
+// On a hosted pilot with member accounts the site opens for everyone, with a
+// Sign in button at the top. Saving a change while signed out opens the
+// sign-in window too. On your own computer there are no accounts.
+type Auth = { required: boolean; inviteOpen: boolean; member: Member | null };
+
+function Root() {
+  const [auth, setAuth] = React.useState<Auth>({ required: false, inviteOpen: false, member: null });
+  const [signingIn, setSigningIn] = React.useState(false);
+  React.useEffect(() => {
+    fetch("/api/auth/me")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.required)
+          setAuth({ required: true, inviteOpen: Boolean(data.inviteOpen), member: data.user ?? null });
+      })
+      .catch(() => undefined);
+    const open = () => setSigningIn(true);
+    window.addEventListener(SIGN_IN_EVENT, open);
+    return () => window.removeEventListener(SIGN_IN_EVENT, open);
   }, []);
-  const View = TABS[tab].view;
-  // Display only: whether the side menu shows names, remembered per browser.
-  const [railOpen, setRailOpen] = useState(() => {
-    try {
-      return localStorage.getItem("bounty-rail") === "open";
-    } catch {
-      return false;
-    }
-  });
-  const [toolsOpen, setToolsOpen] = useState(false);
-  const toggleRail = () => {
-    const next = !railOpen;
-    setRailOpen(next);
-    try {
-      localStorage.setItem("bounty-rail", next ? "open" : "closed");
-    } catch {
-      // Private windows may refuse storage; the menu still works.
-    }
-  };
-  const go = (t: Tab) => {
-    setTab(t);
-    setToolsOpen(false);
-    history.replaceState(null, "", "#" + t);
-  };
-  const navButton = (t: Tab, cls?: string) => (
-    <button key={t} className={cls} aria-pressed={t === tab} title={LABEL[t]} onClick={() => go(t)}>
-      <Icon name={t} />
-      <span className="rail-label">{LABEL[t]}</span>
-    </button>
-  );
-  const moreActive = MORE.includes(tab);
+  const close = React.useCallback(() => setSigningIn(false), []);
   return (
-    <div className={"shell" + (railOpen ? " rail-open" : "")}>
-      <div className="rail">
-        <div className="rail-top">
-          <a className="logo" href="#Deals" aria-label="Bounty, back to the deals">
-            <span className="logo-mark" aria-hidden="true">
-              B
-            </span>
-            <strong className="rail-label">bounty</strong>
-          </a>
-          <button
-            type="button"
-            className="rail-toggle"
-            aria-expanded={railOpen}
-            aria-label={railOpen ? "Close the menu" : "Open the menu"}
-            onClick={toggleRail}
-          >
-            <Icon name={railOpen ? "close" : "open"} />
-          </button>
-        </div>
-        <nav className="rail-nav" aria-label="Sections">
-          {MEMBER.map((t) => navButton(t))}
-          <span className="rail-group">Extras</span>
-          {EXTRAS.map((t) => navButton(t))}
-          <span className="rail-group">Tools</span>
-          {TOOLS.map((t) => navButton(t))}
-        </nav>
-      </div>
-      <div className="maincol">
-        <div className="topbar">
-          <div className="wrap">
-            <span className="topbar-title">Three prices, never mixed:</span>
-            <span className="badge ev-retail">Retail offer</span>
-            <span className="topbar-note">what you pay</span>
-            <span className="badge ev-sold">Completed sale</span>
-            <span className="topbar-note">what it really sold for</span>
-            <span className="badge ev-asking">Asking price</span>
-            <span className="topbar-note">listings, not sales</span>
-          </div>
-        </div>
-        <main>
-          <div className="page-head">
-            <span className="crumbs">Bounty › {LABEL[tab]}</span>
-            <h1>{TABS[tab].title}</h1>
-            <p>{TABS[tab].lead}</p>
-          </div>
-          <TabBoundary key={tab} onError={ON_ERROR[tab]}>
-            <View />
-          </TabBoundary>
-        </main>
-        <footer className="site-foot">
-          <div className="wrap">
-            <span>
-              <strong>Bounty</strong> · trip planning for UK resellers
-            </span>
-            <span>Times are UK time. Sample figures are always labelled.</span>
-          </div>
-        </footer>
-      </div>
-      <nav className="bottombar" aria-label="Sections">
-        {MEMBER.map((t) => navButton(t))}
-        <button aria-pressed={moreActive} aria-expanded={toolsOpen} onClick={() => setToolsOpen(!toolsOpen)}>
-          <Icon name="tools" />
-          <span className="rail-label">More</span>
-        </button>
-      </nav>
-      {toolsOpen && (
-        <div className="tools-sheet" role="menu" aria-label="More">
-          {MORE.map((t) => (
-            <button key={t} role="menuitem" aria-pressed={t === tab} onClick={() => go(t)}>
-              <Icon name={t} />
-              {TABS[t].title}
-            </button>
-          ))}
-        </div>
+    <>
+      <ProtoApp
+        legacy={legacy}
+        account={
+          auth.required
+            ? {
+                email: auth.member?.email ?? null,
+                signIn: () => setSigningIn(true),
+                signOut: async () => {
+                  await fetch("/api/auth/signout", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: "{}",
+                  }).catch(() => undefined);
+                  setAuth({ ...auth, member: null });
+                  reloadPlans();
+                },
+              }
+            : undefined
+        }
+      />
+      {signingIn && (
+        <SignIn
+          inviteOpen={auth.inviteOpen}
+          onClose={close}
+          onSignedIn={(member) => (setAuth({ ...auth, required: true, member }), setSigningIn(false), reloadPlans())}
+        />
       )}
-    </div>
+    </>
   );
 }
 
-// Deals first, so anyone can open the app and see finds with no setup. The
-// trip planner and goals are optional extras for sharper numbers; the
-// research desk and source admin are tools. On phones the extras and tools
-// share the More menu.
-const MEMBER: Tab[] = ["Deals", "Bounties", "Ledger"];
-const EXTRAS: Tab[] = ["Planner", "Goals"];
-const TOOLS: Tab[] = ["Research", "Sources"];
-const MORE: Tab[] = [...EXTRAS, ...TOOLS];
-const LABEL: Record<Tab, string> = {
-  Deals: "Deals",
-  Planner: "Trip planner",
-  Goals: "Goals",
-  Research: "Research",
-  Bounties: "Bounties",
-  Ledger: "Ledger",
-  Sources: "Sources",
-};
-
-// Line icons for the menu, drawn on a 24-unit grid.
-const ICON_PATHS: Record<string, string[]> = {
-  Deals: ["M19 5 5 19", "M7 9.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z", "M17 19.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z"],
-  Planner: ["M12 21s-6-5.3-6-10a6 6 0 0 1 12 0c0 4.7-6 10-6 10z", "M12 13.2a2.2 2.2 0 1 0 0-4.4 2.2 2.2 0 0 0 0 4.4z"],
-  Goals: ["M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16z", "M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M12 12.5v-1"],
-  Research: ["M11 17.5a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13z", "M20 20l-4.2-4.2"],
-  Bounties: ["M3.5 12V4h8l9 9-8 8z", "M7.8 9.6a1.4 1.4 0 1 0 0-2.8 1.4 1.4 0 0 0 0 2.8z"],
-  Ledger: ["M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3z", "M5 17a3 3 0 0 1 3-3h11"],
-  Sources: ["M12 9c3.9 0 7-1.3 7-3s-3.1-3-7-3-7 1.3-7 3 3.1 3 7 3z", "M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6", "M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3"],
-  tools: ["M4 7h16", "M4 12h16", "M4 17h16"],
-  open: ["M9 6l6 6-6 6"],
-  close: ["M15 6l-6 6 6 6"],
-};
-function Icon({ name }: { name: string }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      {ICON_PATHS[name].map((d) => (
-        <path key={d} d={d} />
-      ))}
-    </svg>
-  );
-}
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(<Root />);

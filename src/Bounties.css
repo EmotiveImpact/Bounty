@@ -16,7 +16,7 @@
   display: grid;
   gap: 4px;
   border: 1px solid var(--line);
-  border-left: 4px solid var(--brand);
+  border: 1px solid var(--brand);
   border-radius: 10px;
   background: var(--surface-2);
   padding: 10px 14px;
@@ -162,7 +162,7 @@ label.inline {
 /* "Don't make the trip" lines and notices. */
 .stop {
   display: block;
-  border-left: 4px solid var(--fail);
+  border: 1px solid var(--fail);
   background: var(--fail-soft);
   color: var(--fail-ink);
   padding: 8px 12px;
@@ -177,7 +177,7 @@ label.inline {
   margin: 8px 0;
 }
 .stop-notices li {
-  border-left: 4px solid var(--fail);
+  border: 1px solid var(--fail);
   background: var(--fail-soft);
   border-radius: 8px;
   padding: 8px 12px;
@@ -194,7 +194,7 @@ label.inline {
    The same green as a reopen notice (var(--brand) on var(--pass-soft)). */
 .go-note {
   display: block;
-  border-left: 4px solid var(--brand);
+  border: 1px solid var(--brand);
   background: var(--pass-soft);
   color: var(--brand);
   border-radius: 8px;
@@ -209,12 +209,12 @@ label.inline {
 /* The pilot audit line while it is a caution (not validated, or not yet
    signed off). */
 .prevalidation {
-  border-left: 4px solid var(--note-line);
+  border: 1px solid var(--note-line);
 }
 /* After a sign-off that stands, the same line is a plain result: neutral,
    neither a caution nor a go (var(--ink) on var(--info-soft)). */
 .validation-result {
-  border-left: 4px solid var(--line-2);
+  border: 1px solid var(--line-2);
   border-radius: 8px;
   background: var(--info-soft);
   padding: 8px 12px;
@@ -315,7 +315,7 @@ label.inline {
   color: var(--brand);
 }
 .category-warning {
-  border-left: 4px solid var(--note-line);
+  border: 1px solid var(--note-line);
 }
 .match-notes {
   margin: 0;
@@ -329,7 +329,7 @@ label.inline {
   display: grid;
   gap: 6px;
   border: 1px solid var(--line);
-  border-left: 4px solid var(--note-line);
+  border: 1px solid var(--note-line);
   border-radius: 8px;
   padding: 8px 12px;
   margin: 8px 0;
@@ -683,4 +683,123 @@ label.inline {
     border-bottom: 0;
     padding-bottom: 0;
   }
+/* Round five: units from earlier bounties for the item, and purchases whose
+   units still count against its demand, with the forms that release them. */
+.earlier {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #c7d0c4;
+  border-left: 4px solid #8a6d10;
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 8px 0;
+  font-size: 14px;
+}
+.earlier p {
+  margin: 0;
+}
+.purchase-release {
+  display: grid;
+  gap: 4px;
+  border-top: 1px solid #dce0d6;
+  padding-top: 6px;
+}
+.release-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 4px 12px;
+}
+.release-form label {
+  flex: 0 1 200px;
+  margin: 0;
+}
+.release-form label.wide {
+  flex: 1 1 240px;
+}
+.release-form input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.release-form button {
+  padding: 4px 10px;
+}
+@media (max-width: 640px) {
+  .release-form label,
+  .release-form label.wide {
+    flex: 1 1 100%;
+  }
+  .release-form button {
+    min-height: 40px;
+    padding: 6px 14px;
+  }
+}
+/* Round five: whether the trip fits the member's transport, carrying limit
+   and storage, and the profile fields that decide it. Same colours as the
+   member's own figures, so muted text keeps its contrast. */
+.fit {
+  display: grid;
+  gap: 2px;
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin: 6px 0;
+  font-size: 14px;
+}
+.fit.ok {
+  background: #e3f0e4;
+}
+.fit.warn {
+  background: #fbeae6;
+}
+.fit .muted {
+  color: #4f6158;
+}
+.fit .checks {
+  margin: 4px 0;
+}
+.fit li,
+.member-summary dd {
+  overflow-wrap: anywhere;
+}
+.member-form .trip-profile button {
+  justify-self: start;
+  white-space: normal;
+  text-align: left;
+}
+/* The cash field carries a hint, so the fields beside it keep their height. */
+.claim-form .form-grid {
+  align-items: start;
+}
+/* The cash a holder can spend, under any live claim of theirs (round 5b). */
+.claim-cash {
+  display: grid;
+  gap: 4px;
+  flex-basis: 100%;
+  max-width: 560px;
+}
+.claim-cash label {
+  display: grid;
+  gap: 2px;
+}
+.claim-cash input {
+  width: 100%;
+  max-width: 200px;
+}
+.claim-cash button {
+  justify-self: start;
+}
+/* A refused value shown next to its own field (round 5b). */
+.field-error {
+  font-weight: normal;
+}
+/* The operator's list of seller names to check (round 5b). */
+.seller-names ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+.seller-names li {
+  margin: 4px 0;
+}
+.seller-names button {
+  margin-left: 8px;
 }

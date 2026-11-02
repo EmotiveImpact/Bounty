@@ -1,14 +1,18 @@
 // Who may reach the API. On your own computer it answers only requests
 // addressed to this machine, with no password. A hosted pilot (the app on
 // Vercel, the API on a small server) also names its public host names and
-// sets one shared password, because Bounty has no accounts yet and the
+// either turns on member accounts or sets one shared password, because the
 // database holds private notes, ledger amounts and member details.
 //
 //   BOUNTY_LISTEN_HOST   address to listen on (default 127.0.0.1)
 //   BOUNTY_PUBLIC_HOSTS  comma-separated host names the API may be reached as,
 //                        for example bounty.vercel.app,bounty-api.up.railway.app
-//   BOUNTY_PASSWORD      shared password, at least 16 characters; required
-//                        whenever the API listens beyond this machine
+//   BOUNTY_PASSWORD      shared password, at least 16 characters; needed
+//                        whenever the API listens beyond this machine,
+//                        unless DATABASE_URL turns on member accounts
+//   DATABASE_URL         Postgres (Neon) connection string for member
+//                        accounts; see accounts.mjs
+//   BOUNTY_INVITE_CODE   code new members enter to sign up
 //
 // On Vercel (VERCEL is set) the deployment's own host names, which Vercel
 // provides, are added to the public hosts, so only the password is needed.
@@ -40,12 +44,18 @@ export function accessConfig(env = process.env) {
   const password = env.BOUNTY_PASSWORD ? String(env.BOUNTY_PASSWORD) : null;
   if (password !== null && password.length < MIN_PASSWORD_LENGTH)
     throw Error(`BOUNTY_PASSWORD must be at least ${MIN_PASSWORD_LENGTH} characters`);
-  if ((!LOOPBACK.has(listenHost) || hosts.length) && !password)
+  // DATABASE_URL turns on member accounts (accounts.mjs), which replace the
+  // shared password.
+  const databaseUrl = env.DATABASE_URL ? String(env.DATABASE_URL).trim() : null;
+  const inviteCode = env.BOUNTY_INVITE_CODE ? String(env.BOUNTY_INVITE_CODE).trim() : null;
+  if (inviteCode !== null && inviteCode.length < 8)
+    throw Error("BOUNTY_INVITE_CODE must be at least 8 characters");
+  if ((!LOOPBACK.has(listenHost) || hosts.length) && !password && !databaseUrl)
     throw Error(
-      "Set BOUNTY_PASSWORD before listening beyond this machine or naming public hosts: " +
-        "Bounty has no accounts, so the password is the only thing keeping the data private",
+      "Set DATABASE_URL (member accounts) or BOUNTY_PASSWORD before listening beyond this machine " +
+        "or naming public hosts: one of them is what keeps the data private",
     );
-  return { listenHost, publicHosts: hosts, password };
+  return { listenHost, publicHosts: hosts, password: databaseUrl ? null : password, databaseUrl, inviteCode };
 }
 
 const digest = (value) => createHash("sha256").update(value).digest();
