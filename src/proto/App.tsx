@@ -26,6 +26,7 @@ import Scan from "../Scan";
 import TipsScreen from "./TipsScreen";
 import Admin from "./Admin";
 import PlansScreen, { PlanGate, PlanLine } from "./PlansScreen";
+import CrewScreen, { CrewBand } from "./CrewScreen";
 import { PageHead } from "../ui/kit";
 import { GoalsSettings } from "../Goals";
 import SignOff from "./SignOff";
@@ -62,7 +63,8 @@ export type View =
   | "watching"
   | "blocks"
   | "admin"
-  | "plans";
+  | "plans"
+  | "crew";
 
 // The address for each screen. The older screens keep their old names, so
 // links inside them such as #Planner still work.
@@ -81,6 +83,7 @@ const HASH: Record<View, string> = {
   blocks: "Blocks",
   admin: "Admin",
   plans: "Plans",
+  crew: "Crew",
 };
 /* When a find is saved the heart pops and a few short lines flick out
    around it, like Pinterest. Skipped for people who ask for reduced motion. */
@@ -1127,6 +1130,7 @@ export default function ProtoApp({
           items={rest}
           see="See all finds"
         />
+        <CrewBand go={(v) => go(v)} />
         {tip && (
           <section className="feature">
             <div>
@@ -2166,6 +2170,7 @@ export default function ProtoApp({
   else if (view === "tips") body = <TipsScreen go={(v) => go(v)} />;
   else if (view === "admin") body = <Admin />;
   else if (view === "plans") body = <PlansScreen />;
+  else if (view === "crew") body = <CrewScreen go={(v) => go(v)} />;
   else if (view === "research")
     body = (
       <PlanGate
@@ -2345,6 +2350,7 @@ function MegaMenu({ go }: { go: (v: View) => void }) {
         {it("profile", "Alerts", "What we tell you about")}
         {it("profile", "Profile and settings", "Area, travel, photo")}
         {it("plans", "Plans", "Your membership")}
+        {it("crew", "The crew", "Top scouts and levels")}
         <div className="mmpts">
           <small>Scout points · sample</small>
           <b>460 · Trusted</b>
