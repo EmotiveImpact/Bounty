@@ -1951,7 +1951,7 @@ export default function ProtoApp({
               <div className="tlist">
                 {stops.map(([shopName, s], i) => (
                   <React.Fragment key={shopName}>
-                    <div className="stop">
+                    <div className="tstop">
                       <span className="sn">{i + 1}</span>
                       <b>{shopName}</b>
                       <small>{s.mi !== null ? `${s.mi} mi` : ""}</small>

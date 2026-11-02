@@ -265,10 +265,10 @@
   background: var(--k-surface);
 }
 .rs .research-calculator .tier-priority-1,
-.rs .research-calculator .tier-priority-2 { box-shadow: inset 4px 0 0 var(--k-profit); }
+.rs .research-calculator .tier-priority-2 { box-shadow: inset 0 0 0 1px var(--k-profit); }
 .rs .research-calculator .tier-watch,
-.rs .research-calculator .tier-review { box-shadow: inset 4px 0 0 var(--k-warn); }
-.rs .research-calculator .tier-reject { box-shadow: inset 4px 0 0 var(--k-loss); }
+.rs .research-calculator .tier-review { box-shadow: inset 0 0 0 1px var(--k-warn); }
+.rs .research-calculator .tier-reject { box-shadow: inset 0 0 0 1px var(--k-loss); }
 
 /* Tables */
 .rs .research-calculator .scroll { overflow-x: auto; border-radius: 14px; }
