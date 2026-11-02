@@ -7,6 +7,7 @@ const { createApi } = await import("../server/app.mjs");
 const { database } = await import("../server/db.mjs");
 const { accessConfig } = await import("../server/access.mjs");
 const { freshPrices } = await import("../server/demo.mjs");
+const { seedSampleTips } = await import("../server/sample-tips.mjs");
 const { accounts, neonStore } = await import("../server/accounts.mjs");
 
 let handler;
@@ -20,6 +21,7 @@ try {
   const members = databaseUrl ? accounts(await neonStore(databaseUrl), { inviteCode }) : null;
   const db = database();
   const api = createApi(db, { publicHosts, password, members });
+  seedSampleTips(db);
   const beforeRequest = freshPrices(db);
   handler = async (req, res) => {
     await beforeRequest();
