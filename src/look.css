@@ -19,7 +19,7 @@
   --lime: #c8f26b;
   --accent: #ffe680;
   --accent-ink: #120f1d;
-  --display: "Barlow Condensed", "Arial Narrow", sans-serif;
+  --display: "Cal Sans", system-ui, sans-serif;
   --radius: 18px;
   --shadow: 0 1px 2px rgba(18, 15, 29, 0.05);
   --shadow-lg: 0 12px 34px rgba(18, 15, 29, 0.12);
@@ -421,7 +421,8 @@
   /* ---------- Page ---------- */
   .page-head h1 {
     font-family: var(--display);
-    font-weight: 800;
+    font-variation-settings: "GEOM" 50, "opsz" 45;
+    font-weight: 500;
     font-size: 46px;
     line-height: 1;
     letter-spacing: -0.01em;
@@ -433,8 +434,8 @@
     grid-template-columns: minmax(240px, 0.9fr) 2.2fr;
     gap: 28px;
     align-items: center;
-    background: var(--band);
-    color: #fff;
+    background: var(--lime);
+    color: #111;
     border-radius: 32px;
     padding: 30px 30px 30px 36px;
   }
@@ -446,21 +447,22 @@
   .topdeals h2 {
     margin: 0;
     font-family: var(--display);
-    font-weight: 800;
+    font-variation-settings: "GEOM" 50, "opsz" 45;
+    font-weight: 500;
     font-size: 54px;
     line-height: 0.95;
   }
   .topdeals h2 em {
     font-style: normal;
-    color: var(--lime);
+    color: #111;
     display: block;
   }
   .topdeals p {
     margin: 0;
-    color: rgba(255, 255, 255, 0.85);
+    color: rgba(17, 17, 17, 0.85);
   }
   .topdeals-stats b {
-    color: #fff;
+    color: #111;
     font-size: 17px;
     margin-left: 10px;
   }
@@ -603,16 +605,17 @@
     display: inline !important;
   }
   .deals .topdeals h2 {
-    color: #fff;
+    color: #111;
     font-family: var(--display);
+    font-variation-settings: "GEOM" 50, "opsz" 45;
     font-size: 54px;
-    font-weight: 800;
+    font-weight: 500;
     line-height: 0.95;
     letter-spacing: 0;
   }
   .deals .topdeals h2 em {
     font: inherit;
-    color: var(--lime);
+    color: #111;
   }
   .topdeals-stats {
     display: flex;

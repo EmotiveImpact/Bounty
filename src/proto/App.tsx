@@ -20,6 +20,17 @@ import { savedExtras, type Deal } from "../Deals";
 import { Ico } from "./icons";
 import "./proto.css";
 import "./proto-extra.css";
+import "./proto-bold.css";
+
+// The logo in every slot. One place to change when the new logo arrives.
+function Wordmark() {
+  return (
+    <span className="wordmark" aria-label="Bounty London">
+      <b aria-hidden="true">BOUNTY</b>
+      <small aria-hidden="true">LONDON</small>
+    </span>
+  );
+}
 
 // The app shell and the Deals, item, trip and profile screens, ported from the
 // agreed desktop mock. Every figure comes from the deals API. Parts the app
@@ -497,7 +508,7 @@ export default function ProtoApp({
           aria-label="Bounty home"
           onClick={() => showCat(null)}
         >
-          <span className="mark">B</span>Bounty
+          <Wordmark />
         </button>
       </div>
       {nav("scan", "Scan", "scan")}
@@ -566,7 +577,7 @@ export default function ProtoApp({
     <header className="top">
       <div className="topin pin">
         <button type="button" className="brand" onClick={() => showCat(null)}>
-          <span className="mark">B</span>Bounty
+          <Wordmark />
         </button>
         <button
           type="button"
@@ -584,7 +595,7 @@ export default function ProtoApp({
             aria-label="Bounty menu"
             onClick={() => setPop(pop === "menu" ? null : "menu")}
           >
-            <span className="mark">B</span>Bounty
+            <Wordmark />
             <span className="pbm">
               <Ico n="menu" />
               <span>Menu</span>
@@ -1964,7 +1975,7 @@ export default function ProtoApp({
   const onboarding = onboard ? (
     <div className="obscrim">
       <div className="ob" role="dialog" aria-label="Set up Bounty">
-        <span className="obmark">B</span>
+        <img className="obhero" src="/campaign.jpg" alt="Six Bounty members in bold outfits with coupons, a phone, a calculator, shopping bags and a parcel" />
         {obStep === 1 ? (
           <>
             <small>1 of 2</small>
@@ -2081,7 +2092,7 @@ export default function ProtoApp({
     );
 
   return (
-    <div ref={rootRef} className="bx side-yt">
+    <div ref={rootRef} className="bx side-yt" data-tab={view}>
       <div className={"frame" + (open ? " open" : "")}>
         {strip}
         <div className="scrim" onClick={() => setOpen(false)} />

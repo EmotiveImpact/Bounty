@@ -853,31 +853,36 @@ h3 .badge {
 .planner-finds {
   display: grid;
   gap: 14px;
-  background: linear-gradient(135deg, #0b3d2e, #0f5a43);
-  border-radius: 18px;
-  padding: 20px;
-  color: #fff;
+  background: #e4ecb0;
+  border-radius: 24px;
+  padding: 22px;
+  color: #111;
   min-width: 0;
 }
 .planner-finds .planner-head {
   margin: 0;
 }
 .planner-finds .planner-head h2 {
-  color: #fff;
-  font-size: 24px;
-  font-weight: 700;
+  color: #111;
+  font-family: var(--display);
+  font-variation-settings: "GEOM" 50, "opsz" 45;
+  font-size: 30px;
+  font-weight: 500;
 }
 .planner-finds .planner-head h2 span {
-  color: #6ee7b7;
+  color: #111;
+  background: #fff;
+  border-radius: 0.18em;
+  padding: 0 0.12em;
 }
 .planner-finds .muted,
 .planner-finds > p {
-  color: #c9e9dc;
+  color: #3a3a3a;
 }
 .planner-finds .planner-empty {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.25);
-  color: #e6f4ee;
+  background: rgba(255, 255, 255, 0.6);
+  border-color: rgba(17, 17, 17, 0.2);
+  color: #111;
 }
 .planner-cats {
   display: flex;
@@ -891,8 +896,8 @@ h3 .badge {
   gap: 4px;
   min-width: 92px;
   background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.25);
-  color: #e6f4ee;
+  border: 1px solid rgba(17, 17, 17, 0.2);
+  color: #111;
   border-radius: 12px;
   padding: 10px 12px 8px;
   font-weight: 500;
@@ -903,22 +908,22 @@ h3 .badge {
   height: 22px;
 }
 .planner-cats button:hover:not(:disabled) {
-  border-color: #fff;
+  border-color: #111;
 }
 .planner-cats button[aria-pressed="true"] {
-  background: #fff;
-  border-color: #fff;
-  color: #0d1726;
+  background: #111;
+  border-color: #111;
+  color: #fff;
 }
 .planner-finds .planner-sort button {
   background: transparent;
-  color: #e6f4ee;
-  border-color: rgba(255, 255, 255, 0.3);
+  color: #111;
+  border-color: rgba(17, 17, 17, 0.25);
 }
 .planner-finds .planner-sort button[aria-pressed="true"] {
-  background: #fff;
-  color: #0d1726;
-  border-color: #fff;
+  background: #111;
+  color: #fff;
+  border-color: #111;
 }
 .planner-finds .planner-shop select {
   background: #fff;
@@ -928,9 +933,9 @@ h3 .badge {
 .planner-finds .planner-trip.active,
 .planner-finds .planner-trip.active:hover:not(:disabled) {
   box-shadow:
-    0 0 0 3px #6ee7b7,
+    0 0 0 3px #111,
     var(--shadow-lg);
-  border-color: #6ee7b7;
+  border-color: #111;
 }
 .planner-finds .planner-grid {
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 270px), 1fr));
@@ -1018,7 +1023,7 @@ h3 .badge {
     margin-inline: -4px;
   }
   .planner-finds .planner-head h2 {
-    font-size: 20px;
+    font-size: 24px;
   }
 }
 /* Compact cards, as on Kelkoo: the rest is in the trip details. */

@@ -363,24 +363,24 @@
 
 /* Offer search: a search band in the spirit of a comparison site. */
 .research-calculator fieldset.research-search {
-  background: var(--band);
+  background: #ffe58a;
   border: 0;
-  border-radius: var(--radius);
-  padding: 18px 20px 16px;
+  border-radius: 24px;
+  padding: 20px 22px 18px;
   margin-top: 16px;
-  color: #fff;
+  color: #111;
 }
 .research-search legend {
   float: left;
   width: 100%;
   padding: 0;
   margin-bottom: 8px;
-  color: #c6d0dd;
+  color: #3a3a3a;
   font-size: 12.5px;
 }
 .research-search > label {
   clear: both;
-  color: #fff;
+  color: #111;
   font-size: 18px;
   font-weight: 650;
   letter-spacing: -0.01em;
@@ -398,7 +398,7 @@
 }
 .research-search > p.muted,
 .research-search > p {
-  color: #c6d0dd;
+  color: #3a3a3a;
   margin: 10px 0 0;
 }
 .research-search .offer-list {
