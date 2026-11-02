@@ -127,6 +127,7 @@
   }
 }
 
-/* The confetti layer sits on the page body, outside the app shell. */
-.confetti { position: fixed; width: 0; height: 0; pointer-events: none; z-index: 9999; }
-.confetti i { position: absolute; left: 0; top: 0; display: block; }
+/* Rays around a heart that was just saved. They sit on the page body,
+   outside the app shell. Each ray grows from its bottom edge, outwards. */
+.rays { position: fixed; width: 0; height: 0; pointer-events: none; z-index: 9999; }
+.rays i { position: absolute; left: -1px; top: -7px; width: 2px; height: 7px; border-radius: 2px; background: #ff7cc0; transform-origin: 50% 100%; }

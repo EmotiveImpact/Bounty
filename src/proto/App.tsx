@@ -65,51 +65,44 @@ const HASH: Record<View, string> = {
   profile: "Profile",
   watching: "Saved",
 };
-/* A little confetti burst from a button, in the campaign colours, when a
-   find is saved. Skipped for people who ask for reduced motion. */
-const CONFETTI = ["#b8ec3a", "#7fb3ff", "#8098ff", "#ff7cc0", "#ff9f5a", "#ffd23f", "#c3a6ff"];
-function confetti(from: HTMLElement) {
+/* When a find is saved the heart pops and a few short lines flick out
+   around it, like Pinterest. Skipped for people who ask for reduced motion. */
+function heartRays(from: HTMLElement) {
   if (typeof window === "undefined" || !from.animate) return;
   if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
-  from.animate(
-    [{ transform: "scale(1)" }, { transform: "scale(1.25)" }, { transform: "scale(0.95)" }, { transform: "scale(1)" }],
-    { duration: 420, easing: "cubic-bezier(.2,.9,.3,1.4)" },
+  const heart = (from.querySelector("svg") as SVGElement | null) ?? from;
+  heart.animate(
+    [{ transform: "scale(1)" }, { transform: "scale(0.8)", offset: 0.25 }, { transform: "scale(1.3)", offset: 0.6 }, { transform: "scale(1)" }],
+    { duration: 450, easing: "ease-out" },
   );
-  const r = (from.querySelector("svg") ?? from).getBoundingClientRect();
+  const r = heart.getBoundingClientRect();
   const layer = document.createElement("div");
-  layer.className = "confetti";
+  layer.className = "rays";
   layer.setAttribute("aria-hidden", "true");
   layer.style.left = `${r.left + r.width / 2}px`;
   layer.style.top = `${r.top + r.height / 2}px`;
   document.body.appendChild(layer);
-  const n = 22;
+  const n = 8;
+  const start = r.width * 0.65;
   const runs: Animation[] = [];
   for (let i = 0; i < n; i++) {
-    const bit = document.createElement("i");
-    const round = i % 3 === 0;
-    bit.style.background = CONFETTI[i % CONFETTI.length];
-    bit.style.width = round ? "8px" : "7px";
-    bit.style.height = round ? "8px" : "13px";
-    bit.style.borderRadius = round ? "999px" : "2px";
-    layer.appendChild(bit);
-    const angle = (i / n) * Math.PI * 2 + Math.random() * 0.4;
-    const dist = 40 + Math.random() * 34;
-    const x = Math.cos(angle) * dist;
-    const y = Math.sin(angle) * dist - 10;
-    const spin = (Math.random() - 0.5) * 540;
+    const ray = document.createElement("i");
+    layer.appendChild(ray);
+    const deg = (360 / n) * i;
+    const at = (d: number, len: number) =>
+      `rotate(${deg}deg) translateY(-${d}px) scaleY(${len})`;
     runs.push(
-      bit.animate(
+      ray.animate(
         [
-          // Bursts out fast, then drifts down and fades.
-          { transform: "translate(-50%, -50%) scale(0.6) rotate(0deg)", opacity: 1, easing: "cubic-bezier(.15,.7,.3,1)" },
-          { transform: `translate(calc(-50% + ${x}px), calc(-50% + ${y}px)) scale(1) rotate(${spin / 2}deg)`, opacity: 1, offset: 0.45, easing: "ease-in" },
-          { transform: `translate(calc(-50% + ${x * 1.15}px), calc(-50% + ${y + 26}px)) scale(0.9) rotate(${spin}deg)`, opacity: 0 },
+          { transform: at(start, 0.2), opacity: 0 },
+          { transform: at(start + 3, 1), opacity: 1, offset: 0.35 },
+          { transform: at(start + 9, 0.15), opacity: 0 },
         ],
-        { duration: 850 + Math.random() * 250, fill: "forwards" },
+        { duration: 480, delay: 110, easing: "cubic-bezier(.2,.7,.3,1)", fill: "both" },
       ),
     );
   }
-  Promise.all(runs.map((a) => a.finished)).finally(() => layer.remove());
+  Promise.all(runs.map((x) => x.finished)).finally(() => layer.remove());
 }
 
 function fromHash(): { view: View; sku: string | null } {
@@ -483,7 +476,7 @@ export default function ProtoApp({
           aria-label={saved[d.sku] ? "Remove from saved" : "Save"}
           onClick={(e) => {
             e.stopPropagation();
-            if (!saved[d.sku]) confetti(e.currentTarget);
+            if (!saved[d.sku]) heartRays(e.currentTarget);
             toggleSaved(d.sku);
           }}
         >
@@ -1412,7 +1405,7 @@ export default function ProtoApp({
                 className={"bt ghost savebt" + (saved[d.sku] ? " on" : "")}
                 aria-pressed={!!saved[d.sku]}
                 onClick={(e) => {
-                  if (!saved[d.sku]) confetti(e.currentTarget);
+                  if (!saved[d.sku]) heartRays(e.currentTarget);
                   toggleSaved(d.sku);
                 }}
               >
