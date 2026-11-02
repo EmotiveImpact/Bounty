@@ -19,6 +19,7 @@ import {
   Segmented,
   Stepper,
 } from "./ui/kit";
+import { CrewArt } from "./proto/CrewArt";
 import "./Scan.css";
 
 // Scan in the shop: a barcode (camera or typed) and the price on the sticker
@@ -206,9 +207,12 @@ export default function Scan() {
             )
           ) : (
             !error && (
-              <div className="sc-wait">
-                <span className="k-display">Ready when you are</span>
-                <p>Your answer shows here: what you keep, what it sells for, and the price to walk away above.</p>
+              <div className="sc-wait has-art">
+                <div className="sc-wait-text">
+                  <span className="k-display">Ready when you are</span>
+                  <p>Your answer shows here: what you keep, what it sells for, and the price to walk away above.</p>
+                </div>
+                <CrewArt id="scout" />
               </div>
             )
           )}

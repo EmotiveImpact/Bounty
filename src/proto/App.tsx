@@ -16,6 +16,7 @@ import {
   type Lens,
 } from "../api";
 import { BuyingRules, ItemTile, byMode } from "../Planner";
+import { CrewArt } from "./CrewArt";
 import { savedExtras, type Deal } from "../Deals";
 import { Ico } from "./icons";
 import MoneyScreen from "./Money";
@@ -2062,7 +2063,11 @@ export default function ProtoApp({
   const onboarding = onboard ? (
     <div className="obscrim">
       <div className="ob" role="dialog" aria-label="Set up Bounty">
-        <img className="obhero" src="/campaign.jpg" alt="Six Bounty members in bold outfits with coupons, a phone, a calculator, shopping bags and a parcel" />
+        <div className="ob-crew" role="img" aria-label="The Bounty crew: the Boss, the Scout, the Hauler, the Insider, the Fixer and the Negotiator">
+          {(["boss", "scout", "hauler", "insider", "fixer", "negotiator"] as const).map((id) => (
+            <CrewArt key={id} id={id} pose={false} />
+          ))}
+        </div>
         {obStep === 1 ? (
           <>
             <small>1 of 2</small>

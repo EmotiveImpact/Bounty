@@ -22,6 +22,7 @@ import {
   Rows,
   Stepper,
 } from "../ui/kit";
+import { CrewArt } from "./CrewArt";
 import "./trip.css";
 
 type Timing = { daysToSell: number; deliveryDays: number; payoutDelayDays: number };
@@ -273,6 +274,7 @@ export default function TripPage({
         {head}
         <div className="k-split">
           <Empty
+            art={<CrewArt id="hauler" />}
             title="Nothing on your trip yet"
             text="Add finds from Deals with the + button, or let Bounty fill a trip for the cash you have."
             action={

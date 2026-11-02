@@ -1,0 +1,48 @@
+/* Crew characters on other screens (CrewArt.tsx). */
+.crew-art {
+  display: block;
+  overflow: hidden;
+  background: #fff;
+}
+.crew-art img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: 50% 12%;
+  /* Lifts the studio's off-white to pure white. */
+  filter: brightness(1.04);
+}
+
+/* Empty screens: the character beside the words. */
+.k-empty.has-art { grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 20px; justify-items: stretch; }
+.k-empty-text { display: grid; gap: 10px; justify-items: start; min-width: 0; }
+.k-empty .crew-art { width: 150px; height: 190px; border-radius: 20px; }
+@media (max-width: 640px) {
+  .k-empty.has-art { padding: 22px; gap: 14px; }
+  .k-empty .crew-art { width: 96px; height: 128px; border-radius: 16px; }
+}
+
+/* Welcome card: the six in a row, standing. */
+.ob-crew { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0; margin: -30px -30px 4px; height: 210px; background: #fff; border-bottom: 1px solid var(--k-line, #eee); }
+.ob-crew .crew-art img { object-position: 50% 30%; }
+@media (max-width: 640px) {
+  .ob-crew { height: 170px; }
+}
+
+/* Plans: the character stands in the coloured top of each plan. */
+.pl-top.has-art { grid-template-columns: minmax(0, 1fr) 88px; column-gap: 12px; padding-bottom: 0; }
+.pl-top.has-art > .pl-name,
+.pl-top.has-art > p { grid-column: 1; }
+.pl-top.has-art > p { padding-bottom: 20px; }
+.pl-top .crew-art { grid-column: 2; grid-row: 1 / span 2; align-self: end; width: 88px; height: 118px; border-radius: 16px 16px 0 0; }
+.pl-top .crew-art img { object-position: 50% 8%; }
+
+/* Scan, before the first answer: the Scout beside the words. */
+.sc-wait.has-art { grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 20px; }
+.sc-wait-text { display: grid; gap: 8px; min-width: 0; }
+.sc-wait .crew-art { width: 150px; height: 190px; border-radius: 20px; }
+@media (max-width: 640px) {
+  .sc-wait.has-art { padding: 22px; gap: 14px; }
+  .sc-wait .crew-art { width: 96px; height: 128px; border-radius: 16px; }
+}

@@ -459,12 +459,30 @@ export function Notice({
 }
 
 /** What will appear here, and the one step to get there. */
-export function Empty({ title, text, action }: { title: string; text: React.ReactNode; action?: React.ReactNode }) {
-  return (
-    <div className="k-empty">
+export function Empty({
+  title,
+  text,
+  action,
+  art,
+}: {
+  title: string;
+  text: React.ReactNode;
+  action?: React.ReactNode;
+  /** A picture beside the words, such as a crew character. */
+  art?: React.ReactNode;
+}) {
+  const words = (
+    <>
       <h3 className="k-display">{title}</h3>
       <p>{text}</p>
       {action}
+    </>
+  );
+  if (!art) return <div className="k-empty">{words}</div>;
+  return (
+    <div className="k-empty has-art">
+      <div className="k-empty-text">{words}</div>
+      {art}
     </div>
   );
 }

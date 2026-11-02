@@ -30,6 +30,7 @@ import {
   type ChipTone,
   type MenuItem,
 } from "../ui/kit";
+import { CrewArt } from "./CrewArt";
 import "./stock.css";
 
 type EntryType = "receipt" | "sale" | "payout" | "expense" | "refund" | "work" | "saving";
@@ -236,6 +237,7 @@ function Stock({ legacy, go }: { legacy: React.ReactNode; go: (v: "money" | "dea
   const openList =
     trips && openTrips.length === 0 ? (
       <Empty
+        art={<CrewArt id="fixer" />}
         title="No open trips"
         text="Plan a trip from Deals, tick things off in the shop, then press Finish trip. What you got lands here, ready to sell."
         action={
