@@ -96,3 +96,80 @@
     }
   }
 }
+
+/* Finish trip sign-off. */
+@scope (.bx) to (.legacy) {
+  .signoff {
+    padding: 4px 18px 16px;
+  }
+  .so-lead,
+  .so-empty {
+    margin: 4px 0 12px;
+    font-size: 14px;
+    color: var(--ink);
+  }
+  .so-rows {
+    display: grid;
+    gap: 10px;
+    max-height: 42vh;
+    overflow: auto;
+  }
+  .so-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 64px 100px;
+    gap: 10px;
+    align-items: end;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .so-name b {
+    display: block;
+    font-size: 14px;
+  }
+  .so-name small {
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .so-row label,
+  .so-file {
+    display: grid;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .so-row input {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 15px;
+    color: var(--ink);
+    background: #fff;
+  }
+  .so-row input[aria-invalid="true"] {
+    border-color: #d6336c;
+  }
+  .so-file {
+    margin: 12px 0 4px;
+  }
+  .so-file input {
+    font-size: 13px;
+    color: var(--ink);
+  }
+  .so-total {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin: 12px 0 4px;
+    font-size: 14px;
+  }
+  .so-total b {
+    font-size: 20px;
+  }
+  .so-error {
+    color: #b42318;
+    font-size: 13px;
+    margin: 8px 0 0;
+  }
+}
