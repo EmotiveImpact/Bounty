@@ -13,8 +13,8 @@
   .fillbar small { font-size: 12.5px; }
   .cashin { display: grid; gap: 3px; font-size: 12px; font-weight: 600; }
   .cashin input { height: 38px; width: 110px; border: 1.5px solid var(--line-2, #d0d4da); border-radius: 10px; padding: 0 10px; background: #fff; font: inherit; }
-  .tempty { display: grid; gap: 10px; justify-items: start; }
-  .tempty p { margin: 0; }
+  .tnone { display: grid; gap: 10px; justify-items: start; }
+  .tnone p { margin: 0; }
   .panel.worth { display: grid; gap: 14px; border-color: transparent; background: var(--tile, #f3f3f5); }
   .panel.worth.ok { background: #e3f3ea; }
   .panel.worth.thin { background: #fff4d6; }

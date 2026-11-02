@@ -1,0 +1,49 @@
+/* Stock screen (proto/StockScreen.tsx), ported from the full-site mock. */
+@scope (.bx) to (.legacy) {
+  .muted { color: var(--muted); }
+  .kept { color: var(--brand); }
+  .bt.sm { height: 34px; padding: 0 14px; font-size: 13px; }
+  .stats.three { grid-template-columns: repeat(3, 1fr); }
+  .stats.three.sstats { margin-bottom: 20px; }
+  .sempty { display: grid; gap: 10px; justify-items: start; }
+  .sempty p { margin: 0; }
+  .strips { display: grid; gap: 20px; }
+  .panel.scard { display: grid; gap: 14px; }
+  .shead { display: flex; justify-content: space-between; gap: 16px; align-items: start; flex-wrap: wrap; }
+  .shead h3 { margin: 0 0 6px; font-size: 18px; }
+  .stag { display: inline-block; border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: 700; background: #ececf0; margin-right: 6px; }
+  .stag.bought { background: var(--c-peach, #ffcfa8); }
+  .stag.sell { background: var(--c-sky, #cfe4ff); }
+  .stag.wait { background: var(--c-butter, #ffe58a); }
+  .stag.done { background: var(--c-lime, #d6f86b); }
+  .sfig { display: flex; gap: 22px; }
+  .sfig span { display: grid; text-align: right; }
+  .sfig small { color: var(--muted); font-size: 12px; }
+  .sfig b { font-size: 20px; }
+  .sitems { display: grid; }
+  .sitem { display: grid; grid-template-columns: 1fr 140px 60px auto; gap: 14px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
+  .sitem .tname small { display: block; }
+  .sprog { height: 8px; border-radius: 99px; background: #e3e7ec; overflow: hidden; }
+  .sprog i { display: block; height: 100%; background: var(--brand); border-radius: 99px; }
+  .sleft { font-size: 13px; font-weight: 600; text-align: right; }
+  .sacts { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chipbtn { border: 1.5px solid var(--line-2, #d0d4da); background: #fff; border-radius: 999px; padding: 6px 14px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .chipbtn[aria-pressed="true"] { background: var(--tab); border-color: var(--tab); }
+  .squick { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; background: var(--tile, #f3f3f5); border-radius: 16px; padding: 14px; }
+  .squick label { display: grid; gap: 4px; font-size: 12px; font-weight: 600; flex: 0 1 140px; }
+  .squick label.wide, .squick small.wide { flex: 1 1 220px; }
+  .squick input, .squick select { height: 38px; border: 1.5px solid var(--line-2, #d0d4da); border-radius: 10px; padding: 0 10px; background: #fff; font: inherit; min-width: 0; }
+  .squick input[type="file"] { padding: 6px 8px; height: auto; }
+  .sbtns { display: flex; gap: 8px; }
+  .serr { flex-basis: 100%; margin: 0; color: #b42318; font-size: 13px; }
+  .sclosed { margin-top: 20px; }
+  .stockmore { margin-top: 32px; }
+  .stockmore h2 { font-family: var(--display); font-weight: 500; font-size: 30px; margin: 0 0 4px; }
+  .stockmore p { margin: 0 0 14px; color: var(--muted); }
+  @media (max-width: 760px) {
+    .stats.three { grid-template-columns: 1fr; }
+    .sitem { grid-template-columns: 1fr auto; }
+    .sprog { grid-column: 1 / -1; order: 3; }
+    .sitem .bt { grid-column: 1 / -1; order: 4; justify-self: start; }
+  }
+}

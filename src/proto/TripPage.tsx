@@ -239,7 +239,7 @@ export default function TripPage({
       <>
         {head}
         <div className="tripgrid">
-          <div className="panel tempty">
+          <div className="panel tnone">
             <h3>Nothing on your trip yet</h3>
             <p className="muted">
               Add finds from Deals with the + button, or let Bounty fill a trip for the cash you have.

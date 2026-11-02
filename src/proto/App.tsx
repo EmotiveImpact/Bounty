@@ -20,6 +20,7 @@ import { savedExtras, type Deal } from "../Deals";
 import { Ico } from "./icons";
 import MoneyScreen from "./Money";
 import TripPage from "./TripPage";
+import StockScreen from "./StockScreen";
 import { GoalsSettings } from "../Goals";
 import SignOff from "./SignOff";
 import "./proto.css";
@@ -2180,6 +2181,8 @@ export default function ProtoApp({
         </section>
       </>
     );
+  else if (view === "stock")
+    body = <StockScreen legacy={legacy(view)} go={(v) => go(v)} />;
   else if (view === "money")
     body = (
       <MoneyScreen
@@ -2272,14 +2275,12 @@ const CHATS: [string, string, string, string][] = [
 const LEGACY_TITLE: Partial<Record<View, string>> = {
   scan: "Scan",
   tips: "Live tips",
-  stock: "Stock and sales",
   research: "Research",
   sources: "Sources",
 };
 const LEGACY_LEAD: Partial<Record<View, string>> = {
   scan: "Scan or type a barcode and add the sticker price for a straight answer: buy, think or leave.",
   tips: "Shelf tips with a set number of places, so each one stays worth the trip.",
-  stock: "Everything you bought, from the shelf to the payout.",
   research: "Match an offer to exact sold evidence before you buy.",
   sources:
     "Where prices come from, when they were checked and what is still sample.",
