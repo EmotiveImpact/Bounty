@@ -80,6 +80,9 @@ export function postgresStore(query) {
         created_at timestamptz NOT NULL DEFAULT now(),
         expires_at timestamptz NOT NULL
       )`);
+      // The membership plan (plans.mjs) belongs to the account.
+      await query("ALTER TABLE bounty_users ADD COLUMN IF NOT EXISTS plan text", []);
+      await query("ALTER TABLE bounty_users ADD COLUMN IF NOT EXISTS plan_since timestamptz", []);
     })().catch((error) => {
       ready = undefined;
       throw error;
@@ -116,8 +119,24 @@ export function postgresStore(query) {
     async deleteSession(hash) {
       await run("DELETE FROM bounty_sessions WHERE token_hash = $1", [hash]);
     },
+    async plan(userId) {
+      const rows = await run("SELECT plan, plan_since FROM bounty_users WHERE id = $1", [userId]);
+      return rows[0] ? planRow(rows[0]) : null;
+    },
+    async setPlan(userId, plan, since) {
+      const rows = await run(
+        "UPDATE bounty_users SET plan = $2, plan_since = $3 WHERE id = $1 RETURNING plan, plan_since",
+        [userId, plan, since],
+      );
+      return rows[0] ? planRow(rows[0]) : null;
+    },
   };
 }
+
+const planRow = (row) => ({
+  plan: row.plan || null,
+  since: row.plan_since ? new Date(row.plan_since).toISOString() : null,
+});
 
 /** Postgres store for a Neon connection string, over Neon's HTTP driver. */
 export async function neonStore(url) {
@@ -213,5 +232,12 @@ export function accounts(store, { inviteCode = null, now = () => Date.now() } = 
     },
 
     publicUser,
+
+    /** The member's plan row { plan, since }, or null. */
+    plan: (userId) => (store.plan ? store.plan(userId) : null),
+    setPlan(userId, plan, since) {
+      if (!store.setPlan) throw new HttpError(503, "Plans cannot be saved on this server");
+      return store.setPlan(userId, plan, since);
+    },
   };
 }

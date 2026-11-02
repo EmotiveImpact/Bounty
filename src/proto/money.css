@@ -1,0 +1,40 @@
+/* Money layout (proto/Money.tsx). Pieces come from src/ui/kit.css. */
+.mn { display: grid; gap: 22px; font-family: var(--k-sans); }
+.mn-p { margin: 0; font: 400 14px/1.5 var(--k-sans); color: var(--k-muted); }
+.mn-p .k-btn.text, .mn-small .k-btn.text { font-size: inherit; }
+.mn-small { margin: 0; font: 400 12.5px/1.55 var(--k-sans); color: var(--k-muted); }
+.mn-hero { gap: 20px; }
+.mn-herotop { display: flex; justify-content: space-between; align-items: flex-end; gap: 20px; flex-wrap: wrap; }
+.mn-herotop > div:first-child { display: grid; gap: 6px; min-width: 0; }
+.mn-big { font-size: clamp(56px, 8vw, 84px); line-height: 0.95; color: var(--k-profit); }
+.mn-bars { display: flex; align-items: flex-end; gap: 10px; height: 140px; }
+.mn-bars > div { display: grid; justify-items: center; gap: 6px; align-content: end; height: 100%; width: 48px; }
+.mn-bars i { display: block; width: 100%; border-radius: 10px; background: var(--k-track); }
+.mn-bars .now i { background: var(--k-candy); }
+.mn-bars span { font: 600 11.5px/1 var(--k-sans); color: var(--k-muted); white-space: nowrap; }
+.mn-bars small { font: 500 12px/1 var(--k-sans); color: var(--k-muted); }
+.mn-bars .now small { color: var(--k-ink); font-weight: 700; }
+.mn-target { display: grid; gap: 6px; justify-items: start; }
+.mn-target .k-meter { width: 100%; }
+.mn-goal { display: grid; gap: 6px; padding-top: 4px; }
+.mn-goal + .mn-goal { border-top: 1px solid var(--k-line); padding-top: 14px; }
+.mn-goalfoot { display: flex; justify-content: space-between; align-items: center; gap: 10px; font: 400 12.5px/1.4 var(--k-sans); color: var(--k-muted); }
+.mn-goalfoot .k-btn.text { font-size: 12.5px; color: var(--k-muted); }
+.mn-chart { width: 100%; height: auto; display: block; }
+.mn-sum { display: grid; }
+.mn-sum > div { display: flex; justify-content: space-between; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--k-line); font: 400 14px/1.35 var(--k-sans); color: var(--k-text); }
+.mn-sum > div:last-child { border-bottom: 0; }
+.mn-sum b { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.mn-sum .profit b { color: var(--k-profit); }
+.mn-even { grid-template-columns: 1fr 1fr; }
+@media (max-width: 760px) { .mn-even { grid-template-columns: 1fr; } }
+@media (max-width: 640px) {
+  .mn-bars { width: 100%; justify-content: space-between; height: 120px; }
+  .mn-pair { grid-template-columns: 1fr; }
+}
+
+/* Year-end export (TaxExport.tsx) */
+.mn-export { display: grid; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--k-line); }
+.mn-export-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.mn-export-year { width: auto; min-width: 0; flex: 1 1 180px; }
+.mn-export .k-btn.text { justify-self: start; }

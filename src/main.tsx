@@ -4,7 +4,7 @@ import "./style.css";
 import "./look.css";
 import Scan from "./Scan";
 import Planner from "./Planner";
-import Goals from "./Goals";
+import { BasketSection } from "./Goals";
 import Research from "./Research";
 import { clearResearchDraft } from "./ResearchCalculator";
 import Bounties from "./Bounties";
@@ -12,16 +12,35 @@ import Ledger from "./Ledger";
 import Sources from "./Sources";
 import ProtoApp, { type View } from "./proto/App";
 import SignIn, { type Member } from "./SignIn";
+import { reloadPlans } from "./plans";
 import { SIGN_IN_EVENT } from "./api";
+
+// The trip planner, with the several-items basket plan under it. Money has
+// its own screen in the new shell (proto/Money.tsx).
+function PlannerPage() {
+  return (
+    <>
+      <Planner />
+      <div className="planner goals">
+        <BasketSection />
+      </div>
+    </>
+  );
+}
+
+// Stock's full records, without the month summary and tax note that the
+// new Stock and Money screens already show.
+function StockRecords() {
+  return <Ledger bare />;
+}
 
 // The older screens, shown inside the new shell until each is ported.
 const LEGACY: Partial<Record<View, React.ComponentType>> = {
   scan: Scan,
-  planner: Planner,
-  money: Goals,
+  planner: PlannerPage,
   research: Research,
   tips: Bounties,
-  stock: Ledger,
+  stock: StockRecords,
   sources: Sources,
 };
 
@@ -103,6 +122,7 @@ function Root() {
                     body: "{}",
                   }).catch(() => undefined);
                   setAuth({ ...auth, member: null });
+                  reloadPlans();
                 },
               }
             : undefined
@@ -112,7 +132,7 @@ function Root() {
         <SignIn
           inviteOpen={auth.inviteOpen}
           onClose={close}
-          onSignedIn={(member) => (setAuth({ ...auth, required: true, member }), setSigningIn(false))}
+          onSignedIn={(member) => (setAuth({ ...auth, required: true, member }), setSigningIn(false), reloadPlans())}
         />
       )}
     </>

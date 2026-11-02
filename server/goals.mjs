@@ -31,6 +31,7 @@ import {
   offerDemand,
   sameArea,
   unitThresholdFailures,
+  unknownJourney,
 } from "./catalog.mjs";
 import { getTrip, listTrips } from "./ledger.mjs";
 
@@ -537,11 +538,15 @@ const better = (a, b) => b.contribution - a.contribution || (b.hourly ?? -Infini
  * below is never recommended. `timing` at the top level is the payout for
  * one unit.
  *
- * A blank public transport fare is a missing input, never a free journey:
- * by public transport with no fare entered, no basket is built. An offer
- * that would otherwise be searched is excluded (not rejected) with
- * FARE_NEEDED and `fareNeeded: true`; one that fails the thresholds even
- * before its share of the journey is rejected as usual.
+ * A blank public transport fare is a missing input, never a free journey,
+ * and never a reason on its own to leave an offer out. By public transport
+ * with no fare entered the search runs before travel (the journey left out):
+ * baskets are built and ranked on contribution before the fare under the
+ * cash limit, an offer that fails the thresholds even before its share of
+ * the journey is rejected as usual, and every basket's figures after travel
+ * are null, never 0, with the same figures before travel under
+ * `beforeTravel` (see describeBasket). No basket is recommended until the
+ * fare is entered, and `ranking` says the order is "before travel".
  */
 export function basketOptions(offers, profile, goals, { now = new Date().toISOString() } = {}) {
   const rules = effectiveRules(profile.rules || {});
@@ -628,12 +633,9 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
       });
       continue;
     }
-    // Whether it clears the thresholds with its share of the journey
-    // cannot be known without the fare, so it never enters a basket.
-    if (noFare) {
-      excluded.push({ ...brief, reason: FARE_NEEDED, fareNeeded: true });
-      continue;
-    }
+    // With a blank fare it still enters the search: the journey is left
+    // out (journeyFor costs a missing fare at nothing), so each basket is
+    // judged before travel and its figures are labelled so.
     pool.push({ offer, base, terms, grams, max, net: one.contribution, cash: one.cashRequired });
   }
   pool.sort((a, b) => b.net - a.net);
@@ -779,6 +781,9 @@ export function basketOptions(offers, profile, goals, { now = new Date().toISOSt
     baskets,
     bestSingle: single,
     recommended: pick ? pick.id : null,
+    // Baskets are ranked on contribution after the one journey, or before
+    // it while the public transport fare is blank.
+    ranking: noFare ? "before travel" : "after travel",
     excluded,
     searched,
     truncated,
@@ -812,8 +817,21 @@ export function cashDateReason(timing) {
     : `No payout date can be scheduled, so the date you need the cash cannot be met. ${timing.payout.note}`;
 }
 
-/** Full figures for one allocation, built only for the baskets returned. */
+/**
+ * Full figures for one allocation, built only for the baskets returned.
+ *
+ * With a blank public transport fare (fareMissing) the journey is left out:
+ * every figure after travel is null, never 0 (the journey cost, each item's
+ * travel share, cash, contribution, profit per unit and return, and the
+ * basket's total costs, contribution, cash required, travel per unit,
+ * earnings per hour and downside), and `beforeTravel` on the basket and on
+ * each item holds the same figures before the fare. The basket carries the
+ * note FARE_NEEDED once in its reasons (so it is never recommended), and a
+ * loss or a missed hourly target before the fare says "even before your
+ * fare".
+ */
 function describeBasket(candidate, { pool, profile, goals, rules, now, route, storage }) {
+  const noFare = fareMissing(profile);
   const chosen = pool
     .map((p, i) => ({ p, units: candidate.alloc[i] }))
     .filter((x) => x.units > 0);
@@ -829,13 +847,14 @@ function describeBasket(candidate, { pool, profile, goals, rules, now, route, st
     const economics = perItem[k].full;
     const { opportunity, thresholds } = assessSample({
       offer: p.offer,
-      economics,
+      economics: noFare ? unknownJourney(economics) : economics,
+      bestCase: economics,
       hourlyFloor: profile.target,
       rules,
       now,
       timing: tripTiming(goals, { now, items: [sale({ p, units })] }),
       categoryFailures: p.terms.failures,
-      journeyKnown: !fareMissing(profile),
+      journeyKnown: !noFare,
     });
     return {
       sku: p.offer.sku,
@@ -846,13 +865,22 @@ function describeBasket(candidate, { pool, profile, goals, rules, now, route, st
       maxUnits: p.max,
       provenItem: p.offer.provenItem === true,
       weightKg: Math.round(units * p.offer.weight * 100) / 100,
-      travelShare: shares[k],
-      cashRequired: economics.cashRequired,
-      contribution: economics.contribution,
+      travelShare: noFare ? null : shares[k],
+      cashRequired: noFare ? null : economics.cashRequired,
+      contribution: noFare ? null : economics.contribution,
       unitProfit: thresholds.unitProfit,
       returnOnCost: thresholds.returnOnCost,
       returnsRate: p.terms.returnsRate,
-      halfSellsContribution: perItem[k].half.contribution,
+      halfSellsContribution: noFare ? null : perItem[k].half.contribution,
+      beforeTravel: noFare
+        ? {
+            cashRequired: economics.cashRequired,
+            contribution: economics.contribution,
+            unitProfit: thresholds.beforeTravel.unitProfit,
+            returnOnCost: thresholds.beforeTravel.returnOnCost,
+            halfSellsContribution: perItem[k].half.contribution,
+          }
+        : null,
       thresholds,
       opportunity,
       accessNeeds: accessNeeds(p.offer, profile),
@@ -876,41 +904,63 @@ function describeBasket(candidate, { pool, profile, goals, rules, now, route, st
   // Units sold in the half-sold case: half of each item's units, rounded down.
   const halfSellsUnits = perItem.reduce((total, e) => total + e.half.sold, 0);
 
+  // With a blank fare these are figures before travel: a fare only lowers
+  // the contribution and earnings per hour, so a loss or a missed target
+  // here stays one after travel.
+  const even = noFare ? ", even before your fare" : "";
   const reasons = [];
-  if (!(contribution > 0)) reasons.push("Loses money");
-  if (!(hourly >= profile.target)) reasons.push("Below hourly target");
+  if (!(contribution > 0)) reasons.push("Loses money" + even);
+  if (!(hourly >= profile.target)) reasons.push("Below hourly target" + even);
   for (const it of items) {
-    for (const failure of it.thresholds.failures) reasons.push(`${it.name}: ${failure}`);
+    // The travel note is given once for the basket, below.
+    for (const failure of it.thresholds.failures)
+      if (failure !== FARE_NEEDED) reasons.push(`${it.name}: ${failure}`);
     if (it.units > rules.trialUnits && !it.provenItem)
       reasons.push(`${it.name}: more than the trial batch of ${rules.trialUnits} for a first purchase`);
   }
-  // basketOptions builds no basket while the fare is blank; this keeps any
-  // other caller from recommending one.
-  if (fareMissing(profile)) reasons.push(FARE_NEEDED);
+  // Never recommended while the fare is blank: the verdict after travel is
+  // not known.
+  if (noFare) reasons.push(FARE_NEEDED);
   if (goals.cashNeededBy && timing.cash.status !== "on time") reasons.push(cashDateReason(timing));
 
+  const known = {
+    units,
+    proceeds,
+    costs,
+    totalCosts,
+    contribution,
+    cashRequired,
+    journeyPerUnit: units ? Math.round(route.cost / units) : 0,
+    activeMinutes,
+    activeHours: Math.round((activeMinutes / 60) * 100) / 100,
+    hourly,
+    unsoldLoss,
+  };
   return {
     id: items.map((it) => `${it.sku}:${it.units}`).join(","),
     items,
     shops: [...new Set(items.map((it) => it.shop))],
-    journey: route,
+    journey: noFare ? { ...route, cost: null } : route,
+    fareMissing: noFare,
     units,
     storage: { used: units, limit: storage },
     weightKg: Math.round(items.reduce((sum, it) => sum + it.weightKg, 0) * 100) / 100,
-    economics: {
-      units,
-      proceeds,
-      costs,
-      totalCosts,
-      contribution,
-      cashRequired,
-      journeyPerUnit: units ? Math.round(route.cost / units) : 0,
-      activeMinutes,
-      activeHours: Math.round((activeMinutes / 60) * 100) / 100,
-      hourly,
-      unsoldLoss,
-    },
-    downside: { nothingSells: unsoldLoss, halfSells, halfSellsUnits },
+    economics: noFare
+      ? {
+          ...known,
+          costs: { ...costs, travel: null },
+          totalCosts: null,
+          contribution: null,
+          cashRequired: null,
+          journeyPerUnit: null,
+          hourly: null,
+          unsoldLoss: null,
+        }
+      : known,
+    beforeTravel: noFare ? { contribution, cashRequired, hourly, unsoldLoss, halfSells } : null,
+    downside: noFare
+      ? { nothingSells: null, halfSells: null, halfSellsUnits }
+      : { nothingSells: unsoldLoss, halfSells, halfSellsUnits },
     timing: basketTiming(timing),
     reasons,
     recommended: false,

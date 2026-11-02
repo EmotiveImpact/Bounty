@@ -311,6 +311,8 @@ test("competition counts same-barcode asking prices and never touches the sample
   assert.deepEqual(competition({ ...offer, barcode: null }, rows, { now }), {
     activeListings: 0,
     sellers: 0,
+    // Listings per stated seller (round 5b): none here.
+    bySeller: [],
     lowestAsking: null,
     lowestAskingIncludesShipping: null,
     olderListings: 0,

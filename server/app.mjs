@@ -11,6 +11,7 @@ import * as planRoutes from "./routes-plan.mjs";
 import * as dealRoutes from "./routes-deals.mjs";
 import * as bountyRoutes from "./routes-bounties.mjs";
 import * as ledgerRoutes from "./routes-ledger.mjs";
+import * as plans from "./plans.mjs";
 
 export const routeModules = [
   evidenceRoutes,
@@ -43,8 +44,7 @@ const originHost = (value) => {
 // needs a signed-in member, and the shared password is not used.
 export function createApi(db, { modules = routeModules, publicHosts = [], password = null, members = null } = {}) {
   const allowedHosts = new Set([...LOCAL_HOSTS, ...publicHosts]);
-  const table = modules
-    .flatMap((m) => m.routes(db))
+  const table = [...modules.flatMap((m) => m.routes(db)), ...plans.routes(db, members)]
     .map(([method, pattern, handler, options = {}]) => ({
       method,
       parts: pattern.split("/").filter(Boolean),

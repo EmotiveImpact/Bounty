@@ -135,18 +135,62 @@ export function loadProfile(): Profile {
   try {
     const raw = JSON.parse(localStorage.getItem("bounty-profile") || "{}");
     const saved = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
-    const fareFree = saved.fareFree === true;
-    return { ...initialProfile, ...saved, fareFree, fare: savedFare(saved.fare, fareFree) };
+    // The mark that someone edited it is not part of the profile.
+    const { edited: _edited, ...values } = saved;
+    const fareFree = values.fareFree === true;
+    return { ...initialProfile, ...values, fareFree, fare: savedFare(values.fare, fareFree) };
   } catch {
     return { ...initialProfile };
   }
 }
-export function saveProfile(profile: Profile) {
+// The Planner's trip fields that fill Research and the member form: how you
+// travel, what you can carry, the cash you can spend and your storage.
+export const TRIP_FIELDS = ["transport", "carry", "budget", "storage"] as const;
+export type TripField = (typeof TRIP_FIELDS)[number];
+const isTripField = (k: unknown): k is TripField => (TRIP_FIELDS as readonly unknown[]).includes(k);
+
+/**
+ * Stores the Planner profile. edited lists the trip fields someone changed
+ * in the Planner (round 5b, second verification): Research and the member
+ * form fill in only those, so a starting value nobody touched never counts
+ * as entered, even after another field is changed. The profile is stored
+ * only once someone changes any field (the Planner calls this only then).
+ */
+export function saveProfile(profile: Profile, { edited = [] }: { edited?: readonly TripField[] } = {}) {
   try {
-    localStorage.setItem("bounty-profile", JSON.stringify(profile));
+    const fields = TRIP_FIELDS.filter((k) => edited.includes(k));
+    localStorage.setItem("bounty-profile", JSON.stringify({ ...profile, edited: fields }));
   } catch {
     /* storage unavailable: the profile lasts for this visit only */
   }
+}
+
+function savedMark(): unknown {
+  try {
+    const raw = JSON.parse(localStorage.getItem("bounty-profile") || "{}");
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw.edited : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether someone changed any Planner field (the profile carries the mark).
+ * An older mark of true counts too, so the Planner keeps saving it.
+ */
+export function profileEdited(): boolean {
+  const mark = savedMark();
+  return mark === true || Array.isArray(mark);
+}
+
+/**
+ * The trip fields someone changed in the Planner. An older mark of true
+ * does not say which, so it names none (fail closed: those values are
+ * entered again rather than taken as entered).
+ */
+export function editedTripFields(): TripField[] {
+  const mark = savedMark();
+  return Array.isArray(mark) ? TRIP_FIELDS.filter((k) => mark.includes(k)) : [];
 }
 
 // A member's own stricter buying thresholds, shared by every tab so that the
