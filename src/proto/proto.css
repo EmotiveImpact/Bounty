@@ -1283,6 +1283,12 @@
       grid-template-columns: repeat(3, 1fr);
     }
   }
+  /* Wide panels sit two side by side until phone width. */
+  @media (max-width: 760px) {
+    .two {
+      grid-template-columns: 1fr;
+    }
+  }
   @media (max-width: 1100px) {
     .frame,
     .frame.open {
@@ -1301,7 +1307,6 @@
     }
     .hero,
     .prod,
-    .two,
     .scanbox {
       grid-template-columns: 1fr;
     }
@@ -1598,6 +1603,11 @@
     align-items: center;
     padding: 0 70px;
     margin-bottom: 56px;
+  }
+  @media (max-width: 760px) {
+    .feature {
+      grid-template-columns: 1fr;
+    }
   }
   .feature small {
     font-weight: 600;
@@ -1937,7 +1947,6 @@
       display: none;
     }
     .feature {
-      grid-template-columns: 1fr;
       padding: 0;
       gap: 24px;
     }
@@ -2897,7 +2906,7 @@
     color: var(--muted);
     padding: 0 4px;
   }
-  @media (max-width: 1100px) {
+  @media (max-width: 760px) {
     .dband {
       grid-template-columns: 1fr;
     }
