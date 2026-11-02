@@ -1865,7 +1865,7 @@ export default function ProtoApp({
               ticked={items.filter((d) => got[d.sku])}
               trip={trip}
               onBack={() => setSigning(false)}
-              onDone={(added) => {
+              onDone={(added, note = "") => {
                 setSigning(false);
                 setTrip({});
                 setGot({});
@@ -1874,7 +1874,7 @@ export default function ProtoApp({
                 go("stock");
                 say(
                   added
-                    ? `Added ${added} ${added === 1 ? "item" : "items"} to Stock.`
+                    ? `Added ${added} ${added === 1 ? "item" : "items"} to Stock.${note}`
                     : "Trip finished. Nothing was added to Stock.",
                 );
               }}
