@@ -683,13 +683,13 @@ label.inline {
     border-bottom: 0;
     padding-bottom: 0;
   }
+}
 /* Round five: units from earlier bounties for the item, and purchases whose
    units still count against its demand, with the forms that release them. */
 .earlier {
   display: grid;
   gap: 6px;
   border: 1px solid #c7d0c4;
-  border-left: 4px solid #8a6d10;
   border-radius: 8px;
   padding: 8px 12px;
   margin: 8px 0;
