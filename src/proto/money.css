@@ -27,7 +27,7 @@
 .mn-sum b { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .mn-sum .profit b { color: var(--k-profit); }
 .mn-even { grid-template-columns: 1fr 1fr; }
-@media (max-width: 1100px) { .mn-even { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { .mn-even { grid-template-columns: 1fr; } }
 @media (max-width: 640px) {
   .mn-bars { width: 100%; justify-content: space-between; height: 120px; }
   .mn-pair { grid-template-columns: 1fr; }
