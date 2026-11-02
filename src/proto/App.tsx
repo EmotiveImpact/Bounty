@@ -18,8 +18,10 @@ import {
 import { ItemTile, byMode } from "../Planner";
 import { savedExtras, type Deal } from "../Deals";
 import { Ico } from "./icons";
+import AiFinds from "./AiFinds";
 import "./proto.css";
 import "./proto-extra.css";
+import "./ai-finds.css";
 
 // The app shell and the Deals, item, trip and profile screens, ported from the
 // agreed desktop mock. Every figure comes from the deals API. Parts the app
@@ -1042,6 +1044,7 @@ export default function ProtoApp({
             </div>
           </section>
         )}
+        <AiFinds />
         <nav className="iconrow" aria-label="Categories">
           <button type="button" onClick={() => showCat(null, true)}>
             <Ico n="all" w={1.6} />

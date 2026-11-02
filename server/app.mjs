@@ -11,6 +11,7 @@ import * as planRoutes from "./routes-plan.mjs";
 import * as dealRoutes from "./routes-deals.mjs";
 import * as bountyRoutes from "./routes-bounties.mjs";
 import * as ledgerRoutes from "./routes-ledger.mjs";
+import * as findRoutes from "./routes-finds.mjs";
 
 export const routeModules = [
   evidenceRoutes,
@@ -19,6 +20,7 @@ export const routeModules = [
   dealRoutes,
   bountyRoutes,
   ledgerRoutes,
+  findRoutes,
 ];
 
 const LOCAL_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
