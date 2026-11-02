@@ -19,6 +19,7 @@ import { ItemTile, byMode } from "../Planner";
 import { savedExtras, type Deal } from "../Deals";
 import { Ico } from "./icons";
 import MoneyScreen from "./Money";
+import TripPage from "./TripPage";
 import { GoalsSettings } from "../Goals";
 import SignOff from "./SignOff";
 import "./proto.css";
@@ -570,7 +571,7 @@ export default function ProtoApp({
       </span>
       <span className="more2">
         <span className="head">Tools</span>
-        {nav("planner", "Trip planner")}
+        {nav("planner", "My trip")}
         {nav("research", "Research")}
         {nav("sources", "Sources")}
         <span className="head">You</span>
@@ -1885,23 +1886,6 @@ export default function ProtoApp({
         }
         return n;
       });
-    const share = async () => {
-      const text = stops
-        .map(
-          ([shopName, s]) =>
-            `${shopName}\n` +
-            s.items
-              .map((d) => `  ${trip[d.sku]} × ${d.name} at ${money(d.buy)}`)
-              .join("\n"),
-        )
-        .join("\n");
-      try {
-        await navigator.clipboard.writeText("My Bounty trip\n" + text);
-        say("Trip list copied. Paste it anywhere.");
-      } catch {
-        say("Could not copy the list on this device.");
-      }
-    };
     return (
       <>
         <div className="tripbox" role="dialog" aria-label="My trip">
@@ -2034,8 +2018,12 @@ export default function ProtoApp({
                   </>
                 ) : (
                   <>
-                    <button type="button" className="bt ghost" onClick={share}>
-                      Copy list
+                    <button
+                      type="button"
+                      className="bt ghost"
+                      onClick={() => (setTripOpen(false), go("planner"))}
+                    >
+                      Full plan
                     </button>
                     <button
                       type="button"
@@ -2167,6 +2155,31 @@ export default function ProtoApp({
     ) : null;
   else if (view === "profile") body = vProfile();
   else if (view === "watching") body = vWatching();
+  else if (view === "planner")
+    body = (
+      <>
+        <TripPage
+          deals={all}
+          trip={trip}
+          setTrip={setTrip}
+          profile={profile}
+          going={going}
+          onStart={() => (setGoing(true), setTripOpen(true))}
+          onFinish={() => (setTripOpen(true), setSigning(true))}
+          openDeal={(s) => go("item", s)}
+          say={say}
+          go={(v) => go(v)}
+        />
+        <section className="tripmore">
+          <h2>Your travel, cash and fees</h2>
+          <p>
+            The full planner: how you travel, your fares and fuel, selling fees,
+            one-item plans and the several-items basket plan.
+          </p>
+          <div className="legacy">{legacy(view)}</div>
+        </section>
+      </>
+    );
   else if (view === "money")
     body = (
       <MoneyScreen
@@ -2260,7 +2273,6 @@ const LEGACY_TITLE: Partial<Record<View, string>> = {
   scan: "Scan",
   tips: "Live tips",
   stock: "Stock and sales",
-  planner: "Trip planner",
   research: "Research",
   sources: "Sources",
 };
@@ -2268,8 +2280,6 @@ const LEGACY_LEAD: Partial<Record<View, string>> = {
   scan: "Scan or type a barcode and add the sticker price for a straight answer: buy, think or leave.",
   tips: "Shelf tips with a set number of places, so each one stays worth the trip.",
   stock: "Everything you bought, from the shelf to the payout.",
-  planner:
-    "Optional. Add your travel, cash and carrying limit to see which trips fit you.",
   research: "Match an offer to exact sold evidence before you buy.",
   sources:
     "Where prices come from, when they were checked and what is still sample.",
@@ -2298,7 +2308,7 @@ function MegaMenu({ go }: { go: (v: View) => void }) {
       </div>
       <div className="mmc">
         <h4>Tools</h4>
-        {it("planner", "Trip planner", "Plan a route of shops")}
+        {it("planner", "My trip", "Plan it and check it is worth it")}
         {it("research", "Research", "Look up any product")}
         {it("sources", "Sources", "Where prices come from")}
       </div>
