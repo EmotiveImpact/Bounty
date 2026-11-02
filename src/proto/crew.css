@@ -19,14 +19,10 @@
 .cr-band-text > .k-btn { justify-self: start; }
 .cr-today {
   display: grid;
-  grid-template-columns: 52px minmax(0, 1fr);
-  gap: 12px;
-  align-items: center;
-  padding: 10px 14px 10px 10px;
+  padding: 12px 16px;
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.7);
 }
-.cr-today img { width: 52px; height: 52px; border-radius: 14px; object-fit: cover; object-position: 50% 18%; background: #fff; }
 .cr-today div { display: grid; gap: 2px; font-size: 14px; line-height: 1.4; }
 .cr-band-row { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; min-width: 0; }
 .cr-band-row figure { margin: 0; display: grid; gap: 8px; align-content: end; }
@@ -40,7 +36,9 @@
   border: 1px solid var(--k-line);
 }
 .cr-band-row figure:nth-child(even) img { transform: translateY(-14px); }
-.cr-band-row figcaption { font: 700 13px/1 var(--k-sans); text-align: center; }
+.cr-band-row figcaption { font: 700 13px/1 var(--k-sans); text-align: center; display: grid; gap: 4px; justify-items: center; }
+.cr-band-row figcaption small { font: 700 11px/1 var(--k-sans); background: var(--k-ink); color: #fff; border-radius: 999px; padding: 4px 8px; }
+.cr-band-row figure.today img { border: 3px solid var(--k-ink); }
 
 .cr { display: grid; gap: 20px; font-family: var(--k-sans); color: var(--k-text); min-width: 0; }
 .cr-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
