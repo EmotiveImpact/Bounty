@@ -516,8 +516,8 @@ export function BasketSection({ version = 0 }: { version?: number }) {
       <h2>One shopping trip, one cash limit</h2>
       <p>
         Everything in a basket is bought on one shopping trip: one shared journey and one cash
-        limit for the whole basket. Your cash, carry limit, maximum units, transport and stricter
-        thresholds come from your planner settings above.
+        limit for the whole basket. Your cash, carry limit, maximum units and transport come from the
+        planner above, and your stricter thresholds from Profile and settings.
       </p>
       <p className="notice">
         Sample data: illustrative Leeds offers with modelled sale totals. A basket is never a buy

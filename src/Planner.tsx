@@ -868,14 +868,6 @@ export default function Planner() {
         {result && <DriveSummary drive={result.drive} />}
         <BasketsLink />
       </div>
-      <StricterThresholds
-        rules={rules}
-        info={result?.rules ?? null}
-        onSave={(next) => {
-          saveMemberRules(next);
-          setRules(next);
-        }}
-      />
     </div>
   );
 }
@@ -1548,6 +1540,21 @@ function BasketsLink() {
   );
 }
 
+/** Your stricter buying thresholds, shown in Profile and settings. */
+export function BuyingRules() {
+  const [rules, setRules] = useState<Rules>(loadMemberRules);
+  return (
+    <StricterThresholds
+      rules={rules}
+      info={null}
+      onSave={(next) => {
+        saveMemberRules(next);
+        setRules(next);
+      }}
+    />
+  );
+}
+
 function StricterThresholds({
   rules,
   info,
@@ -1641,8 +1648,8 @@ function StricterThresholds({
       )}
       {notice && <p role="status">{notice}</p>}
       <p className="muted">
-        Saved in this browser only. They apply to the planner trips, the baskets below and the
-        Research desk.
+        Saved in this browser only. They apply to My trip plans, the basket plan and the Research
+        desk.
       </p>
     </article>
   );

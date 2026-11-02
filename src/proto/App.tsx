@@ -15,7 +15,7 @@ import {
   saveProfile,
   type Lens,
 } from "../api";
-import { ItemTile, byMode } from "../Planner";
+import { BuyingRules, ItemTile, byMode } from "../Planner";
 import { savedExtras, type Deal } from "../Deals";
 import { Ico } from "./icons";
 import MoneyScreen from "./Money";
@@ -1759,6 +1759,7 @@ export default function ProtoApp({
       <div className="legacy" style={{ marginTop: 20 }}>
         <div className="planner goals">
           <GoalsSettings />
+          <BuyingRules />
         </div>
       </div>
     </>
