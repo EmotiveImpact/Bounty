@@ -234,9 +234,9 @@ export default function PlansScreen() {
             </p>
           </Card>
           <Card>
-            <Label>Scout levels are earned</Label>
+            <Label>Points are earned</Label>
             <p>
-              Levels like Diamond and Ruby come only from accurate tips. A plan changes when tips reach you, never your
+              Scout points and the level they unlock come only from accurate tips. A plan changes when tips reach you, never your
               level or points.
             </p>
           </Card>
