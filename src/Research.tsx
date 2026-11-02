@@ -8,6 +8,7 @@ import {
   type EvidenceRow,
 } from "./ResearchCalculator";
 import "./Research.css";
+import "./proto/research.css";
 
 // Display only: the colour each evidence class is drawn in (style.css).
 const EV_ROW: Record<string, string> = {

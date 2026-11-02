@@ -36,6 +36,7 @@ import {
   type ChipTone,
 } from "../ui/kit";
 import "./tips.css";
+import "./legacy-kit.css";
 
 const ukDay = new Intl.DateTimeFormat("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: "Europe/London" });
 function ago(iso: string | null) {

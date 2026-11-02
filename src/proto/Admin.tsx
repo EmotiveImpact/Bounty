@@ -9,6 +9,7 @@ import Research, { EvidenceRegister } from "../Research";
 import Sources from "../Sources";
 import { Notice, PageHead, Tabs } from "../ui/kit";
 import "./admin.css";
+import "./legacy-kit.css";
 
 type Tab = "tips" | "sources" | "evidence" | "check" | "audit";
 
