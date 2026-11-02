@@ -35,3 +35,5 @@
   .sk-wfigs { grid-template-columns: 1fr 1fr; }
   .sk-pair { grid-template-columns: 1fr; }
 }
+.sk-examples { display: grid; gap: 16px; margin-top: 12px; padding-top: 24px; border-top: 1px solid var(--k-line); }
+.sk-example { border-style: dashed; }

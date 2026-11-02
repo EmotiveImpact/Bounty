@@ -977,15 +977,16 @@ const ITEM_ART: Record<string, { bg: string; d: string[] }> = {
  * development (public/products, made with an image model). Real items have no
  * photo yet and keep the drawn tile.
  */
-const SAMPLE_PHOTO: Record<string, string> = {
-  knit: "/products/knit.jpg",
-  baby: "/products/baby.jpg",
-  pot: "/products/pot.jpg",
-  jacket: "/products/jacket.jpg",
-  bottle: "/products/bottle.jpg",
-};
+// Made-up sample products with a photo in public/products/<sku>.jpg.
+const SAMPLE_PHOTO = new Set([
+  "knit", "baby", "pot", "jacket", "bottle", "space-bricks", "plush-fox", "puzzle", "rc-car",
+  "dino-kit", "air-fryer", "throw", "lamp", "mug-set", "candle", "pan-set", "planter-set", "drill",
+  "tool-box", "serum", "perfume-set", "hair-dryer", "makeup-bag", "headphones", "speaker",
+  "smart-plug", "keyboard", "power-bank", "trainers", "puffer", "school-pack", "fleece", "pyjamas",
+  "yoga-mat", "dumbbells",
+]);
 export function ItemTile({ sku, category }: { sku: string; category?: string }) {
-  const photo = SAMPLE_PHOTO[sku];
+  const photo = SAMPLE_PHOTO.has(sku) ? `/products/${sku}.jpg` : null;
   if (photo)
     return (
       <span className="planner-tile photo" aria-hidden="true">

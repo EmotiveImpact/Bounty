@@ -31,6 +31,7 @@ import {
   type MenuItem,
 } from "../ui/kit";
 import { CrewArt, CrewLoading } from "./CrewArt";
+import { EXAMPLE_NOTE, EXAMPLE_TRIPS, type ExampleTrip } from "./examples";
 import "./stock.css";
 
 type EntryType = "receipt" | "sale" | "payout" | "expense" | "refund" | "work" | "saving";
@@ -169,7 +170,17 @@ type Open =
   | { kind: "entry"; trip: TripRow; action: Action; item?: string }
   | { kind: "details"; trip: TripRow }
   | { kind: "close"; trip: TripRow }
+  | { kind: "example"; ex: ExampleTrip }
   | null;
+
+const EXAMPLES_KEY = "bounty.stock.examples";
+function readShowExamples() {
+  try {
+    return localStorage.getItem(EXAMPLES_KEY) !== "hide";
+  } catch {
+    return true;
+  }
+}
 
 export default function StockScreen(props: { legacy: React.ReactNode; go: (v: "money" | "deals") => void }) {
   return (
@@ -189,6 +200,16 @@ function Stock({ legacy, go }: { legacy: React.ReactNode; go: (v: "money" | "dea
   const [open, setOpen] = useState<Open>(null);
   const [tab, setTab] = useState<"open" | "done">("open");
   const [records, setRecords] = useState(false);
+  const [examples, setExamples] = useState(readShowExamples);
+  const toggleExamples = () =>
+    setExamples((v) => {
+      try {
+        localStorage.setItem(EXAMPLES_KEY, v ? "hide" : "show");
+      } catch {
+        // Still works for this visit.
+      }
+      return !v;
+    });
   const recordsRef = useRef<HTMLElement>(null);
   const refresh = () => setVersion((v) => v + 1);
 
@@ -328,6 +349,33 @@ function Stock({ legacy, go }: { legacy: React.ReactNode; go: (v: "money" | "dea
         />
       )}
 
+      <section className="sk-examples" aria-label="Example trips">
+        <div className="sk-rechead">
+          <div>
+            <h2 className="k-display">Example trips</h2>
+            <p>Made up to show how Stock works. Nothing here is saved, and none of it counts in your totals or in Money.</p>
+          </div>
+          <Button variant="line" onClick={toggleExamples} aria-expanded={examples}>
+            {examples ? "Hide examples" : "Show examples"}
+          </Button>
+        </div>
+        {examples && (
+          <div className="sk-cards">
+            {EXAMPLE_TRIPS.map((ex) => (
+              <TripCard
+                key={ex.trip.id}
+                trip={ex.trip}
+                detail={ex.detail}
+                example
+                onAction={() => say(EXAMPLE_NOTE)}
+                onDetails={() => setOpen({ kind: "example", ex })}
+                onClose={() => say(EXAMPLE_NOTE)}
+              />
+            ))}
+          </div>
+        )}
+      </section>
+
       <section className="sk-records" ref={recordsRef}>
         <div className="sk-rechead">
           <div>
@@ -363,6 +411,16 @@ function Stock({ legacy, go }: { legacy: React.ReactNode; go: (v: "money" | "dea
           onClose={() => setOpen(null)}
           onAction={(action, item) => setOpen({ kind: "entry", trip: open.trip, action, item })}
           onRecords={showRecords}
+        />
+      )}
+      {open?.kind === "example" && (
+        <DetailsWindow
+          trip={open.ex.trip}
+          example={open.ex.detail}
+          version={version}
+          onClose={() => setOpen(null)}
+          onAction={() => say(EXAMPLE_NOTE)}
+          onRecords={() => say(EXAMPLE_NOTE)}
         />
       )}
       {open?.kind === "close" && (
@@ -407,12 +465,14 @@ function Stock({ legacy, go }: { legacy: React.ReactNode; go: (v: "money" | "dea
 function TripCard({
   trip: t,
   detail: d,
+  example = false,
   onAction,
   onDetails,
   onClose,
 }: {
   trip: TripRow;
   detail: Detail | undefined;
+  example?: boolean;
   onAction: (a: Action, item?: string) => void;
   onDetails: () => void;
   onClose: () => void;
@@ -437,7 +497,7 @@ function TripCard({
         {next === "receipt" ? "Add what you bought" : ACTION_LABEL[next]}
       </Button>
     );
-  const more: MenuItem[] = resale
+  const more: MenuItem[] = resale && t.status === "open"
     ? [
         ...ACTION_ORDER.filter((a) => a !== next).map((a) => ({ label: ACTION_LABEL[a], onSelect: () => onAction(a) })),
         ...(next !== "close" ? ["-" as const, { label: "Close trip", onSelect: onClose }] : []),
@@ -446,7 +506,7 @@ function TripCard({
   const left = r ? Math.max(0, r.unitsBought - r.unitsSold) : 0;
 
   return (
-    <Card className="sk-card">
+    <Card className={example ? "sk-card sk-example" : "sk-card"}>
       <div className="sk-top">
         <div className="sk-name">
           <h3>
@@ -461,6 +521,7 @@ function TripCard({
             <Chip tone={tone}>{label}</Chip>
             {t.verified && <Chip tone="buy">Verified</Chip>}
             {t.sample && <Chip tone="sample">Sample</Chip>}
+            {example && <Chip tone="sample">Example</Chip>}
           </div>
         </div>
         <div className="sk-money">
@@ -500,20 +561,24 @@ function TripCard({
 
 function DetailsWindow({
   trip: t,
+  example,
   version,
   onClose,
   onAction,
   onRecords,
 }: {
   trip: TripRow;
+  /** A made-up example's figures: shown as they are, never fetched or changed. */
+  example?: Detail;
   version: number;
   onClose: () => void;
   onAction: (a: Action, item?: string) => void;
   onRecords: () => void;
 }) {
-  const [d, setD] = useState<Detail | null>(null);
+  const [d, setD] = useState<Detail | null>(example ?? null);
   const [err, setErr] = useState("");
   useEffect(() => {
+    if (example) return;
     let active = true;
     api<Detail>("ledger/trips/" + t.id)
       .then((x) => active && setD(x))
@@ -521,12 +586,12 @@ function DetailsWindow({
     return () => {
       active = false;
     };
-  }, [t.id, version]);
+  }, [t.id, version, example]);
   const stage = stageOf(t, d ?? undefined);
   const [label, tone] = STAGE[stage];
   const items = d ? itemsOf(d.entries) : [];
   const entries = d ? [...d.entries].sort((a, b) => (a.occurred < b.occurred ? 1 : a.occurred > b.occurred ? -1 : b.id - a.id)) : [];
-  const open = t.status === "open" && t.kind === "resale";
+  const open = !example && t.status === "open" && t.kind === "resale";
   const next = NEXT[stage];
 
   return (
@@ -541,13 +606,20 @@ function DetailsWindow({
           <Chip tone={tone}>{label}</Chip>
           {t.verified && <Chip tone="buy">Verified</Chip>}
           {t.sample && <Chip tone="sample">Sample</Chip>}
+          {example && <Chip tone="sample">Example</Chip>}
         </span>
       }
       footer={
         <>
-          <Button variant="text" onClick={onRecords} style={{ marginRight: "auto" }}>
-            Proofs and checks
-          </Button>
+          {example ? (
+            <span className="sk-p" style={{ marginRight: "auto" }}>
+              Made up to show how a trip adds up. Not saved, not counted.
+            </span>
+          ) : (
+            <Button variant="text" onClick={onRecords} style={{ marginRight: "auto" }}>
+              Proofs and checks
+            </Button>
+          )}
           {open && next !== "close" && next !== "details" && (
             <Button variant="main" onClick={() => onAction(next)}>
               {next === "receipt" ? "Add what you bought" : ACTION_LABEL[next]}

@@ -7,6 +7,7 @@ import { api, dateTime, money, toPence, type Lens } from "../api";
 import {
   Button,
   Card,
+  Chip,
   Empty,
   Field,
   Figure,
@@ -23,6 +24,7 @@ import {
 } from "../ui/kit";
 import { TaxExport } from "./TaxExport";
 import { CrewArt, CrewLoading } from "./CrewArt";
+import { exampleMoney } from "./examples";
 import "./money.css";
 
 type Summary = {
@@ -52,6 +54,66 @@ type Target = {
   daysLeft: number | null;
 };
 type Targets = { targets: Target[]; basis: string };
+
+// Shared with Stock: hiding the examples in one hides them in both.
+const EXAMPLES_KEY = "bounty.stock.examples";
+function readShowExamples() {
+  try {
+    return localStorage.getItem(EXAMPLES_KEY) !== "hide";
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * What Money looks like with the made-up example trips in Stock. Worked out
+ * in the browser from those examples only: never added to the real figures
+ * above it, the tax allowance or goals.
+ */
+function ExampleMonth() {
+  const [show, setShow] = useState(readShowExamples);
+  const ex = useMemo(exampleMoney, []);
+  const toggle = () =>
+    setShow((v) => {
+      try {
+        localStorage.setItem(EXAMPLES_KEY, v ? "hide" : "show");
+      } catch {
+        // Still works for this visit.
+      }
+      return !v;
+    });
+  return (
+    <Card className="mn-example">
+      <Label
+        aside={
+          <Button variant="text" size="sm" onClick={toggle} aria-expanded={show}>
+            {show ? "Hide example" : "Show example"}
+          </Button>
+        }
+      >
+        <span className="mn-exhead">
+          Example month <Chip tone="sample">Example</Chip>
+        </span>
+      </Label>
+      <p className="mn-p">
+        Made up from the {ex.trips} example trips in Stock, to show how these figures fill in. None of it is added to
+        your own figures, tax or goals.
+      </p>
+      {show && (
+        <Figures>
+          <Figure label="You kept" value={money(ex.kept)} tone="profit" note={ex.lines.join(" · ")} />
+          <Figure label="On the way" value={money(ex.onTheWay)} note="sold, waiting for the money" />
+          <Figure label="In your stock" value={money(ex.inStock)} note={`${ex.unsold} units not sold yet`} />
+          <Figure
+            label="Per hour"
+            value={ex.perHour == null ? "Not known" : money(ex.perHour)}
+            note={`${ex.hours} h logged on the paid trips`}
+          />
+        </Figures>
+      )}
+    </Card>
+  );
+}
 
 const TAX_ALLOWANCE = 100000; // £1,000 trading allowance, in pence
 
@@ -197,6 +259,7 @@ function MoneyInner({ lens, lensButtons, go }: Props) {
         <Notice tone="loss" title="Not loaded.">
           Your figures could not be loaded ({error}). Try again in a moment.
         </Notice>
+        <ExampleMonth />
       </div>
     );
   if (!now)
@@ -404,6 +467,7 @@ function MoneyInner({ lens, lensButtons, go }: Props) {
             {taxCard}
           </div>
         </div>
+        <ExampleMonth />
         {goalWindow}
       </div>
     );
@@ -510,6 +574,7 @@ function MoneyInner({ lens, lensButtons, go }: Props) {
         {goalCard}
         {taxCard}
       </div>
+      <ExampleMonth />
       {goalWindow}
     </div>
   );
