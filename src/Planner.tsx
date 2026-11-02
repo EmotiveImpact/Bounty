@@ -904,7 +904,26 @@ const ITEM_ART: Record<string, { bg: string; d: string[] }> = {
   clothing: { bg: "#e3e8f2", d: ["M17 10l-9 5 3 9 5-2v18h16V22l5 2 3-9-9-5c-1 3-4 5-7 5s-6-2-7-5z"] },
   general: { bg: "#e6e9ee", d: ["M8 16l16-8 16 8v18l-16 8-16-8z", "M8 16l16 8 16-8M24 24v18"] },
 };
+/**
+ * Placeholder photos for the five sample products while Bounty is in
+ * development (public/products, made with an image model). Real items have no
+ * photo yet and keep the drawn tile.
+ */
+const SAMPLE_PHOTO: Record<string, string> = {
+  knit: "/products/knit.jpg",
+  baby: "/products/baby.jpg",
+  pot: "/products/pot.jpg",
+  jacket: "/products/jacket.jpg",
+  bottle: "/products/bottle.jpg",
+};
 export function ItemTile({ sku, category }: { sku: string; category?: string }) {
+  const photo = SAMPLE_PHOTO[sku];
+  if (photo)
+    return (
+      <span className="planner-tile photo" aria-hidden="true">
+        <img src={photo} alt="" loading="lazy" decoding="async" />
+      </span>
+    );
   const art = ITEM_ART[sku] ?? ITEM_ART[category ?? ""] ?? ITEM_ART.general;
   return (
     <span className="planner-tile" style={{ background: art.bg }} aria-hidden="true">
