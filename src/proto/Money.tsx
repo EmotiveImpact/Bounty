@@ -18,6 +18,7 @@ import {
   MoneyInput,
   Notice,
   PageHead,
+  Segmented,
   Toasts,
   Window,
   useToast,
@@ -172,6 +173,11 @@ function MoneyInner({ lens, lensButtons, go }: Props) {
   const [draft, setDraft] = useState({ name: "", amount: "", deadline: "" });
   const [errs, setErrs] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
+  // The monthly target is set here on Money; it used to live in Profile.
+  const [targetForm, setTargetForm] = useState(false);
+  const [targetDraft, setTargetDraft] = useState("");
+  const [targetType, setTargetType] = useState<"income" | "savings">("income");
+  const [targetErr, setTargetErr] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -231,6 +237,45 @@ function MoneyInner({ lens, lensButtons, go }: Props) {
       setBusy(false);
     }
   }
+  function openTarget() {
+    setTargetDraft(goals && goals.monthlyTarget > 0 ? String(goals.monthlyTarget / 100) : "");
+    setTargetType(goals?.targetType ?? "income");
+    setTargetErr("");
+    setTargetForm(true);
+  }
+  async function saveTarget(ev: React.FormEvent) {
+    ev.preventDefault();
+    const t = targetDraft.trim().replace(/[£,\s]/g, "");
+    const amount = t === "" ? 0 : Number(t);
+    if (!Number.isFinite(amount) || amount < 0 || amount > 100000) {
+      setTargetErr("An amount between £0 and £100,000. Leave it empty for no target.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const current = await api<GoalsData & Record<string, unknown>>("goals");
+      const today = new Date().toISOString().slice(0, 10);
+      const by = typeof current.cashNeededBy === "string" ? current.cashNeededBy : null;
+      const saved = await api<GoalsData>(
+        "goals",
+        {
+          ...current,
+          targetType,
+          monthlyTarget: toPence(amount),
+          // A cash-back date that has already passed cannot be saved again.
+          cashNeededBy: by && by >= today ? by : null,
+        },
+        "PUT",
+      );
+      setGoals(saved);
+      setTargetForm(false);
+      say(amount > 0 ? "Monthly target saved." : "Monthly target removed.");
+    } catch (e) {
+      setTargetErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
   async function removeGoal(t: Target) {
     setBusy(true);
     try {
@@ -279,15 +324,15 @@ function MoneyInner({ lens, lensButtons, go }: Props) {
           max={target}
           shown={`${pounds(Math.max(0, kept))} of ${pounds(target)}`}
         />
-        <Button variant="text" size="sm" onClick={() => go("profile")}>
+        <Button variant="text" size="sm" onClick={openTarget}>
           Change target
         </Button>
       </div>
     ) : (
       <p className="mn-p">
         No monthly target yet.{" "}
-        <Button variant="text" size="sm" onClick={() => go("profile")}>
-          Set one in settings
+        <Button variant="text" size="sm" onClick={openTarget}>
+          Set a target
         </Button>
       </p>
     );
@@ -376,6 +421,47 @@ function MoneyInner({ lens, lensButtons, go }: Props) {
             {errs.form}
           </Notice>
         )}
+      </form>
+    </Window>
+  );
+
+  const targetWindow = (
+    <Window
+      open={targetForm}
+      onOpenChange={setTargetForm}
+      tint="candy"
+      title="Monthly target"
+      description="What you want to keep each month. Only money that has reached you counts."
+      footer={
+        <>
+          <Button variant="line" onClick={() => setTargetForm(false)}>
+            Cancel
+          </Button>
+          <Button variant="main" type="submit" form="mn-target" disabled={busy}>
+            {busy ? "Saving…" : "Save target"}
+          </Button>
+        </>
+      }
+    >
+      <form id="mn-target" className="k-form" onSubmit={saveTarget} noValidate>
+        <Field label="Each month" htmlFor="mn-target-amount" error={targetErr}>
+          <MoneyInput
+            id="mn-target-amount"
+            placeholder="300"
+            value={targetDraft}
+            autoFocus
+            onChange={(e) => setTargetDraft(e.target.value)}
+          />
+        </Field>
+        <Segmented
+          label="What counts"
+          value={targetType}
+          onChange={(v) => setTargetType(v as "income" | "savings")}
+          options={[
+            ["income", "Money from selling"],
+            ["savings", "Household savings"],
+          ]}
+        />
       </form>
     </Window>
   );
@@ -469,6 +555,7 @@ function MoneyInner({ lens, lensButtons, go }: Props) {
         </div>
         <ExampleMonth />
         {goalWindow}
+        {targetWindow}
       </div>
     );
 
@@ -576,6 +663,7 @@ function MoneyInner({ lens, lensButtons, go }: Props) {
       </div>
       <ExampleMonth />
       {goalWindow}
+      {targetWindow}
     </div>
   );
 }
