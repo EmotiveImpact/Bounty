@@ -279,7 +279,9 @@ const ukDay = (iso: string | null) =>
 const minutesText = (m: number | null) =>
   m === null ? "none recorded" : hours(m);
 
-export default function Ledger() {
+/** The full records. bare leaves out the month summary and the tax note,
+    which the Stock and Money screens already show. */
+export default function Ledger({ bare = false }: { bare?: boolean }) {
   const [trips, setTrips] = useState<TripRow[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [version, setVersion] = useState(0);
@@ -302,7 +304,7 @@ export default function Ledger() {
 
   return (
     <section className="ledger">
-      <SummaryPanel version={version} />
+      {!bare && <SummaryPanel version={version} />}
       <div className="ledger-layout">
         <article className="ledger-list">
           <h2>Trips</h2>
@@ -328,7 +330,7 @@ export default function Ledger() {
         </article>
       </div>
       <MetricsPanel version={version} />
-      <TaxNote />
+      {!bare && <TaxNote />}
     </section>
   );
 }

@@ -27,13 +27,19 @@ function PlannerPage() {
   );
 }
 
+// Stock's full records, without the month summary and tax note that the
+// new Stock and Money screens already show.
+function StockRecords() {
+  return <Ledger bare />;
+}
+
 // The older screens, shown inside the new shell until each is ported.
 const LEGACY: Partial<Record<View, React.ComponentType>> = {
   scan: Scan,
   planner: PlannerPage,
   research: Research,
   tips: Bounties,
-  stock: Ledger,
+  stock: StockRecords,
   sources: Sources,
 };
 

@@ -21,6 +21,7 @@ import { Ico } from "./icons";
 import MoneyScreen from "./Money";
 import TripPage from "./TripPage";
 import StockScreen from "./StockScreen";
+import Blocks from "../ui/Blocks";
 import { GoalsSettings } from "../Goals";
 import SignOff from "./SignOff";
 import "./proto.css";
@@ -53,7 +54,8 @@ export type View =
   | "research"
   | "sources"
   | "profile"
-  | "watching";
+  | "watching"
+  | "blocks";
 
 // The address for each screen. The older screens keep their old names, so
 // links inside them such as #Planner still work.
@@ -69,6 +71,7 @@ const HASH: Record<View, string> = {
   sources: "Sources",
   profile: "Profile",
   watching: "Saved",
+  blocks: "Blocks",
 };
 /* When a find is saved the heart pops and a few short lines flick out
    around it, like Pinterest. Skipped for people who ask for reduced motion. */
@@ -1762,6 +1765,9 @@ export default function ProtoApp({
           <BuyingRules />
         </div>
       </div>
+      <p className="sub" style={{ marginTop: 20, fontSize: 13 }}>
+        <a href="#Blocks">See the building blocks</a> the screens are made from.
+      </p>
     </>
   );
 
@@ -2157,6 +2163,7 @@ export default function ProtoApp({
     ) : null;
   else if (view === "profile") body = vProfile();
   else if (view === "watching") body = vWatching();
+  else if (view === "blocks") body = <Blocks />;
   else if (view === "planner")
     body = (
       <>

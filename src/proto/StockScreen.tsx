@@ -1,11 +1,35 @@
-// Stock in the new shell, built from the agreed full-site mock: each open
-// trip shows what you bought, what has sold and what is left, with one-tap
-// actions for the things that happen next (a sale, the money arriving, a
-// cost, a return, time spent). Everything is a dated ledger entry, so Money
-// updates from it. The full records (proofs, checks, editing) stay below.
-import React, { useEffect, useState } from "react";
+// Stock, built from the building blocks (src/ui/kit.tsx). Each open trip is
+// one card with one main button for its next step (a sale, the money
+// arriving, closing it), everything else under More, and the full detail in
+// a window. Every action is a dated ledger entry, so Money updates from it.
+// The older full records (proofs, checks, editing) open below on request.
+import React, { useEffect, useRef, useState } from "react";
 import { api, money, toPence } from "../api";
 import { readBase64 } from "../Ledger";
+import {
+  Button,
+  Card,
+  Chip,
+  Empty,
+  Field,
+  Figure,
+  Figures,
+  Input,
+  Menu,
+  Meter,
+  MoneyInput,
+  Notice,
+  PageHead,
+  Row,
+  Rows,
+  Segmented,
+  Tabs,
+  Toasts,
+  Window,
+  useToast,
+  type ChipTone,
+  type MenuItem,
+} from "../ui/kit";
 import "./stock.css";
 
 type EntryType = "receipt" | "sale" | "payout" | "expense" | "refund" | "work" | "saving";
@@ -24,10 +48,12 @@ type TripRow = {
 type Entry = {
   id: number;
   type: EntryType;
-  amount: number;
+  amount: number | null;
   units: number | null;
   reference: string | null;
   occurred: string;
+  minutes?: number | null;
+  note?: string | null;
 };
 type Detail = {
   entries: Entry[];
@@ -35,25 +61,66 @@ type Detail = {
 };
 type Summary = { pendingPayouts: number; cashTiedUp?: number; unsoldUnits?: number; realisedEarnings: number };
 type Action = "sale" | "payout" | "expense" | "refund" | "work" | "receipt";
+type Stage = "plan" | "bought" | "sell" | "wait" | "done" | "closed" | "hh";
 
-const ACTIONS: [Action, string][] = [
-  ["sale", "Record a sale"],
-  ["payout", "Money arrived"],
-  ["expense", "Add a cost"],
-  ["refund", "Return"],
-  ["work", "Add time"],
-  ["receipt", "Add a purchase"],
+const ACTION_LABEL: Record<Action, string> = {
+  receipt: "Add a purchase",
+  sale: "Record a sale",
+  payout: "Money arrived",
+  expense: "Add a cost",
+  refund: "Record a return",
+  work: "Add time",
+};
+const ACTION_ORDER: Action[] = ["sale", "payout", "receipt", "expense", "refund", "work"];
+const COSTS: [string, string][] = [
+  ["Postage", "Postage"],
+  ["Packaging", "Packaging"],
+  ["Selling fees", "Selling fees"],
+  ["Fuel or fares", "Fuel or fares"],
+  ["Parking", "Parking"],
+  ["Other", "Other"],
 ];
-const COSTS = ["Postage", "Packaging", "Selling fees", "Fuel or fares", "Parking", "Other"];
 const PROOF_TYPES = ["image/jpeg", "image/png", "application/pdf"];
 // Purchases recorded without an item name are grouped under this.
 const UNNAMED = "Items on this trip";
+
+const STAGE: Record<Stage, [string, ChipTone]> = {
+  plan: ["Planned", "plan"],
+  bought: ["Bought", "bought"],
+  sell: ["Selling", "listed"],
+  wait: ["Sold, waiting for money", "wait"],
+  done: ["All sold and paid", "paid"],
+  closed: ["Finished", "done"],
+  hh: ["Household", "plan"],
+};
+const ENTRY_LABEL: Record<EntryType, string> = {
+  receipt: "Bought",
+  sale: "Sold",
+  payout: "Money arrived",
+  expense: "Cost",
+  refund: "Returned",
+  work: "Time",
+  saving: "Saving",
+};
 
 const today = () => {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 };
+const shortDate = (iso: string) => {
+  const d = new Date(iso.length === 10 ? iso + "T12:00:00" : iso);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "Europe/London" });
+};
+const initials = (s: string) =>
+  s
+    .split(/\s+/)
+    .filter((w) => /^[A-Za-z0-9]/.test(w))
+    .slice(0, 2)
+    .map((w) => w[0].toUpperCase())
+    .join("") || "•";
 
 /** Items on a trip, from its purchase entries, with what has sold. */
 function itemsOf(entries: Entry[]) {
@@ -68,32 +135,61 @@ function itemsOf(entries: Entry[]) {
     if (e.type === "receipt") {
       const r = row(name);
       r.bought += e.units ?? 0;
-      r.paid += e.amount;
+      r.paid += e.amount ?? 0;
     } else if (e.type === "sale" && m.has(name)) row(name).sold += e.units ?? 0;
     else if (e.type === "refund" && m.has(name)) row(name).returned += e.units ?? 0;
   }
   return [...m.values()];
 }
 
-function stage(t: TripRow, d: Detail | undefined) {
-  if (t.kind === "household") return ["Household", "hh"];
-  if (t.status === "closed") return ["Closed", "done"];
+function stageOf(t: TripRow, d: Detail | undefined): Stage {
+  if (t.kind === "household") return "hh";
+  if (t.status === "closed") return "closed";
   const r = d?.reconciliation;
-  if (!r || r.unitsBought === 0) return ["Planned", "plan"];
-  if (t.pendingPayout > 0) return ["Sold, waiting for money", "wait"];
-  if (r.unitsSold === 0) return ["Bought, not listed or sold", "bought"];
-  if ((t.unsoldUnits ?? 0) > 0) return ["Selling", "sell"];
-  return ["All sold and paid", "done"];
+  if (!r || r.unitsBought === 0) return "plan";
+  if (t.pendingPayout > 0) return "wait";
+  if (r.unitsSold === 0) return "bought";
+  if ((t.unsoldUnits ?? 0) > 0) return "sell";
+  return "done";
 }
 
-export default function StockScreen({ legacy, go }: { legacy: React.ReactNode; go: (v: "money" | "deals") => void }) {
+/** The likely next step for a trip at this stage. */
+const NEXT: Record<Stage, Action | "close" | "details"> = {
+  plan: "receipt",
+  bought: "sale",
+  sell: "sale",
+  wait: "payout",
+  done: "close",
+  closed: "details",
+  hh: "details",
+};
+
+type Open =
+  | { kind: "entry"; trip: TripRow; action: Action; item?: string }
+  | { kind: "details"; trip: TripRow }
+  | { kind: "close"; trip: TripRow }
+  | null;
+
+export default function StockScreen(props: { legacy: React.ReactNode; go: (v: "money" | "deals") => void }) {
+  return (
+    <Toasts>
+      <Stock {...props} />
+    </Toasts>
+  );
+}
+
+function Stock({ legacy, go }: { legacy: React.ReactNode; go: (v: "money" | "deals") => void }) {
+  const say = useToast();
   const [trips, setTrips] = useState<TripRow[] | null>(null);
   const [details, setDetails] = useState<Record<number, Detail>>({});
   const [sum, setSum] = useState<Summary | null>(null);
   const [error, setError] = useState("");
   const [version, setVersion] = useState(0);
-  const [open, setOpen] = useState<{ trip: number; action: Action; item?: string } | null>(null);
-  const [notice, setNotice] = useState<{ trip: number; text: string } | null>(null);
+  const [open, setOpen] = useState<Open>(null);
+  const [tab, setTab] = useState<"open" | "done">("open");
+  const [records, setRecords] = useState(false);
+  const recordsRef = useRef<HTMLElement>(null);
+  const refresh = () => setVersion((v) => v + 1);
 
   useEffect(() => {
     let active = true;
@@ -118,340 +214,604 @@ export default function StockScreen({ legacy, go }: { legacy: React.ReactNode; g
   }, [version]);
 
   const openTrips = (trips ?? []).filter((t) => t.status === "open");
-  const closed = (trips ?? []).filter((t) => t.status === "closed").slice(0, 8);
+  const finished = (trips ?? []).filter((t) => t.status === "closed");
 
-  async function close(t: TripRow) {
+  async function closeTrip(t: TripRow) {
     try {
       await api("ledger/trips/" + t.id + "/close", {});
-      setNotice({ trip: t.id, text: "Trip closed." });
-      setVersion((v) => v + 1);
+      setOpen(null);
+      say(`${t.label} moved to Finished.`);
+      refresh();
     } catch (e) {
-      setNotice({ trip: t.id, text: (e as Error).message });
+      say((e as Error).message);
     }
   }
 
-  return (
-    <>
-      <div className="titlebar">
-        <div>
-          <h1>Stock</h1>
-          <p>Everything you bought, from the shelf to the payout. Each step you record here updates Money.</p>
-        </div>
-      </div>
-      {sum && (
-        <div className="stats three sstats">
-          <div className="stat">
-            <small>Not sold yet</small>
-            <b>{sum.unsoldUnits ?? 0} units</b>
-            <span>{money(sum.cashTiedUp ?? 0)} of your cash in stock</span>
-          </div>
-          <div className="stat">
-            <small>Sold, waiting for money</small>
-            <b>{money(sum.pendingPayouts)}</b>
-            <span>record it when it arrives</span>
-          </div>
-          <div className="stat">
-            <small>Kept this month</small>
-            <b className="kept">{money(sum.realisedEarnings)}</b>
-            <span>
-              <button type="button" className="linkbtn" onClick={() => go("money")}>
-                See Money
-              </button>
-            </span>
-          </div>
-        </div>
-      )}
-      {error && <p className="note">Your stock could not be loaded ({error}).</p>}
-      {trips && openTrips.length === 0 && (
-        <div className="panel sempty">
-          <h3>No open trips</h3>
-          <p className="muted">
-            Plan a trip from Deals, tick things off in the shop, then press Finish trip. What you got lands
-            here, ready to sell.
-          </p>
-          <button type="button" className="bt ghost sm" onClick={() => go("deals")}>
+  function showRecords() {
+    setOpen(null);
+    setRecords(true);
+    requestAnimationFrame(() => recordsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  }
+
+  const openList =
+    trips && openTrips.length === 0 ? (
+      <Empty
+        title="No open trips"
+        text="Plan a trip from Deals, tick things off in the shop, then press Finish trip. What you got lands here, ready to sell."
+        action={
+          <Button variant="main" onClick={() => go("deals")}>
             Browse deals
-          </button>
-        </div>
-      )}
-      <div className="strips">
-        {openTrips.map((t) => {
-          const d = details[t.id];
-          const [label, cls] = stage(t, d);
-          const items = d ? itemsOf(d.entries) : [];
-          const resale = t.kind === "resale";
-          return (
-            <div key={t.id} className="panel scard">
-              <div className="shead">
-                <div>
-                  <h3>{t.label}</h3>
-                  <span className={"stag " + cls}>{label}</span>
-                  {t.sample && <span className="stag">Sample</span>}
-                  {t.verified && <span className="stag done">Verified</span>}
-                </div>
-                <div className="sfig">
-                  <span>
-                    <small>Waiting</small>
-                    <b>{money(t.pendingPayout)}</b>
-                  </span>
-                  <span>
-                    <small>Kept so far</small>
-                    <b className="kept">{money(t.realisedContribution ?? 0)}</b>
-                  </span>
-                </div>
-              </div>
-              {resale && items.length > 0 && (
-                <div className="sitems">
-                  {items.map((it) => {
-                    const left = Math.max(0, it.bought - it.sold);
-                    return (
-                      <div key={it.name} className="sitem">
-                        <div className="tname">
-                          <b>{it.name}</b>
-                          <small>
-                            {it.bought} bought at {money(it.bought ? Math.round(it.paid / it.bought) : 0)} each ·{" "}
-                            {it.sold} sold{it.returned ? ` · ${it.returned} returned` : ""}
-                          </small>
-                        </div>
-                        <div className="sprog" aria-label={`${it.sold} of ${it.bought} sold`}>
-                          <i style={{ width: (it.bought ? Math.min(100, (it.sold / it.bought) * 100) : 0) + "%" }} />
-                        </div>
-                        <span className="sleft">{left} left</span>
-                        {left > 0 && (
-                          <button
-                            type="button"
-                            className="bt ghost sm"
-                            onClick={() => setOpen({ trip: t.id, action: "sale", item: it.name })}
-                          >
-                            Sold one
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-              {resale && (
-                <div className="sacts">
-                  {ACTIONS.map(([a, l]) => (
-                    <button
-                      key={a}
-                      type="button"
-                      className="chipbtn"
-                      aria-pressed={open?.trip === t.id && open.action === a}
-                      onClick={() =>
-                        setOpen(open?.trip === t.id && open.action === a ? null : { trip: t.id, action: a })
-                      }
-                    >
-                      {l}
-                    </button>
-                  ))}
-                  <button type="button" className="chipbtn" onClick={() => close(t)}>
-                    Close trip
-                  </button>
-                </div>
-              )}
-              {!resale && (
-                <p className="muted">Household savings are recorded in the full records below.</p>
-              )}
-              {open?.trip === t.id && (
-                <EntryQuick
-                  key={open.action + (open.item ?? "")}
-                  trip={t}
-                  action={open.action}
-                  item={open.item}
-                  items={items.map((i) => i.name)}
-                  onDone={(text) => {
-                    setOpen(null);
-                    setNotice({ trip: t.id, text });
-                    setVersion((v) => v + 1);
-                  }}
-                  onCancel={() => setOpen(null)}
-                />
-              )}
-              {notice?.trip === t.id && (
-                <p className="muted" role="status">
-                  {notice.text}
-                </p>
-              )}
-            </div>
-          );
-        })}
+          </Button>
+        }
+      />
+    ) : (
+      <div className="sk-cards">
+        {openTrips.map((t) => (
+          <TripCard
+            key={t.id}
+            trip={t}
+            detail={details[t.id]}
+            onAction={(action, item) => setOpen({ kind: "entry", trip: t, action, item })}
+            onDetails={() => setOpen({ kind: "details", trip: t })}
+            onClose={() => setOpen({ kind: "close", trip: t })}
+          />
+        ))}
       </div>
-      {closed.length > 0 && (
-        <div className="panel sclosed">
-          <h3>
-            Closed trips <small>most recent</small>
-          </h3>
-          {closed.map((t) => (
-            <div key={t.id} className="set">
-              <span>{t.label}</span>
-              <b>{t.realisedContribution === null ? "Not known" : money(t.realisedContribution) + " kept"}</b>
-            </div>
+    );
+
+  const doneList =
+    finished.length === 0 ? (
+      <Empty title="Nothing finished yet" text="When every item on a trip is sold and paid, close it and it moves here." />
+    ) : (
+      <Card>
+        <Rows>
+          {finished.map((t) => (
+            <Row
+              key={t.id}
+              badge={initials(t.label)}
+              tint="pistachio"
+              title={t.label}
+              sub={"Started " + shortDate(t.created) + (t.sample ? " · sample" : "")}
+              value={t.realisedContribution === null ? "Not known" : money(t.realisedContribution)}
+              valueNote={t.realisedContribution === null ? undefined : t.realisedContribution >= 0 ? "kept" : "lost"}
+              tone={(t.realisedContribution ?? -1) >= 0 ? "profit" : undefined}
+              onClick={() => setOpen({ kind: "details", trip: t })}
+            />
           ))}
-        </div>
+        </Rows>
+      </Card>
+    );
+
+  return (
+    <div className="sk">
+      <PageHead
+        title="Stock"
+        tint="peach"
+        lead="From the shelf to the payout. Each step you record here updates Money."
+      />
+      {sum && (
+        <Figures>
+          <Figure
+            label="Kept this month"
+            value={money(sum.realisedEarnings)}
+            tone={sum.realisedEarnings >= 0 ? "profit" : "loss"}
+            note={
+              <Button variant="text" size="sm" onClick={() => go("money")}>
+                See Money
+              </Button>
+            }
+          />
+          <Figure label="Waiting for money" value={money(sum.pendingPayouts)} note="sold, not paid out yet" />
+          <Figure
+            label="Not sold yet"
+            value={`${sum.unsoldUnits ?? 0} ${sum.unsoldUnits === 1 ? "unit" : "units"}`}
+            note={`${money(sum.cashTiedUp ?? 0)} of your cash`}
+          />
+        </Figures>
       )}
-      <section className="stockmore">
-        <h2>Full records</h2>
-        <p>Every entry and proof, the checks behind Verified, and how each trip compared with its prediction.</p>
-        <div className="legacy">{legacy}</div>
+      {error && (
+        <Notice tone="loss" title="Not loaded.">
+          Your stock could not be loaded ({error}).
+        </Notice>
+      )}
+      {trips && (
+        <Tabs
+          label="Trips"
+          value={tab}
+          onChange={setTab}
+          tabs={[
+            { value: "open", label: "Open", count: openTrips.length, content: openList },
+            { value: "done", label: "Finished", count: finished.length, content: doneList },
+          ]}
+        />
+      )}
+
+      <section className="sk-records" ref={recordsRef}>
+        <div className="sk-rechead">
+          <div>
+            <h2 className="k-display">Full records</h2>
+            <p>Every entry and proof, the checks behind Verified, and how each trip compared with its prediction.</p>
+          </div>
+          <Button variant="line" onClick={() => setRecords((r) => !r)} aria-expanded={records}>
+            {records ? "Hide full records" : "Show full records"}
+          </Button>
+        </div>
+        {records && <div className="legacy">{legacy}</div>}
       </section>
-    </>
+
+      {open?.kind === "entry" && (
+        <EntryWindow
+          key={open.trip.id + open.action + (open.item ?? "")}
+          trip={open.trip}
+          action={open.action}
+          item={open.item}
+          items={itemsOf(details[open.trip.id]?.entries ?? []).map((i) => i.name)}
+          onClose={() => setOpen(null)}
+          onSaved={(text, undo) => {
+            setOpen(null);
+            say(text, undo ? () => undo().then(refresh, (e) => say((e as Error).message)) : undefined);
+            refresh();
+          }}
+        />
+      )}
+      {open?.kind === "details" && (
+        <DetailsWindow
+          trip={open.trip}
+          version={version}
+          onClose={() => setOpen(null)}
+          onAction={(action, item) => setOpen({ kind: "entry", trip: open.trip, action, item })}
+          onRecords={showRecords}
+        />
+      )}
+      {open?.kind === "close" && (
+        <Window
+          open
+          onOpenChange={(o) => !o && setOpen(null)}
+          tint="peach"
+          title="Close this trip?"
+          description={open.trip.label}
+          footer={
+            <>
+              <Button variant="line" onClick={() => setOpen(null)}>
+                Not yet
+              </Button>
+              <Button variant="main" onClick={() => closeTrip(open.trip)}>
+                Close trip
+              </Button>
+            </>
+          }
+        >
+          <p className="sk-p">
+            It moves to Finished and its figures stay in Money. You cannot add to a trip once it is closed, so
+            record any last sale, cost or payout first.
+          </p>
+          {(open.trip.unsoldUnits ?? 0) > 0 && (
+            <Notice tone="warn" title="Check first.">
+              {open.trip.unsoldUnits} {open.trip.unsoldUnits === 1 ? "unit is" : "units are"} still unsold on this
+              trip.
+            </Notice>
+          )}
+          {open.trip.pendingPayout > 0 && (
+            <Notice tone="warn" title="Check first.">
+              {money(open.trip.pendingPayout)} is still waiting to be paid out.
+            </Notice>
+          )}
+        </Window>
+      )}
+    </div>
   );
 }
 
-function EntryQuick({
+function TripCard({
+  trip: t,
+  detail: d,
+  onAction,
+  onDetails,
+  onClose,
+}: {
+  trip: TripRow;
+  detail: Detail | undefined;
+  onAction: (a: Action, item?: string) => void;
+  onDetails: () => void;
+  onClose: () => void;
+}) {
+  const stage = stageOf(t, d);
+  const [label, tone] = STAGE[stage];
+  const next = NEXT[stage];
+  const r = d?.reconciliation;
+  const rc = t.realisedContribution;
+  const resale = t.kind === "resale";
+  const main =
+    next === "close" ? (
+      <Button variant="main" onClick={onClose}>
+        Close trip
+      </Button>
+    ) : next === "details" ? (
+      <Button variant="main" onClick={onDetails}>
+        Open details
+      </Button>
+    ) : (
+      <Button variant="main" onClick={() => onAction(next)}>
+        {next === "receipt" ? "Add what you bought" : ACTION_LABEL[next]}
+      </Button>
+    );
+  const more: MenuItem[] = resale
+    ? [
+        ...ACTION_ORDER.filter((a) => a !== next).map((a) => ({ label: ACTION_LABEL[a], onSelect: () => onAction(a) })),
+        ...(next !== "close" ? ["-" as const, { label: "Close trip", onSelect: onClose }] : []),
+      ]
+    : [];
+  const left = r ? Math.max(0, r.unitsBought - r.unitsSold) : 0;
+
+  return (
+    <Card className="sk-card">
+      <div className="sk-top">
+        <div className="sk-name">
+          <h3>
+            <button type="button" className="sk-title k-focus" onClick={onDetails}>
+              {t.label}
+              <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          </h3>
+          <div className="k-chips">
+            <Chip tone={tone}>{label}</Chip>
+            {t.verified && <Chip tone="buy">Verified</Chip>}
+            {t.sample && <Chip tone="sample">Sample</Chip>}
+          </div>
+        </div>
+        <div className="sk-money">
+          <span>
+            <small>Waiting</small>
+            <b>{money(t.pendingPayout)}</b>
+          </span>
+          {rc !== null && (
+            <span>
+              <small>{rc >= 0 ? "Kept so far" : "To earn back"}</small>
+              <b className={rc > 0 ? "profit" : undefined}>{money(Math.abs(rc))}</b>
+            </span>
+          )}
+        </div>
+      </div>
+      {resale && r && r.unitsBought > 0 && (
+        <Meter
+          label="Sold"
+          value={r.unitsSold}
+          max={r.unitsBought}
+          shown={`${r.unitsSold} of ${r.unitsBought} · ${left} left`}
+        />
+      )}
+      {!resale && <p className="sk-p">Household savings are recorded in the full records.</p>}
+      <div className="sk-acts">
+        {main}
+        {more.length > 0 && <Menu items={more} />}
+        {next !== "details" && (
+          <Button variant="text" className="sk-details" onClick={onDetails}>
+            Details
+          </Button>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function DetailsWindow({
+  trip: t,
+  version,
+  onClose,
+  onAction,
+  onRecords,
+}: {
+  trip: TripRow;
+  version: number;
+  onClose: () => void;
+  onAction: (a: Action, item?: string) => void;
+  onRecords: () => void;
+}) {
+  const [d, setD] = useState<Detail | null>(null);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    let active = true;
+    api<Detail>("ledger/trips/" + t.id)
+      .then((x) => active && setD(x))
+      .catch((e) => active && setErr((e as Error).message));
+    return () => {
+      active = false;
+    };
+  }, [t.id, version]);
+  const stage = stageOf(t, d ?? undefined);
+  const [label, tone] = STAGE[stage];
+  const items = d ? itemsOf(d.entries) : [];
+  const entries = d ? [...d.entries].sort((a, b) => (a.occurred < b.occurred ? 1 : a.occurred > b.occurred ? -1 : b.id - a.id)) : [];
+  const open = t.status === "open" && t.kind === "resale";
+  const next = NEXT[stage];
+
+  return (
+    <Window
+      open
+      wide
+      onOpenChange={(o) => !o && onClose()}
+      tint="peach"
+      title={t.label}
+      description={
+        <span className="k-chips" style={{ marginTop: 4 }}>
+          <Chip tone={tone}>{label}</Chip>
+          {t.verified && <Chip tone="buy">Verified</Chip>}
+          {t.sample && <Chip tone="sample">Sample</Chip>}
+        </span>
+      }
+      footer={
+        <>
+          <Button variant="text" onClick={onRecords} style={{ marginRight: "auto" }}>
+            Proofs and checks
+          </Button>
+          {open && next !== "close" && next !== "details" && (
+            <Button variant="main" onClick={() => onAction(next)}>
+              {next === "receipt" ? "Add what you bought" : ACTION_LABEL[next]}
+            </Button>
+          )}
+        </>
+      }
+    >
+      {err && (
+        <Notice tone="loss" title="Not loaded.">
+          {err}
+        </Notice>
+      )}
+      {!d && !err && <p className="sk-p">Loading…</p>}
+      {d && (
+        <>
+          <div className="sk-wfigs">
+            <Figure label="You spent" value={money(d.reconciliation.spend)} />
+            <Figure label="Paid out to you" value={money(d.reconciliation.payouts)} />
+            <Figure label="Waiting" value={money(t.pendingPayout)} />
+            <Figure label="Cash in stock" value={money(d.reconciliation.cashTiedUp)} />
+          </div>
+          {items.length > 0 && (
+            <div className="sk-sec">
+              <h4>What you bought</h4>
+              <Rows>
+                {items.map((it) => {
+                  const left = Math.max(0, it.bought - it.sold);
+                  return (
+                    <Row
+                      key={it.name}
+                      badge={left}
+                      tint={left ? "peach" : "lime"}
+                      title={it.name}
+                      sub={`${it.bought} at ${money(it.bought ? Math.round(it.paid / it.bought) : 0)} each · ${it.sold} sold${
+                        it.returned ? ` · ${it.returned} returned` : ""
+                      }`}
+                      slot={
+                        open && left > 0 ? (
+                          <Button size="sm" onClick={() => onAction("sale", it.name)}>
+                            Sold one
+                          </Button>
+                        ) : (
+                          <span className="sk-left">{left ? `${left} left` : "All sold"}</span>
+                        )
+                      }
+                    />
+                  );
+                })}
+              </Rows>
+            </div>
+          )}
+          <div className="sk-sec">
+            <h4>Everything recorded</h4>
+            {entries.length === 0 ? (
+              <p className="sk-p">Nothing recorded on this trip yet.</p>
+            ) : (
+              <Rows>
+                {entries.map((e) => (
+                  <Row
+                    key={e.id}
+                    date={{ day: shortDate(e.occurred).split(" ")[0], month: shortDate(e.occurred).split(" ")[1] ?? "" }}
+                    tint={e.type === "payout" ? "lime" : e.type === "sale" ? "sky" : e.type === "receipt" ? "peach" : undefined}
+                    title={ENTRY_LABEL[e.type] + (e.reference ? ": " + e.reference : e.note ? ": " + e.note : "")}
+                    sub={e.units ? `${e.units} ${e.units === 1 ? "unit" : "units"}` : e.type === "work" ? "Shopping, listing or packing" : undefined}
+                    value={
+                      e.type === "work"
+                        ? `${Math.round(((e.minutes ?? 0) / 60) * 100) / 100} h`
+                        : money(e.amount ?? 0)
+                    }
+                    tone={e.type === "payout" ? "profit" : undefined}
+                  />
+                ))}
+              </Rows>
+            )}
+          </div>
+        </>
+      )}
+    </Window>
+  );
+}
+
+function EntryWindow({
   trip,
   action,
   item,
   items,
-  onDone,
-  onCancel,
+  onClose,
+  onSaved,
 }: {
   trip: TripRow;
   action: Action;
   item?: string;
   items: string[];
-  onDone: (text: string) => void;
-  onCancel: () => void;
+  onClose: () => void;
+  onSaved: (text: string, undo?: () => Promise<unknown>) => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
+  const [errs, setErrs] = useState<Record<string, string>>({});
+  const [cost, setCost] = useState("Postage");
   const withItem = action === "sale" || action === "refund" || action === "receipt";
   const withUnits = withItem || action === "payout";
   const withProof = action === "receipt" || action === "payout";
+  const formId = "entry-" + trip.id;
+  const listId = "items-" + trip.id;
 
   async function submit(ev: React.FormEvent<HTMLFormElement>) {
     ev.preventDefault();
     const f = new FormData(ev.currentTarget);
     const v = (k: string) => String(f.get(k) ?? "").trim();
+    const bad: Record<string, string> = {};
     const body: Record<string, unknown> = { type: action, occurred: v("date") || today() };
     if (action === "work") {
       const mins = Math.round(Number(v("hours")) * 60);
-      if (!Number.isFinite(mins) || mins < 1) return setErr("Say how long, in hours, like 1.5.");
-      body.minutes = mins;
+      if (!Number.isFinite(mins) || mins < 1) bad.hours = "Say how long in hours, like 1.5.";
+      else body.minutes = mins;
     } else {
-      const pounds = Number(v("amount").replace(/^£/, ""));
-      if (!Number.isFinite(pounds) || pounds <= 0) return setErr("Type the amount in pounds.");
-      body.amount = toPence(pounds);
+      const pounds = Number(v("amount").replace(/[£,\s]/g, ""));
+      if (!v("amount") || !Number.isFinite(pounds) || pounds <= 0) bad.amount = "Type the amount in pounds, like 9.50.";
+      else body.amount = toPence(pounds);
     }
-    if (withUnits && v("units")) body.units = Number(v("units"));
+    if (withUnits && v("units")) {
+      const n = Number(v("units"));
+      if (!Number.isInteger(n) || n < 1) bad.units = "A whole number, like 1.";
+      else body.units = n;
+    }
     if (withItem) {
-      if (!v("item")) return setErr("Say which item.");
-      if (v("item") !== UNNAMED) body.reference = v("item").slice(0, 120);
-      if (!body.units) return setErr("Say how many.");
+      if (!v("item")) bad.item = "Say which item.";
+      else if (v("item") !== UNNAMED) body.reference = v("item").slice(0, 120);
+      if (!v("units")) bad.units = "Say how many.";
     }
-    if (action === "expense") body.note = v("what") || null;
+    if (action === "expense") body.note = cost;
     const file = withProof ? (f.get("proof") as File | null) : null;
-    if (file && file.size && !PROOF_TYPES.includes(file.type))
-      return setErr("A photo (JPEG or PNG) or a PDF, please.");
+    if (file && file.size && !PROOF_TYPES.includes(file.type)) bad.proof = "A photo (JPEG or PNG) or a PDF, please.";
+    setErrs(bad);
+    if (Object.keys(bad).length) return;
     setBusy(true);
-    setErr("");
     try {
       const r = await api<{ id: number }>("ledger/trips/" + trip.id + "/entries", body);
-      if (file && file.size)
+      const withFile = !!(file && file.size);
+      if (withFile)
         await api("ledger/trips/" + trip.id + "/proofs", {
           label: (action === "receipt" ? "Receipt " : "Payout ") + body.occurred,
-          mediaType: file.type,
-          data: await readBase64(file),
+          mediaType: file!.type,
+          data: await readBase64(file!),
           entryId: r.id,
         });
-      onDone(
+      const undo = withFile
+        ? undefined
+        : () => api("ledger/trips/" + trip.id + "/entries/" + r.id, {}, "DELETE");
+      onSaved(
         {
-          sale: "Sale recorded. It shows as waiting until the money arrives.",
-          payout: "Money recorded. Money now counts it as kept.",
+          sale: "Sale recorded. It waits until the money arrives.",
+          payout: "Money recorded. Money counts it as kept.",
           expense: "Cost added.",
           refund: "Return recorded.",
-          work: "Time added. Money can now work out your hourly rate.",
+          work: "Time added to your hourly rate.",
           receipt: "Purchase added.",
-          saving: "",
         }[action],
+        undo,
       );
     } catch (e) {
-      setErr((e as Error).message);
+      setErrs({ form: (e as Error).message });
     } finally {
       setBusy(false);
     }
   }
 
-  const listId = "items-" + trip.id;
+  const amountLabel = {
+    sale: "Buyer paid",
+    payout: "Paid to you",
+    expense: "It cost",
+    refund: "Refunded",
+    receipt: "You paid in total",
+    work: "",
+  }[action];
+  const amountHint = {
+    sale: "The total the buyer paid, with any postage they paid. Fees come off when the money arrives.",
+    payout: "What reached your bank after the platform's fees.",
+    expense: undefined,
+    refund: "What you gave back to the buyer.",
+    receipt: "For all of them together, from the receipt.",
+    work: undefined,
+  }[action];
+
   return (
-    <form className="squick" onSubmit={submit} noValidate>
-      {withItem && (
-        <label className="wide">
-          Item
-          <input name="item" list={listId} defaultValue={item ?? (action === "receipt" ? "" : items[0] ?? "")} maxLength={120} />
-          <datalist id={listId}>
-            {items.map((i) => (
-              <option key={i} value={i} />
-            ))}
-          </datalist>
-        </label>
-      )}
-      {withUnits && (
-        <label>
-          {action === "payout" ? "Units (optional)" : "How many"}
-          <input name="units" type="number" min={1} inputMode="numeric" defaultValue={withItem ? 1 : ""} />
-        </label>
-      )}
-      {action === "work" ? (
-        <label>
-          Hours
-          <input name="hours" type="number" min={0.1} step="0.25" inputMode="decimal" placeholder="1.5" />
-        </label>
-      ) : (
-        <label>
-          {
-            {
-              sale: "Buyer paid, £",
-              payout: "Paid to you, £",
-              expense: "Cost, £",
-              refund: "Refunded, £",
-              receipt: "You paid, £",
-              work: "",
-            }[action]
-          }
-          <input name="amount" type="number" min={0.01} step="0.01" inputMode="decimal" />
-        </label>
-      )}
-      {action === "expense" && (
-        <label>
-          What for
-          <select name="what" defaultValue="Postage">
-            {COSTS.map((c) => (
-              <option key={c}>{c}</option>
-            ))}
-          </select>
-        </label>
-      )}
-      <label>
-        Date
-        <input name="date" type="date" max={today()} defaultValue={today()} />
-      </label>
-      {withProof && (
-        <label className="wide">
-          {action === "receipt" ? "Receipt photo (optional)" : "Payout screenshot (optional)"}
-          <input name="proof" type="file" accept={PROOF_TYPES.join(",")} />
-        </label>
-      )}
-      <div className="sbtns">
-        <button className="bt sm" disabled={busy}>
-          Save
-        </button>
-        <button type="button" className="bt ghost sm" onClick={onCancel}>
-          Cancel
-        </button>
-      </div>
-      {err && (
-        <p className="serr" role="alert">
-          {err}
-        </p>
-      )}
-      {action === "sale" && (
-        <small className="muted wide">
-          What the buyer paid in total, including any postage they paid. Fees come off when the money arrives.
-        </small>
-      )}
-    </form>
+    <Window
+      open
+      onOpenChange={(o) => !o && onClose()}
+      tint="peach"
+      title={action === "receipt" ? "Add what you bought" : ACTION_LABEL[action]}
+      description={trip.label}
+      footer={
+        <>
+          <Button variant="line" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button variant="main" type="submit" form={formId} disabled={busy}>
+            {busy ? "Saving…" : "Save"}
+          </Button>
+        </>
+      }
+    >
+      <form id={formId} className="k-form" onSubmit={submit} noValidate>
+        {withItem && (
+          <div className="k-pair sk-pair">
+            <Field label="Item" htmlFor={formId + "-item"} error={errs.item}>
+              <Input
+                id={formId + "-item"}
+                name="item"
+                list={listId}
+                defaultValue={item ?? (action === "receipt" ? "" : items[0] ?? "")}
+                maxLength={120}
+                placeholder="Lip balm gift set"
+              />
+              <datalist id={listId}>
+                {items.map((i) => (
+                  <option key={i} value={i} />
+                ))}
+              </datalist>
+            </Field>
+            <Field label="How many" htmlFor={formId + "-units"} error={errs.units}>
+              <Input id={formId + "-units"} name="units" type="number" min={1} inputMode="numeric" defaultValue={1} />
+            </Field>
+          </div>
+        )}
+        {action === "expense" && (
+          <Field label="What for">
+            <Segmented label="What the cost was for" value={cost} onChange={setCost} options={COSTS} />
+          </Field>
+        )}
+        {action === "work" ? (
+          <Field label="Hours" htmlFor={formId + "-hours"} error={errs.hours} hint="Shopping, travel, listing and packing all count.">
+            <Input id={formId + "-hours"} name="hours" type="text" inputMode="decimal" placeholder="1.5" />
+          </Field>
+        ) : (
+          <Field label={amountLabel} htmlFor={formId + "-amount"} error={errs.amount} hint={amountHint}>
+            <MoneyInput id={formId + "-amount"} name="amount" placeholder="0.00" autoFocus />
+          </Field>
+        )}
+        <div className="k-pair sk-pair">
+          {action === "payout" && (
+            <Field label="Units (optional)" htmlFor={formId + "-units"} error={errs.units}>
+              <Input id={formId + "-units"} name="units" type="number" min={1} inputMode="numeric" />
+            </Field>
+          )}
+          <Field label="Date" htmlFor={formId + "-date"}>
+            <Input id={formId + "-date"} name="date" type="date" max={today()} defaultValue={today()} />
+          </Field>
+        </div>
+        {withProof && (
+          <Field
+            label={action === "receipt" ? "Receipt photo (optional)" : "Payout screenshot (optional)"}
+            htmlFor={formId + "-proof"}
+            error={errs.proof}
+            hint="A proof makes the trip count as Verified."
+          >
+            <Input id={formId + "-proof"} name="proof" type="file" accept={PROOF_TYPES.join(",")} />
+          </Field>
+        )}
+        {errs.form && (
+          <Notice tone="loss" title="Not saved.">
+            {errs.form}
+          </Notice>
+        )}
+      </form>
+    </Window>
   );
 }

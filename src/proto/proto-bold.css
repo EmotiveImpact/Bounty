@@ -34,6 +34,7 @@
   :scope[data-tab="research"] { --tab: var(--c-butter); }
   :scope[data-tab="watching"] { --tab: var(--c-lemon); }
   :scope[data-tab="sources"],
+  :scope[data-tab="blocks"],
   :scope[data-tab="profile"] { --tab: var(--c-lilac); }
 
   /* Headings: Cal Sans Medium in its classic display drawing. */
