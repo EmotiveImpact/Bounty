@@ -12,9 +12,13 @@ import {
   type PlansInfo,
 } from "../plans";
 import { Button, Card, Label, Notice, PageHead, type Tint } from "../ui/kit";
+import { CrewArt, type CrewLook } from "./CrewArt";
 import "./plans.css";
 
 const TINT: Record<Plan["id"], Tint> = { starter: "lime", plus: "sky", fulltime: "lilac" };
+// The character on each plan: the Scout starting out, the Hauler going
+// out more, the Boss running it full time.
+const PLAN_CREW: Record<Plan["id"], CrewLook> = { starter: "scout-walk", plus: "hauler-boxes", fulltime: "boss-cheer" };
 const ORDER: Plan["id"][] = ["starter", "plus", "fulltime"];
 const FEATURE_ROWS: Feature[] = ["deals", "scan", "stock", "money", "tips", "trip", "research", "taxExport"];
 
@@ -61,12 +65,13 @@ function PlanCard({
         : `Start ${plan.name} for ${money(info.intro.pence).replace(".00", "")}`;
   return (
     <section className={"pl-card" + (isMine ? " mine" : "")} style={{ ["--k-tint" as string]: `var(--k-${TINT[plan.id]})` }}>
-      <header className="pl-top">
+      <header className="pl-top has-art">
         <div className="pl-name">
           <h2 className="k-display">{plan.name}</h2>
           {isMine && <span className="pl-badge">Your plan</span>}
         </div>
         <p>{plan.forWho}</p>
+        <CrewArt look={PLAN_CREW[plan.id]} />
       </header>
       <div className="pl-price">
         <b className="k-display">{money(plan.pricePence)}</b>

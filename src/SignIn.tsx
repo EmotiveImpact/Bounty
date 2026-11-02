@@ -3,6 +3,7 @@
 // the top, or when someone tries to save a change while signed out.
 import { useEffect, useState } from "react";
 import "./SignIn.css";
+import { CrewArt } from "./proto/CrewArt";
 
 export type Member = { email: string; name: string | null };
 
@@ -60,6 +61,7 @@ export default function SignIn({
         <button type="button" className="signin-close" aria-label="Close" onClick={onClose}>
           ×
         </button>
+        <CrewArt look="negotiator-deal" className="signin-crew" />
         <h1 id="signin-title">{mode === "in" ? "Sign in" : "Create account"}</h1>
         <p className="signin-sub">
           {mode === "in"

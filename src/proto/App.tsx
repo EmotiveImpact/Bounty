@@ -16,6 +16,7 @@ import {
   type Lens,
 } from "../api";
 import { BuyingRules, ItemTile, byMode } from "../Planner";
+import { CrewArt } from "./CrewArt";
 import { savedExtras, type Deal } from "../Deals";
 import { Ico } from "./icons";
 import MoneyScreen from "./Money";
@@ -1163,9 +1164,10 @@ export default function ProtoApp({
           see="See all gaps"
         />
         {deals && inView.length === 0 && (
-          <p className="sub">
-            No deals within {radius} miles. Try a bigger distance.
-          </p>
+          <div className="crew-note">
+            <CrewArt look="scout-shrug" />
+            <p className="sub">No deals within {radius} miles. Try a bigger distance.</p>
+          </div>
         )}
       </>
     );
@@ -1318,9 +1320,10 @@ export default function ProtoApp({
               </div>
             )}
             {deals && shown.length === 0 && (
-              <p className="sub">
-                Nothing matches. Clear a filter or the search.
-              </p>
+              <div className="crew-note">
+                <CrewArt look="scout-shrug" />
+                <p className="sub">Nothing matches. Clear a filter or the search.</p>
+              </div>
             )}
           </div>
         </div>
@@ -1791,7 +1794,10 @@ export default function ProtoApp({
             ))}
           </div>
         ) : (
-          <p className="sub">Nothing saved yet. Tap the heart on any find.</p>
+          <div className="crew-note">
+            <CrewArt look="insider-idea" />
+            <p className="sub">Nothing saved yet. Tap the heart on any find.</p>
+          </div>
         )}
       </>
     );
@@ -2062,7 +2068,11 @@ export default function ProtoApp({
   const onboarding = onboard ? (
     <div className="obscrim">
       <div className="ob" role="dialog" aria-label="Set up Bounty">
-        <img className="obhero" src="/campaign.jpg" alt="Six Bounty members in bold outfits with coupons, a phone, a calculator, shopping bags and a parcel" />
+        <img
+          className="ob-crew"
+          src="/crew/crew-group.jpg"
+          alt="The Bounty crew together: the Boss, the Scout, the Hauler, the Insider, the Fixer and the Negotiator"
+        />
         {obStep === 1 ? (
           <>
             <small>1 of 2</small>

@@ -247,7 +247,7 @@
 .sc-word { font-size: 48px; line-height: 1; color: var(--k-muted); }
 .sc-unknown { background: var(--k-tile); border-color: transparent; }
 .sc-wait { border: 1.5px dashed var(--k-line-2); border-radius: 22px; padding: 28px; display: grid; gap: 8px; }
-.sc-wait span { font-size: 30px; color: var(--k-ink); }
+.sc-wait .k-display { font-size: 30px; color: var(--k-ink); }
 .sc-wait p { margin: 0; font: 400 14.5px/1.5 var(--k-sans); color: var(--k-muted); max-width: 46ch; }
 .sc .scan-camera { display: grid; gap: 10px; justify-items: start; }
 .sc .scan-camera video { width: 100%; border-radius: 16px; background: #000; }
