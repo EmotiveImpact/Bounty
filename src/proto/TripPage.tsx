@@ -274,7 +274,7 @@ export default function TripPage({
         {head}
         <div className="k-split">
           <Empty
-            art={<CrewArt id="hauler" />}
+            art={<CrewArt look="hauler-trolley" />}
             title="Nothing on your trip yet"
             text="Add finds from Deals with the + button, or let Bounty fill a trip for the cash you have."
             action={

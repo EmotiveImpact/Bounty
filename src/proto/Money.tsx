@@ -341,7 +341,7 @@ function MoneyInner({ lens, lensButtons, go }: Props) {
 
   const emptyNote = empty && (
     <Empty
-      art={<CrewArt id="negotiator" />}
+      art={<CrewArt look="negotiator-receipt" />}
       title="Nothing recorded yet"
       text="Money fills in from the trips you record in Stock: what you bought, what sold and what was paid out."
       action={

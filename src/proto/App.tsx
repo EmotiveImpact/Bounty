@@ -1164,9 +1164,10 @@ export default function ProtoApp({
           see="See all gaps"
         />
         {deals && inView.length === 0 && (
-          <p className="sub">
-            No deals within {radius} miles. Try a bigger distance.
-          </p>
+          <div className="crew-note">
+            <CrewArt look="scout-shrug" />
+            <p className="sub">No deals within {radius} miles. Try a bigger distance.</p>
+          </div>
         )}
       </>
     );
@@ -1319,9 +1320,10 @@ export default function ProtoApp({
               </div>
             )}
             {deals && shown.length === 0 && (
-              <p className="sub">
-                Nothing matches. Clear a filter or the search.
-              </p>
+              <div className="crew-note">
+                <CrewArt look="scout-shrug" />
+                <p className="sub">Nothing matches. Clear a filter or the search.</p>
+              </div>
             )}
           </div>
         </div>
@@ -1792,7 +1794,10 @@ export default function ProtoApp({
             ))}
           </div>
         ) : (
-          <p className="sub">Nothing saved yet. Tap the heart on any find.</p>
+          <div className="crew-note">
+            <CrewArt look="insider-idea" />
+            <p className="sub">Nothing saved yet. Tap the heart on any find.</p>
+          </div>
         )}
       </>
     );
@@ -2063,11 +2068,11 @@ export default function ProtoApp({
   const onboarding = onboard ? (
     <div className="obscrim">
       <div className="ob" role="dialog" aria-label="Set up Bounty">
-        <div className="ob-crew" role="img" aria-label="The Bounty crew: the Boss, the Scout, the Hauler, the Insider, the Fixer and the Negotiator">
-          {(["boss", "scout", "hauler", "insider", "fixer", "negotiator"] as const).map((id) => (
-            <CrewArt key={id} id={id} pose={false} />
-          ))}
-        </div>
+        <img
+          className="ob-crew"
+          src="/crew/crew-group.jpg"
+          alt="The Bounty crew together: the Boss, the Scout, the Hauler, the Insider, the Fixer and the Negotiator"
+        />
         {obStep === 1 ? (
           <>
             <small>1 of 2</small>

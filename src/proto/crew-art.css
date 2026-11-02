@@ -23,12 +23,17 @@
   .k-empty .crew-art { width: 96px; height: 128px; border-radius: 16px; }
 }
 
-/* Welcome card: the six in a row, standing. */
-.ob-crew { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0; margin: -30px -30px 4px; height: 210px; background: #fff; border-bottom: 1px solid var(--k-line, #eee); }
-.ob-crew .crew-art img { object-position: 50% 30%; }
-@media (max-width: 640px) {
-  .ob-crew { height: 170px; }
-}
+/* Welcome card: the crew together. */
+.ob-crew { display: block; width: calc(100% + 60px); max-width: none; margin: -30px -30px 4px; aspect-ratio: 16 / 10; object-fit: cover; object-position: 50% 45%; background: #fff; border-bottom: 1px solid var(--k-line, #eee); }
+
+/* A short note with a character, where a screen or list has nothing yet. */
+.crew-note { display: flex; align-items: center; gap: 16px; padding: 8px 0; }
+.crew-note .crew-art { flex: none; width: 96px; height: 128px; border-radius: 16px; }
+.crew-note .sub { margin: 0; }
+
+/* Sign-in: the Negotiator offering to shake on it. */
+.signin-crew { width: 92px; height: 120px; border-radius: 14px; margin: -6px 0 -4px; }
+.signin-crew img { object-position: 50% 6%; }
 
 /* Plans: the character stands in the coloured top of each plan. */
 .pl-top.has-art { grid-template-columns: minmax(0, 1fr) 88px; column-gap: 12px; padding-bottom: 0; }

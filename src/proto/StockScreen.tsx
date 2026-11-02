@@ -237,7 +237,7 @@ function Stock({ legacy, go }: { legacy: React.ReactNode; go: (v: "money" | "dea
   const openList =
     trips && openTrips.length === 0 ? (
       <Empty
-        art={<CrewArt id="fixer" />}
+        art={<CrewArt look="fixer-handover" />}
         title="No open trips"
         text="Plan a trip from Deals, tick things off in the shop, then press Finish trip. What you got lands here, ready to sell."
         action={
@@ -263,7 +263,7 @@ function Stock({ legacy, go }: { legacy: React.ReactNode; go: (v: "money" | "dea
 
   const doneList =
     finished.length === 0 ? (
-      <Empty title="Nothing finished yet" text="When every item on a trip is sold and paid, close it and it moves here." />
+      <Empty art={<CrewArt look="fixer-parcels" />} title="Nothing finished yet" text="When every item on a trip is sold and paid, close it and it moves here." />
     ) : (
       <Card>
         <Rows>

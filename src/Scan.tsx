@@ -212,7 +212,7 @@ export default function Scan() {
                   <span className="k-display">Ready when you are</span>
                   <p>Your answer shows here: what you keep, what it sells for, and the price to walk away above.</p>
                 </div>
-                <CrewArt id="scout" />
+                <CrewArt look="scout-lookout" />
               </div>
             )
           )}

@@ -123,7 +123,7 @@ export default function TipsScreen({ go }: { go: (v: "deals" | "planner") => voi
   const feed = (rows: Bounty[]) =>
     rows.length === 0 ? (
       <Empty
-        art={<CrewArt id="insider" />}
+        art={<CrewArt look="insider-shush" />}
         title={tab === "go" ? "Nothing to go for right now" : "No tips yet"}
         text="Tips appear here when a scout spots a find on a shelf near you. Each one has a set number of places, so it stays worth the trip."
         action={
