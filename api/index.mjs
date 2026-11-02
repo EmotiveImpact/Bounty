@@ -7,14 +7,19 @@ const { createApi } = await import("../server/app.mjs");
 const { database } = await import("../server/db.mjs");
 const { accessConfig } = await import("../server/access.mjs");
 const { freshPrices } = await import("../server/demo.mjs");
+const { accounts, neonStore } = await import("../server/accounts.mjs");
 
 let handler;
 try {
-  if (!process.env.BOUNTY_PASSWORD)
-    throw Error("add BOUNTY_PASSWORD (16 or more characters) in the Vercel project's environment variables, then redeploy");
-  const { publicHosts, password } = accessConfig();
+  if (!process.env.DATABASE_URL && !process.env.BOUNTY_PASSWORD)
+    throw Error(
+      "add DATABASE_URL (a Neon connection string, for member sign-in) or BOUNTY_PASSWORD (16 or more characters) " +
+        "in the Vercel project's environment variables, then redeploy",
+    );
+  const { publicHosts, password, databaseUrl, inviteCode } = accessConfig();
+  const members = databaseUrl ? accounts(await neonStore(databaseUrl), { inviteCode }) : null;
   const db = database();
-  const api = createApi(db, { publicHosts, password });
+  const api = createApi(db, { publicHosts, password, members });
   const beforeRequest = freshPrices(db);
   handler = async (req, res) => {
     await beforeRequest();

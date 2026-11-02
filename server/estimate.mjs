@@ -8,7 +8,7 @@
 // Branch stock comes only from a recorded availability check: the offer's
 // feed or catalogue never establishes it.
 import { KIND, LICENCE } from "./contract.mjs";
-import { ALERT_RULES, evaluateAlert } from "./alerts.mjs";
+import { ALERT_RULES, ageDays, evaluateAlert } from "./alerts.mjs";
 import { SAMPLE_ASSUMPTIONS, tripEconomics } from "./trip.mjs";
 import {
   CATEGORY_IDS,
@@ -23,7 +23,10 @@ import {
   effectiveRules,
 } from "./opportunity.mjs";
 import { cachedLookup, displayPermitted } from "./evidence.mjs";
-import { accessNeeds, defaults as profileDefaults, gbp } from "./catalog.mjs";
+import { CAR_BOOT_KG, HAND_CARRY_KG, accessNeeds, gbp } from "./catalog.mjs";
+// Whether the trip fits the person making it: their transport, carry limit,
+// cash and storage (round 5, finding 4).
+import { readTripProfile, suitability as tripSuitability } from "./suitability.mjs";
 import { bool, fail, int, isoDate, londonDate, num, oneOf, text } from "./http.mjs";
 import {
   CONDITION_VOCABULARY,
@@ -42,7 +45,16 @@ import {
   soldSample,
   titleTokens,
 } from "./matching.mjs";
-import { CHECK_VALID_DAYS, stockStatus, tableExists } from "./audit.mjs";
+import {
+  CHECK_VALID_DAYS,
+  branchIdentity,
+  branchPlace,
+  sameBranch,
+  shelfChecks,
+  shopIsBranch,
+  stockStatus,
+  tableExists,
+} from "./audit.mjs";
 import { DEFAULT_GOALS, addDays, getGoals, payoutDate } from "./goals.mjs";
 
 const DAY = 86400000;
@@ -593,6 +605,195 @@ export function currentOffer(db, provider, sourceId, now = new Date().toISOStrin
   };
 }
 
+// ---------------------------------------------------------------------------
+// The price at the branch (round 5, finding 1). Stock is confirmed by a check
+// at a branch, so the price the trip is costed at must be shown to apply at
+// that branch too: a price seen at a shop in Preston says nothing about the
+// shelf in Camden, and an online feed or catalogue price says nothing about
+// any shelf.
+
+// How far back a shelf price on an earlier branch check is looked for, only
+// to say that one exists but is too old (the price itself must be from the
+// last ALERT_RULES.maxOfferAgeDays days).
+const SHELF_PRICE_LOOKBACK_DAYS = 90;
+const ONLINE_PRICES = Object.freeze({
+  awin: "the Awin affiliate feed",
+  hobnight: "the Hobnight online catalogue",
+  keepa: "Keepa's Amazon price history",
+});
+
+// Where an offer's price was seen, in words, with the Open Prices shop
+// ({ osm_id, store, place, city }) when it is one.
+function priceSeen(db, offer) {
+  const online = Object.hasOwn(ONLINE_PRICES, offer.provider) ? ONLINE_PRICES[offer.provider] : null;
+  let shop = null;
+  if (offer.provider === OPEN_PRICES && tableExists(db, "observations") && /^\d{1,15}$/.test(String(offer.sourceId)))
+    shop = plain(
+      db.prepare("SELECT osm_id, store, place, city FROM observations WHERE id = ?").get(Number(offer.sourceId)),
+    );
+  const parts = shop
+    ? [shop.store, shop.place, shop.city]
+    : [offer.retailer, offer.location];
+  const where = [...new Set(parts.filter((v) => typeof v === "string" && v.trim()).map((v) => v.trim()))].join(", ");
+  return { price: offer.price, observed: offer.observed ?? null, online, shop, where: where || offer.source };
+}
+
+/**
+ * Whether the acquisition price applies at the branch the stock evidence
+ * covers. stock is stockStatus's result for the trip's locality; its check
+ * (the latest in the locality from the last CHECK_VALID_DAYS days, whatever
+ * it found) is the branch. The price applies there when:
+ *
+ *  - "check": that check recorded the shelf price, or an earlier check at
+ *    the same retailer in the same locality from the last
+ *    ALERT_RULES.maxOfferAgeDays days did and is at the same branch (the
+ *    stock check names no branch, or both name the same one: sameBranch).
+ *    The trip is costed at that shelf price and its check time is the
+ *    price's date. A newer check without a price changes nothing about it.
+ *  - "same-shop": the offer is an Open Prices observation from the shop the
+ *    check names (the same OpenStreetMap id, or the same retailer and
+ *    postcode: shopIsBranch). When the stock check names no branch, an
+ *    earlier check in the locality from the last maxOfferAgeDays days that
+ *    names the shop counts. A town or borough name never matches.
+ *
+ * When both apply the newer price is used (the later UK day; on the same
+ * day the higher price). An online feed or catalogue price (Awin, Hobnight,
+ * Keepa) never applies to a branch by itself, and anything else fails
+ * closed with a reason that names where the price was seen and where stock
+ * was checked. When the price was seen at the shop a check names but Open
+ * Prices does not place that shop in the check's locality, the reason says
+ * so ("..., the shop the branch check names, but Open Prices places it
+ * outside Camden": audit.mjs branchPlace) instead of saying the price was
+ * seen somewhere other than the branch.
+ *
+ * Returns { confirmed, basis: "check" | "same-shop" | null, price, at,
+ * check, stockCheck, seen: { price, observed, where, online }, reason }:
+ * price and at are the price that applies and when it was seen; check is
+ * the priced check used ({ id, checkedAt, branch, locality, price }) or
+ * null; stockCheck the check that covers the branch ({ id, checkedAt,
+ * branch, locality }) or null; reason null when confirmed.
+ */
+export function priceAtBranch(db, { offer, stock, now = new Date().toISOString() }) {
+  const seen = priceSeen(db, offer);
+  const check = stock?.check ?? null;
+  const place = stock?.locality ?? null;
+  const priceText = seen.online
+    ? `The ${gbp(seen.price)} price is an online price from ${seen.online}`
+    : `The ${gbp(seen.price)} price was seen at ${seen.where}`;
+  const base = {
+    confirmed: false,
+    basis: null,
+    price: null,
+    at: null,
+    check: null,
+    stockCheck: check
+      ? { id: check.id, checkedAt: check.checked_at, branch: check.branch ?? null, locality: check.locality }
+      : null,
+    seen: { price: seen.price, observed: seen.observed, where: seen.where, online: seen.online !== null },
+  };
+  if (!check)
+    return {
+      ...base,
+      reason: place
+        ? `${priceText}, and no branch check in ${place} from the last ${CHECK_VALID_DAYS} days shows it applies there: record the shelf price on a branch check there`
+        : `${priceText}, and no locality is entered, so no branch check shows it applies where you will shop`,
+    };
+  const at = Date.parse(now);
+  const named = branchIdentity(check.branch).named;
+  // "not at the branch checked in Camden", or for an online price "not a
+  // shelf price at the branch checked in Camden".
+  const branchText = `${seen.online ? "a shelf price at " : "at "}the branch checked in ${check.locality}${named ? ` (${branchIdentity(check.branch).text})` : ""}`;
+  const shelf = shelfChecks(db, {
+    barcode: check.barcode,
+    retailer: check.retailer,
+    locality: check.locality,
+    since: new Date(at - SHELF_PRICE_LOOKBACK_DAYS * DAY).toISOString(),
+    until: new Date(at).toISOString(),
+  });
+  const fresh = (c) => ageDays(c.checked_at, now) !== null && ageDays(c.checked_at, now) <= ALERT_RULES.maxOfferAgeDays;
+  const sameShelf = (c) => c.id === check.id || !named || sameBranch(check, c);
+  const priced = shelf.find((c) => Number.isSafeInteger(c.price_pence) && c.price_pence > 0 && sameShelf(c)) ?? null;
+  const usable = priced && fresh(priced) ? priced : null;
+  // An Open Prices shop is the branch when the stock check names it, or (a
+  // check that names no branch covering the whole locality) when a recent
+  // check in the locality names it.
+  const namers = named ? [check] : shelf.filter((c) => branchIdentity(c.branch).named && fresh(c));
+  const shopCheck = seen.shop ? (namers.find((c) => shopIsBranch(seen.shop, c)) ?? null) : null;
+  // The shop the price was seen at is one a branch check names, but Open
+  // Prices does not place it in the check's locality (branchPlace): say
+  // that, not that the price was seen somewhere other than the branch.
+  const placed = seen.shop && !shopCheck ? (namers.map((c) => branchPlace(seen.shop, c)).find((p) => p?.text) ?? null) : null;
+  const notHere = placed ? `${priceText}, the shop the branch check names, but ${placed.text}` : `${priceText}, not ${branchText}`;
+  let basis = usable ? "check" : shopCheck ? "same-shop" : null;
+  if (usable && shopCheck && typeof seen.observed === "string") {
+    const checkDay = londonDate(usable.checked_at);
+    const shopDay = seen.observed.slice(0, 10);
+    if (shopDay > checkDay || (shopDay === checkDay && seen.price > usable.price_pence)) basis = "same-shop";
+  }
+  if (basis === "check")
+    return {
+      ...base,
+      confirmed: true,
+      basis,
+      price: usable.price_pence,
+      at: usable.checked_at,
+      check: {
+        id: usable.id,
+        checkedAt: usable.checked_at,
+        branch: usable.branch ?? null,
+        locality: usable.locality,
+        price: usable.price_pence,
+      },
+      reason: null,
+    };
+  if (basis === "same-shop")
+    return { ...base, confirmed: true, basis, price: seen.price, at: seen.observed, reason: null };
+  if (priced)
+    return {
+      ...base,
+      reason: `The shelf price on the branch check in ${check.locality} (${gbp(priced.price_pence)}, ${ukTime(priced.checked_at)}) is more than ${ALERT_RULES.maxOfferAgeDays} days old, and ${lowerFirst(notHere)}: record the shelf price on a branch check there`,
+    };
+  return { ...base, reason: `${notHere}: record the shelf price on a branch check there` };
+}
+
+/**
+ * The offer as a trip to the branch pays for it, when the price there came
+ * from a branch check (priceAtBranch basis "check"): the shelf price, dated
+ * at the check. The shelf price is recorded as what a shopper pays without
+ * a loyalty card or multibuy, so it carries no promotion, except that a
+ * shelf price no higher than a promotional price the offer lists may be
+ * that promotion, so its condition (and a higher regular price) stays and
+ * eligibility must still be confirmed. seenOffer keeps the price as the
+ * offer listed it, and shelfPrice the check it came from.
+ */
+function branchPricedOffer(offer, branch, now) {
+  const where = branch.check.branch ? `${branch.check.branch}, ${branch.check.locality}` : branch.check.locality;
+  const promotional = Boolean(offer.promotion) && branch.price <= offer.price;
+  return {
+    ...offer,
+    price: branch.price,
+    regularPrice: promotional && offer.regularPrice > branch.price ? offer.regularPrice : null,
+    wasPrice: null,
+    rrpPrice: null,
+    promotion: promotional ? offer.promotion : null,
+    observed: branch.at,
+    location: where,
+    ...offerFreshness(branch.at, now),
+    shelfPrice: { ...branch.check },
+    seenOffer: {
+      sourceId: offer.sourceId,
+      price: offer.price,
+      regularPrice: offer.regularPrice ?? null,
+      promotion: offer.promotion ?? null,
+      observed: offer.observed ?? null,
+      where: branch.seen.where,
+      online: branch.seen.online,
+      ageDays: offer.ageDays ?? null,
+      freshness: offer.freshness ?? null,
+    },
+  };
+}
+
 /**
  * Candidate evidence for an offer from the research table: every row whose
  * canonical barcode equals the offer's (any kind, so other classes can be
@@ -871,10 +1072,16 @@ export function validateEstimateRequest(request) {
       optional(request.categoryReason, (v) =>
         typeof v === "string" && !v.trim() ? null : text(v, "categoryReason", 300),
       ) ?? null,
-    // The member's carry limit in kilograms, for the access needs. Missing
-    // means the default profile's limit.
+    // The member's carry limit in kilograms, for the access needs when the
+    // profile does not give one. Missing is unknown, never the default
+    // profile's limit.
     carryKg:
       optional(request.carryKg, (v) => num(v, "carryKg", 0, 1000)) ?? null,
+    // The person making the trip: { transport, carryKg, cashAvailable,
+    // storageUnits } (round 5). Each blank value is unknown and fails its
+    // check; a value that is given must be valid (400). Missing is a
+    // profile with every value unknown.
+    profile: readTripProfile(request.profile),
     packagingChecked:
       optional(request.packagingChecked, (v) => bool(v, "packagingChecked")) ?? false,
     bestBefore: isoDate(request.bestBefore, "bestBefore", { optional: true }),
@@ -1410,7 +1617,7 @@ export function branchShelf(db, { barcode, retailer, locality, check = null, now
  * The one thing most likely to make the estimate wrong, in plain words,
  * checked in order of how badly it would mislead.
  */
-function mainUncertainty({ sampleData, economics, match, offer, missing, stock, demand, sample, units = 1 }) {
+function mainUncertainty({ sampleData, economics, match, offer, missing, stock, demand, sample, units = 1, branchPrice = null }) {
   if (sampleData) return "Sample figures: illustrative only, never observed evidence";
   if (!economics)
     return match === "research"
@@ -1425,6 +1632,8 @@ function mainUncertainty({ sampleData, economics, match, offer, missing, stock, 
     return "The shelf may be empty: members have bought the units seen, or reported none, since the latest branch check";
   if (stock.availability === "out_of_stock") return "The latest branch check found none on the shelf";
   if (!stock.confirmed) return "Branch stock has not been confirmed by a recent check in this locality";
+  // The branch is checked, but the price was seen somewhere else.
+  if (branchPrice && !branchPrice.confirmed) return branchPrice.reason.replace(/: record .*$/, "");
   if (Number.isSafeInteger(stock.shelf?.units) && stock.shelf.units < units)
     return `Only about ${plural(stock.shelf.units, "unit")} likely left on the shelf for the ${plural(units, "unit")} planned`;
   if (demand.units === null) return demand.note;
@@ -1459,8 +1668,16 @@ function mainUncertainty({ sampleData, economics, match, offer, missing, stock, 
  *  categoryReason  why a category looser than the suggested one is right.
  *            Without it the suggested category's rules stay (categoryDecision).
  *  packagingChecked, bestBefore  food checks (categoryChecks).
- *  carryKg   the member's carry limit for the access needs (default profile
- *            limit when missing).
+ *  carryKg   the member's carry limit for the access needs when the profile
+ *            gives none (unknown when missing, never the default profile's).
+ *  profile   { transport, carryKg, cashAvailable, storageUnits }: the person
+ *            making the trip (round 5). The gate gets suitability.mjs
+ *            checks for it: one unit and every unit within the load limit,
+ *            the cash before payout within cashAvailable, the units within
+ *            storage. A blank value is unknown and fails its check with a
+ *            request to confirm it; a missing profile fails all four.
+ *            options.suitability "per-member" (a bounty's own estimate)
+ *            leaves them to each member's profile instead.
  *  costs     postage, packaging, journeyCost, journeyMinutes and
  *            handlingMinutes must be entered (0 is allowed when entered). A
  *            blank one is listed in missingInputs and fails the gate's
@@ -1474,7 +1691,8 @@ function mainUncertainty({ sampleData, economics, match, offer, missing, stock, 
  * unitCost, cashNeededDays, payout (payoutSchedule), demand (demandFor),
  * prices (priceComparison), category (categoryDecision plus the rule, the
  * returns rate and the failures), journey, missingInputs, access
- * ({ needs, carryKg, carrySource }), checked ({ price, stock }),
+ * ({ needs, carryKg, carrySource }), suitability (the profile checks, or
+ * { basis: "per-member" }), checked ({ price, stock }),
  * mainUncertainty, offerAttributes, shopPrice, inputs, assumptions and
  * warnings. economics is null unless at least one confirmed exact sale
  * qualifies. competition carries the lookup used and the known
@@ -1483,7 +1701,13 @@ function mainUncertainty({ sampleData, economics, match, offer, missing, stock, 
  * offer is the offer the figures use: for an Open Prices observation with a
  * newer one at the same shop it is the newest (currentOffer), with
  * offer.chosenOffer and shopPrice ({ chosen, used, change }) saying so and a
- * warning naming both prices when they differ. stock is stockStatus's result
+ * warning naming both prices when they differ. When the branch check
+ * recorded the shelf price (priceAtBranch basis "check") the offer carries
+ * that price, dated at the check, with no promotion, plus shelfPrice (the
+ * check) and seenOffer (the price as the source listed it); prices compares
+ * the offers as listed. priceAtBranch says whether the price applies at the
+ * branch the stock check covers, and the gate's price-at-branch check fails
+ * with its reason when it does not. stock is stockStatus's result
  * plus shelf (branchShelf): units members bought through bounties since the
  * count are subtracted, a newer stock report sets the count as on the bounty
  * card, and a count that has fallen to none leaves stock unconfirmed.
@@ -1514,8 +1738,20 @@ export function estimateFromEvidence(db, request, options = {}) {
     pin: options.pinOffer === true,
   });
   const attributes = applyOfferAttributes(resolved.offer, input.offerAttributes);
-  const offer = attributes.offer;
-  const rows = findCandidates(db, offer);
+  // The offer as its source listed it, at the shop where it was seen.
+  const seenOffer = attributes.offer;
+  const checked = stockStatus(db, {
+    barcode: seenOffer.gtin,
+    retailer: seenOffer.retailer,
+    locality: input.locality,
+    now,
+  });
+  // The price must apply at the branch the stock check covers (round 5): a
+  // shelf price recorded on the branch check costs the trip, dated at the
+  // check; otherwise only an Open Prices price from that same shop applies.
+  const branchPrice = priceAtBranch(db, { offer: seenOffer, stock: checked, now });
+  const offer = branchPrice.basis === "check" ? branchPricedOffer(seenOffer, branchPrice, now) : seenOffer;
+  const rows = findCandidates(db, seenOffer);
   const confirmed = new Set(input.sales.map((s) => `${s.provider}|${s.sourceId}`));
   const sample = soldSample(offer, rows, { now, confirmed });
   const lookup = options.lookup !== undefined ? options.lookup : askingLookup(db, offer.gtin, now);
@@ -1585,12 +1821,6 @@ export function estimateFromEvidence(db, request, options = {}) {
         ? "research"
         : "none";
 
-  const checked = stockStatus(db, {
-    barcode: offer.gtin,
-    retailer: offer.retailer,
-    locality: input.locality,
-    now,
-  });
   // The shelf as a bounty card counts it: a newer stock report and units
   // members have bought through bounties since change the count (R3Q6). A
   // count that has fallen to none no longer confirms stock. availability
@@ -1639,6 +1869,27 @@ export function estimateFromEvidence(db, request, options = {}) {
     now,
   });
 
+  // Whether the trip fits the person making it (round 5, finding 4): one
+  // unit and every unit within their load limit, the cash before payout
+  // within what they can spend, the units within their storage. Unknown
+  // fails. A bounty shares its figures with many members, so its own
+  // estimate (options.suitability "per-member") leaves this to each
+  // member's profile at the alert and the claim (bounties.mjs).
+  const perMember = options.suitability === "per-member";
+  // Cash that leaves before any payout, as tripEconomics counts it; unknown
+  // while a money input is blank.
+  const cashRequired = moneyKnown
+    ? tripEconomics({ units: input.units, unitCost, salePrice: 0, ...costs }).cashRequired
+    : null;
+  const fit = perMember
+    ? null
+    : tripSuitability({
+        units: input.units,
+        unitKg: input.weightKg,
+        cashRequired,
+        cashFixed: costs.journeyCost,
+        profile: input.profile,
+      });
   const alertInput = {
     evidenceClass: sampleData ? "sample" : "live",
     match,
@@ -1653,6 +1904,10 @@ export function estimateFromEvidence(db, request, options = {}) {
     now,
     localStockConfirmed: stock.confirmed,
     availability: stock.availability,
+    // The price applies at the branch the stock check covers (priceAtBranch).
+    priceAtBranch: branchPrice.confirmed,
+    priceAtBranchBasis: branchPrice.basis,
+    priceAtBranchReason: branchPrice.reason,
     // Units likely left on the shelf (the newest count less units bought
     // through bounties since); the gate fails when more are planned.
     shelfUnits: stock.confirmed && Number.isSafeInteger(stock.shelf?.units) ? stock.shelf.units : null,
@@ -1667,6 +1922,7 @@ export function estimateFromEvidence(db, request, options = {}) {
     displayPermitted: permission.permitted,
     demandUnits: demand.units,
     sellWindowWeeks: demand.sellWindowWeeks,
+    suitability: perMember ? "per-member" : fit.checks,
   };
   // Screening pass: classifyOpportunity reads only its evidence and stock
   // checks. Its buying-thresholds and trial-batch results are discarded.
@@ -1726,9 +1982,18 @@ export function estimateFromEvidence(db, request, options = {}) {
   );
 
   if (sampleData) warnings.push("Sample data: illustrative only and never a buy alert");
-  // A newer Open Prices price at the same shop is what the trip pays (R3M3).
+  // A newer Open Prices price at the same shop is what the trip pays (R3M3),
+  // unless the branch check recorded the shelf price, which then decides.
   const shopPrice = resolved.shopPrice;
-  if (shopPrice && shopPrice.change !== "same")
+  const seenText = branchPrice.seen.online
+    ? `the ${gbp(branchPrice.seen.price)} online price from ${branchPrice.seen.where}`
+    : `the ${gbp(branchPrice.seen.price)} seen at ${branchPrice.seen.where}`;
+  if (branchPrice.basis === "check") {
+    const shelfText = `${gbp(branchPrice.price)}, recorded on the branch check in ${branchPrice.check.locality} at ${ukTime(branchPrice.at)}`;
+    if (branchPrice.price !== branchPrice.seen.price)
+      warnings.push(`The shelf price at the branch is ${shelfText}. Figures use ${gbp(branchPrice.price)}, not ${seenText}`);
+    else assumptions.push(`Costed at the shelf price at the branch, ${shelfText}, the same as ${seenText}`);
+  } else if (shopPrice && shopPrice.change !== "same")
     warnings.push(
       `A newer price at this shop is ${gbp(shopPrice.used.price)} (${ukDate(shopPrice.used.observed)}). Figures use ${gbp(shopPrice.used.price)}, not the ${gbp(shopPrice.chosen.price)} you chose (${ukDate(shopPrice.chosen.observed)})`,
     );
@@ -1754,6 +2019,9 @@ export function estimateFromEvidence(db, request, options = {}) {
         ? "The offer has no observation date"
         : `The offer price was observed ${offer.ageDays} days ago and has expired`,
     );
+  // Where the price was seen and where stock was checked, when the price is
+  // not shown to apply at that branch.
+  if (!branchPrice.confirmed) warnings.push(branchPrice.reason);
   // stockStatus says in words why stock is not confirmed (no locality, no
   // recent check in the locality, or a check that found none).
   if (!stock.confirmed)
@@ -1841,6 +2109,7 @@ export function estimateFromEvidence(db, request, options = {}) {
     );
   assumptions.push(
     `Branch stock comes only from an availability check recorded in the last ${CHECK_VALID_DAYS} days, never from a feed or catalogue`,
+    "The price counts for the trip only when a branch check recorded the shelf price, or the offer is an Open Prices price from the shop the check names; a price from another shop or online never does",
     "Profit per unit is the contribution divided by units, so it already carries fees, postage, packaging, the returns allowance and the unit's share of travel",
     "Sourcing pressure is unknown at research time, so a research estimate can reach Priority 2 at best",
     `Resale competition uses the confirmed sales spread over ${ALERT_RULES.maxSaleAgeDays} days as the sales rate, which understates demand and so overstates competition`,
@@ -1851,7 +2120,10 @@ export function estimateFromEvidence(db, request, options = {}) {
     } for dispatch days, delivery and payout delay`,
   );
 
-  const carryKg = input.carryKg ?? profileDefaults.carry;
+  // The carry limit entered for this trip (the profile's, or the older
+  // carryKg field). Unknown is never the default profile's limit: the
+  // vehicle label is then left to the load checks, which ask for it.
+  const carryKg = input.profile?.carryKg ?? input.carryKg ?? null;
   const access = {
     needs: accessNeeds(
       {
@@ -1861,11 +2133,19 @@ export function estimateFromEvidence(db, request, options = {}) {
         stockChecked: shelf.at ?? stock.check?.checked_at ?? null,
         storageNeeds: null,
       },
-      { carry: carryKg },
+      { carry: carryKg ?? Infinity },
     ),
     carryKg,
-    carrySource: input.carryKg === null ? "default" : "request",
+    carrySource: input.profile?.carryKg !== null && input.profile?.carryKg !== undefined
+      ? "profile"
+      : input.carryKg !== null
+        ? "request"
+        : "unknown",
   };
+  if (!perMember)
+    assumptions.push(
+      `The load limit is the Planner's rule: by car or van the larger of your carry limit and ${CAR_BOOT_KG} kg, by public transport the smaller of it and ${HAND_CARRY_KG} kg, on foot or by bicycle your carry limit`,
+    );
 
   const { now: _now, ...inputs } = input;
   return {
@@ -1886,7 +2166,9 @@ export function estimateFromEvidence(db, request, options = {}) {
     sampleData,
     payout,
     demand,
-    prices: priceComparison(db, offer, rows, sample, now),
+    // Retail offers as their sources listed them (the shelf price on a
+    // branch check is reported under priceAtBranch).
+    prices: priceComparison(db, seenOffer, rows, sample, now),
     category: {
       chosen: decision.chosen,
       suggested: decision.suggested,
@@ -1907,6 +2189,17 @@ export function estimateFromEvidence(db, request, options = {}) {
     journey,
     missingInputs,
     access,
+    // Whether the trip fits the person making it (round 5): basis "profile"
+    // with the suitability() result for the profile sent (every value
+    // blank when none was), or basis "per-member" for a bounty's own
+    // estimate, where each member's profile decides.
+    suitability: perMember
+      ? {
+          basis: "per-member",
+          note: "Shared with many members, so each member's own transport, carrying limit, cash and storage are checked when they are alerted and when they claim",
+          cashRequired,
+        }
+      : { basis: "profile", ...fit, cashRequired },
     checked: { price: offer.observed ?? null, stock: stock.check?.checked_at ?? null, locality: stock.locality ?? null },
     mainUncertainty: mainUncertainty({
       sampleData,
@@ -1918,7 +2211,11 @@ export function estimateFromEvidence(db, request, options = {}) {
       demand,
       sample,
       units: input.units,
+      branchPrice,
     }),
+    // Whether the price applies at the branch the stock check covers, and
+    // why (priceAtBranch); the gate's price-at-branch check reads it.
+    priceAtBranch: branchPrice,
     offerAttributes: { applied: attributes.applied, ignored: attributes.ignored },
     // Set when a newer Open Prices price at the same shop replaced the
     // chosen observation (currentOffer): { chosen, used, change }.

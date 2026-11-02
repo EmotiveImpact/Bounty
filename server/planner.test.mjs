@@ -348,17 +348,20 @@ test("a blank public transport fare is never zero: every figure that needs the j
   }
 });
 
-test("with a blank fare nothing is shortlisted and each offer says why", () => {
+test("with a blank fare the offers inside the thresholds before travel are shortlisted and each one left out says why", () => {
   const r = planTrips({ ...defaults, transport: "Public transport", fare: null }, { now: NOW });
-  assert.deepEqual(r.trips, []);
-  const rows = Object.fromEntries(r.rejected.map((x) => [x.sku, x]));
-  assert.deepEqual(Object.keys(rows).sort(), ["baby", "bottle", "jacket", "knit", "pot"]);
-  for (const sku of ["jacket", "bottle"]) {
-    assert.deepEqual(rows[sku].reasons, [FARE_NEEDED], sku);
-    assert.equal(rows[sku].fareNeeded, true, sku);
-    assert.equal(rows[sku].unitProfit, null, sku);
-    assert.equal(rows[sku].tier, "Review", "nothing was measured to reject");
+  // Round 5 (Edem): a blank fare no longer hides an item. The two offers
+  // inside every threshold before travel are shortlisted, waiting for the
+  // fare; the old rule rejected them with FARE_NEEDED.
+  assert.deepEqual(r.trips.map((t) => t.sku), ["jacket", "bottle"]);
+  for (const t of r.trips) {
+    assert.equal(t.thresholds.fareNeeded, true, t.sku);
+    assert.deepEqual(t.thresholds.failures, [FARE_NEEDED], t.sku);
+    assert.equal(t.thresholds.unitProfit, null, "never a profit after travel of 0");
+    assert.equal(t.opportunity.tier, "Review", "nothing was measured to reject");
   }
+  const rows = Object.fromEntries(r.rejected.map((x) => [x.sku, x]));
+  assert.deepEqual(Object.keys(rows).sort(), ["baby", "knit", "pot"]);
   assert.equal(rows.knit.fareNeeded, false);
   assert.equal(rows.knit.tier, "Reject", "it fails even before its fare");
   assert.deepEqual(rows.pot.reasons, ["Unit weighs 2 kg or more"]);

@@ -1,10 +1,17 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+} from "react";
 import { api, hours, money, percent, toPence } from "./api";
 import "./Ledger.css";
 
 // Shapes returned by server/routes-ledger.mjs. Money is integer pence.
 type Kind = "resale" | "household";
-type EntryType = "receipt" | "sale" | "payout" | "expense" | "refund" | "work" | "saving";
+type EntryType =
+  "receipt" | "sale" | "payout" | "expense" | "refund" | "work" | "saving";
 type Predicted = {
   units: number;
   proceeds: number;
@@ -55,6 +62,11 @@ type Entry = {
   minutes: number | null;
   note: string | null;
   created: string;
+  // Refunds only: true when the buyer sent the item back (units back in
+  // stock), false when the buyer kept it; null on other entries.
+  itemReturned?: boolean | null;
+  // Refunds where the item came back: the date it came back, when given.
+  returnedOn?: string | null;
 };
 type Proof = {
   id: number;
@@ -85,8 +97,15 @@ type Reconciliation = {
   unsoldUnits: number | null;
   realisedContribution: number | null;
   realisedHourly: number | null;
+  // Sold stock with no purchase recorded for all of it: its own earnings per
+  // hour are not known (realisedHourly is then null), and the month's and the
+  // measures' figures count it only where its recorded result lowers them.
+  purchaseMissing?: boolean;
   pendingPayout: number;
   pendingBasis: "units" | "dates" | "no payouts" | null;
+  // Sales refunded, with the item sent back, before they were paid out.
+  refundedUnpaid?: number;
+  refundedUnpaidUnits?: number;
   impliedFees: number | null;
   cashTiedUp: number;
   householdSavings: number;
@@ -108,6 +127,9 @@ type Reconciliation = {
   verificationMissing: string[];
   // Receipt and payout entries whose own proof counts towards verification.
   proofedEntries: number[];
+  // The date the trip was completed (closed, or open with everything bought
+  // sold and paid out), dated by its last entry; null while not completed.
+  completedOn?: string | null;
   forecast: {
     basis: Basis;
     counted: boolean;
@@ -126,7 +148,12 @@ type Reconciliation = {
   } | null;
   timeToPayoutDays: number | null;
 };
-type Detail = { trip: Trip; entries: Entry[]; proofs: Proof[]; reconciliation: Reconciliation };
+type Detail = {
+  trip: Trip;
+  entries: Entry[];
+  proofs: Proof[];
+  reconciliation: Reconciliation;
+};
 type Summary = {
   month: string;
   realisedEarnings: number;
@@ -136,14 +163,43 @@ type Summary = {
   householdTripCosts: number;
   pendingPayouts: number;
   potentialProceeds: number;
-  potentialProceedsLeftOut: { sample: number; basisUnknown: number; nothingBought: number };
+  potentialProceedsLeftOut: {
+    sample: number;
+    basisUnknown: number;
+    nothingBought: number;
+  };
   cashTiedUp: number;
   unsoldUnits: number;
   realisedMinutes: number;
-  // Earnings per hour on the trips with work time this month only; null
-  // when none of them has money in or out this month.
+  // Earnings per hour on the trips completed this month, each with all its
+  // payouts, costs and work time whatever their month; null when no trip
+  // with work time was completed this month.
   realisedHourly: number | null;
-  hourly?: { trips: number; minutes: number; earnings: number; leftOutTrips: number; leftOutEarnings: number };
+  hourly?: {
+    trips: number;
+    minutes: number;
+    earnings: number;
+    // Completed this month with money but no work time.
+    leftOutTrips: number;
+    leftOutEarnings: number;
+    // Trips with entries this month that are still open, or that were
+    // completed in a later month (and count there).
+    stillOpen?: number;
+    completedLater?: number;
+  };
+  // Completed this month after selling stock with no purchase recorded, so
+  // what the stock cost is not known: trips and earnings are those left out
+  // (open: how many of them are still open; openNoWork: how many of those
+  // have no work time either), countedTrips and countedEarnings those
+  // counted because their recorded result lowers the figure.
+  hourlyNoPurchase?: {
+    trips: number;
+    earnings: number;
+    open?: number;
+    openNoWork?: number;
+    countedTrips?: number;
+    countedEarnings?: number;
+  };
   payouts: number;
   verifiedPayouts: number;
   verifiedEarnings: number;
@@ -164,13 +220,22 @@ type Metrics = {
     meanMinutesError: number | null;
     leftOut: { sample: number; basisUnknown: number; notTaken: number };
   };
-  cash: { spend: number; payouts: number; verifiedPayouts: number; recoveryRate: number | null };
+  cash: {
+    spend: number;
+    payouts: number;
+    verifiedPayouts: number;
+    recoveryRate: number | null;
+  };
   payoutTrips: number;
   medianTimeToPayoutDays: number | null;
   unsoldUnits: number;
   hourly: {
     trips: number;
     realised: number | null;
+    noPurchaseTrips?: number;
+    noPurchaseEarnings?: number;
+    noPurchaseCountedTrips?: number;
+    noPurchaseCountedEarnings?: number;
     comparison: { trips: number; realised: number | null; predicted: number | null };
   };
 };
@@ -190,12 +255,13 @@ const TYPE_LABEL: Record<EntryType, string> = {
 };
 const TYPE_HINT: Record<EntryType, string> = {
   receipt: "What you paid for the stock, and how many units. Reference: the receipt number.",
-  sale: "What the buyer paid, including the postage they paid. Reference: the sold listing or order number.",
+  sale: "What the buyer paid, including the postage they paid. Reference: the order number (or the sold listing), so a refund can name the sale.",
   payout: "Money the marketplace actually paid into your account. Give the units it covers so fees can be told apart from payouts still to come.",
   expense: "Travel, parking, postage labels, packaging or fees charged separately from the payout.",
-  refund: "Money you paid back to a buyer for a return, and how many units came back. Only record it if the money left you or was taken from a payout you have already recorded.",
+  refund: "Money you paid back to a buyer. Say whether the item came back to you: a returned item goes back into stock and can be sold again, while an item the buyer kept brings no stock back. Only record it if the money left you or was taken from a payout you have already recorded. Reference: the order number of the sale it refunds, so the ledger knows which sale it was.",
   work: "Time spent on this trip: travelling, in store, listing, packing and posting.",
-  saving: "The saving against the usual price of what you bought. Your own estimate: it is never earnings.",
+  saving:
+    "The saving against the usual price of what you bought. Your own estimate: it is never earnings.",
 };
 const SOURCE_LABEL: Record<Trip["source"], string> = {
   planner: "From the planner",
@@ -209,6 +275,8 @@ const PROOF_TYPES = ["image/jpeg", "image/png", "application/pdf"];
 
 // Calendar dates in the viewer's own time zone, matching what they would write.
 const today = () => new Date().toLocaleDateString("en-CA");
+// The ledger refuses dates before this (EARLIEST_DATE in server/ledger.mjs).
+const EARLIEST_DATE = "2000-01-01";
 const thisMonth = () => today().slice(0, 7);
 const longDate = (date: string) =>
   new Date(date + "T12:00:00Z").toLocaleDateString("en-GB", {
@@ -220,20 +288,32 @@ const longDate = (date: string) =>
 const BLANK = "not known";
 const signed = (pence: number | null) =>
   pence === null ? BLANK : (pence > 0 ? "+" : "") + money(pence);
-const perHour = (pence: number | null) => (pence === null ? "no work time recorded" : money(pence) + " per hour");
+const perHour = (pence: number | null) =>
+  pence === null ? "no work time recorded" : money(pence) + " per hour";
 const size = (bytes: number) =>
   bytes < 1024 * 1024
     ? Math.max(1, Math.round(bytes / 1024)).toLocaleString("en-GB") + " KB"
-    : (bytes / 1024 / 1024).toLocaleString("en-GB", { maximumFractionDigits: 1 }) + " MB";
-const plural = (n: number, word: string) => n.toLocaleString("en-GB") + " " + word + (n === 1 ? "" : "s");
+    : (bytes / 1024 / 1024).toLocaleString("en-GB", {
+        maximumFractionDigits: 1,
+      }) + " MB";
+const plural = (n: number, word: string) =>
+  n.toLocaleString("en-GB") + " " + word + (n === 1 ? "" : "s");
 // The UK calendar day of a stored timestamp, such as when a trip was closed.
 const ukDay = (iso: string | null) =>
   iso
-    ? new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "Europe/London" })
+    ? new Date(iso).toLocaleDateString("en-GB", {
+        day: "numeric",
+        month: "short",
+        year: "numeric",
+        timeZone: "Europe/London",
+      })
     : "";
-const minutesText = (m: number | null) => (m === null ? "none recorded" : hours(m));
+const minutesText = (m: number | null) =>
+  m === null ? "none recorded" : hours(m);
 
-export default function Ledger() {
+/** The full records. bare leaves out the month summary and the tax note,
+    which the Stock and Money screens already show. */
+export default function Ledger({ bare = false }: { bare?: boolean }) {
   const [trips, setTrips] = useState<TripRow[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [version, setVersion] = useState(0);
@@ -256,7 +336,7 @@ export default function Ledger() {
 
   return (
     <section className="ledger">
-      <SummaryPanel version={version} />
+      {!bare && <SummaryPanel version={version} />}
       <div className="ledger-layout">
         <article className="ledger-list">
           <h2>Trips</h2>
@@ -272,8 +352,9 @@ export default function Ledger() {
         <article>
           {selected === null ? (
             <p className="muted ledger-empty">
-              Choose a trip to record its receipt, sold listing, payout, expenses, returns and work
-              time, and to see how it compares with the prediction.
+              Choose a trip to record its receipt, sold listing, payout,
+              expenses, returns and work time, and to see how it compares with
+              the prediction.
             </p>
           ) : (
             <TripDetail id={selected} version={version} onChanged={changed} />
@@ -281,12 +362,22 @@ export default function Ledger() {
         </article>
       </div>
       <MetricsPanel version={version} />
-      <TaxNote />
+      {!bare && <TaxNote />}
     </section>
   );
 }
 
-function Stat({ label, value, note, tone }: { label: string; value: string; note: string; tone?: "estimate" | "pending" }) {
+function Stat({
+  label,
+  value,
+  note,
+  tone,
+}: {
+  label: string;
+  value: string;
+  note: string;
+  tone?: "estimate" | "pending";
+}) {
   return (
     <div className={"ledger-stat" + (tone ? " " + tone : "")}>
       <span className="ledger-stat-label">{label}</span>
@@ -299,7 +390,7 @@ function Stat({ label, value, note, tone }: { label: string; value: string; note
 function HourlyStat({ data }: { data: Summary }) {
   return (
     <Stat
-      label="Realised hourly"
+      label={hourlyLabel(data)}
       value={data.realisedHourly === null ? BLANK : money(data.realisedHourly)}
       note={hourlyNote(data)}
     />
@@ -331,7 +422,12 @@ function SummaryPanel({ version }: { version: number }) {
         <h2>Month summary</h2>
         <label>
           Month
-          <input type="month" value={month} max={thisMonth()} onChange={(e) => setMonth(e.target.value)} />
+          <input
+            type="month"
+            value={month}
+            max={thisMonth()}
+            onChange={(e) => setMonth(e.target.value)}
+          />
         </label>
       </div>
       {error && <p role="alert">{error}</p>}
@@ -345,7 +441,10 @@ function SummaryPanel({ version }: { version: number }) {
               note={
                 "Payouts received minus money spent, dated this month. " +
                 (data.payouts > 0
-                  ? money(data.verifiedPayouts) + " of " + money(data.payouts) + " in payouts is verified."
+                  ? money(data.verifiedPayouts) +
+                    " of " +
+                    money(data.payouts) +
+                    " in payouts is verified."
                   : "No payouts this month.")
               }
             />
@@ -355,7 +454,11 @@ function SummaryPanel({ version }: { version: number }) {
               note={
                 "Saved against usual prices on things for your home, less those trips' costs such as travel and parking" +
                 (data.householdTripCosts > 0
-                  ? ": " + money(data.householdSavingsGross) + " saved, " + money(data.householdTripCosts) + " costs."
+                  ? ": " +
+                    money(data.householdSavingsGross) +
+                    " saved, " +
+                    money(data.householdTripCosts) +
+                    " costs."
                   : ".") +
                 " Not earnings."
               }
@@ -398,14 +501,26 @@ function SummaryPanel({ version }: { version: number }) {
           <details className="ledger-basis">
             <summary>How these figures are worked out</summary>
             <p className="muted">
-            Basis: cash in the month. Realised earnings are payouts dated this month minus receipts,
-            expenses and refunds dated this month, so stock bought in one month and paid out in the
-            next shows as a cost first and income later. Only payouts count as earned. Pending
-            payouts, potential proceeds, cash tied up and unsold units describe open trips as they
-            stand today, whatever the month. Potential proceeds count a prediction only when it came
-            from live evidence and stock has been bought, scaled to the units bought. Household
-            savings are net of those trips&apos; own costs. Realised hourly counts only the trips with
-            work time recorded this month, so money is never divided by another trip&apos;s hours.
+              Basis: cash in the month. Realised earnings are payouts dated this
+              month minus receipts, expenses and refunds dated this month, so
+              stock bought in one month and paid out in the next shows as a cost
+              first and income later. Only payouts count as earned. Pending
+              payouts, potential proceeds, cash tied up and unsold units
+              describe open trips as they stand today, whatever the month.
+              Potential proceeds count a prediction only when it came from live
+              evidence and stock has been bought, scaled to the units bought.
+              Household savings are net of those trips&apos; own costs.
+            </p>
+            <p className="muted">
+              Earnings per hour are not cash in the month: they cover the trips
+              completed this month (closed, or open with everything bought sold
+              and paid out), each with all its payouts, costs and work time,
+              whatever month they fell in. A trip bought in one month and paid
+              out in the next shows one figure, in the month it was completed.
+              Trips still open are left out until they are completed, and so are
+              trips that sold stock with no purchase recorded, because what the
+              stock cost is not known, except where counting one at its recorded
+              result lowers the figure (its real result can only be lower).
             </p>
           </details>
         </>
@@ -414,25 +529,91 @@ function SummaryPanel({ version }: { version: number }) {
   );
 }
 
+/** "November 2026" for "2026-11". */
+const monthName = (month: string) =>
+  new Date(month + "-01T12:00:00Z").toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
+
+/** Says which trips the month's earnings per hour cover. */
+function hourlyLabel(data: Summary) {
+  const n = data.hourly?.trips ?? 0;
+  return "Earnings per hour on " + (n > 0 ? "the " + plural(n, "trip") : "trips") + " completed in " + monthName(data.month);
+}
+
 /**
- * What the month's hourly figure covers: only trips with work time this
- * month, and how much realised money from other trips was left out.
+ * What the month's hourly figure covers: whole trips completed this month,
+ * and which trips with entries this month were left out and why.
  */
 function hourlyNote(data: Summary) {
   const h = data.hourly;
-  if (!h)
-    return data.realisedMinutes ? "Per hour over " + hours(data.realisedMinutes) + " of recorded work this month." : "No work time recorded this month.";
-  const left =
-    h.leftOutTrips > 0
-      ? " " +
-        (h.leftOutEarnings < 0 ? "A net loss of " + money(-h.leftOutEarnings) : money(h.leftOutEarnings)) +
-        " from " + plural(h.leftOutTrips, "trip") + " without work time is not included."
-      : "";
-  if (data.realisedHourly !== null) return "Per hour over " + hours(h.minutes) + " on " + plural(h.trips, "trip") + "." + left;
-  if (h.trips > 0)
-    return "Not known: the " + hours(h.minutes) + " of work this month is on trips with no money in or out this month." + left;
-  if (h.leftOutTrips > 0) return "Not known: no trip with money this month has work time recorded." + left;
-  return "No work time recorded this month.";
+  if (!h) return data.realisedHourly === null ? "No trip with work time was completed this month." : "";
+  const month = monthName(data.month);
+  const parts = [
+    h.trips > 0
+      ? signed(h.earnings) + " over " + hours(h.minutes) + ", counting all of " +
+        (h.trips === 1 ? "the trip's" : "those trips'") +
+        " payouts, costs and work time, whatever month they fell in."
+      : "Not known: no trip with work time was completed in " + month + ".",
+  ];
+  const open = h.stillOpen ?? 0;
+  if (open > 0)
+    parts.push(
+      "Left out: " + plural(open, "trip") + " with entries this month " + (open === 1 ? "is" : "are") +
+        " still open, and will count once closed or once everything bought is sold and paid out.",
+    );
+  const later = h.completedLater ?? 0;
+  if (later > 0)
+    parts.push(
+      plural(later, "trip") + " with entries this month " + (later === 1 ? "was" : "were") +
+        " completed in a later month and " + (later === 1 ? "counts" : "count") + " there.",
+    );
+  if (h.leftOutTrips > 0)
+    parts.push(
+      (h.leftOutEarnings < 0 ? "A net loss of " + money(-h.leftOutEarnings) : money(h.leftOutEarnings)) +
+        " from " + plural(h.leftOutTrips, "completed trip") + " without work time is not included.",
+    );
+  const np = data.hourlyNoPurchase;
+  const counted = np?.countedTrips ?? 0;
+  if (np && counted > 0)
+    parts.push(
+      "This includes " + plural(counted, "trip") + " that sold stock with no purchase recorded (" +
+        signed(np.countedEarnings ?? 0) + "), counted at " + (counted === 1 ? "its" : "their") +
+        " recorded result because that lowers the figure: what the stock cost is not known, so " +
+        (counted === 1 ? "its" : "their") + " real result can only be lower.",
+    );
+  if (np && np.trips > 0) {
+    const open = np.open ?? 0;
+    parts.push(
+      (np.earnings < 0 ? "A net loss of " + money(-np.earnings) : money(np.earnings)) +
+        " from " + plural(np.trips, "completed trip") + " that sold stock with no purchase recorded is not included, because what the stock cost is not known. " +
+        (open > 0
+          ? openNoPurchaseAdvice(open, np.openNoWork ?? 0)
+          : "A closed trip takes no new entries, so " + (np.trips === 1 ? "its purchase" : "their purchases") + " can no longer be added."),
+    );
+  }
+  return parts.join(" ");
+}
+
+/**
+ * What would let the open trips left out for stock with no purchase recorded
+ * count: the purchase of the units they sold beyond those bought (an open
+ * trip completes only once stock was bought, so these have a receipt that
+ * covers part of what they sold) or a correction of the units or refunds
+ * recorded, and their work time where they have none, since trips without
+ * work time stay out whatever they bought.
+ */
+function openNoPurchaseAdvice(open: number, noWork: number) {
+  const one = open === 1;
+  const work =
+    noWork === 0
+      ? ""
+      : noWork === open
+        ? ", and record " + (one ? "its" : "their") + " work time"
+        : ", and record the work time on the " + noWork + " with none";
+  return (
+    "On " + (one ? "the one still open" : "the " + open + " still open") + ", record the purchase of the units " +
+    (one ? "it" : "each") + " sold beyond those it bought, or correct " + (one ? "its" : "their") +
+    " units or refunds" + work + ", to count " + (one ? "it" : "them") + "."
+  );
 }
 
 /** Names the open trips left out of potential proceeds, if any. */
@@ -440,8 +621,10 @@ function leftOutText(left: Summary["potentialProceedsLeftOut"] | undefined) {
   if (!left) return "";
   const parts = [
     left.sample && plural(left.sample, "trip") + " with a sample prediction",
-    left.basisUnknown && plural(left.basisUnknown, "trip") + " whose evidence is unknown",
-    left.nothingBought && plural(left.nothingBought, "trip") + " with nothing bought yet",
+    left.basisUnknown &&
+      plural(left.basisUnknown, "trip") + " whose evidence is unknown",
+    left.nothingBought &&
+      plural(left.nothingBought, "trip") + " with nothing bought yet",
   ].filter(Boolean);
   return parts.length ? " Left out: " + parts.join(", ") + "." : "";
 }
@@ -451,23 +634,37 @@ function TaxNote() {
     <article className="ledger-tax">
       <h2>Tax</h2>
       <p>
-        Income from resale may need to be reported to HMRC. HMRC says you are probably trading if
-        you buy goods intending to sell them for a profit, and that if your total trading income for
-        the tax year (6 April to 5 April) is more than the £1,000 trading allowance you need to tell
-        it. The allowance is measured on income before costs, not on the profit shown here. Online
-        marketplaces also report some sellers&apos; details and income to HMRC each year.
+        Income from resale may need to be reported to HMRC. HMRC says you are
+        probably trading if you buy goods intending to sell them for a profit,
+        and that if your total trading income for the tax year (6 April to 5
+        April) is more than the £1,000 trading allowance you need to tell it.
+        The allowance is measured on income before costs, not on the profit
+        shown here. Online marketplaces also report some sellers&apos; details
+        and income to HMRC each year.
       </p>
       <p className="muted">
         Bounty does not give tax advice. Check GOV.UK:{" "}
-        <a href="https://www.gov.uk/guidance/tax-free-allowances-on-property-and-trading-income" target="_blank" rel="noreferrer">
+        <a
+          href="https://www.gov.uk/guidance/tax-free-allowances-on-property-and-trading-income"
+          target="_blank"
+          rel="noreferrer"
+        >
           tax-free allowances on property and trading income
         </a>
         ,{" "}
-        <a href="https://www.gov.uk/guidance/check-if-you-need-to-tell-hmrc-about-your-income-from-online-platforms" target="_blank" rel="noreferrer">
+        <a
+          href="https://www.gov.uk/guidance/check-if-you-need-to-tell-hmrc-about-your-income-from-online-platforms"
+          target="_blank"
+          rel="noreferrer"
+        >
           check if you need to tell HMRC about income from online platforms
         </a>{" "}
         and{" "}
-        <a href="https://www.gov.uk/guidance/selling-goods-or-services-on-a-digital-platform" target="_blank" rel="noreferrer">
+        <a
+          href="https://www.gov.uk/guidance/selling-goods-or-services-on-a-digital-platform"
+          target="_blank"
+          rel="noreferrer"
+        >
           selling goods or services on a digital platform
         </a>
         .
@@ -506,31 +703,51 @@ function NewTripForm({ onCreated }: { onCreated: (id: number) => void }) {
       <form className="ledger-form" onSubmit={submit}>
         <label>
           Name
-          <input name="label" required maxLength={120} placeholder="Saturday charity shop run" />
+          <input
+            name="label"
+            required
+            maxLength={120}
+            placeholder="Saturday charity shop run"
+          />
         </label>
         <label>
           Kind
           <select name="kind" defaultValue="resale">
             <option value="resale">Resale: buy to sell on</option>
-            <option value="household">Household: buy for home at a saving</option>
+            <option value="household">
+              Household: buy for home at a saving
+            </option>
           </select>
         </label>
         <label>
           Reference (optional)
-          <input name="reference" maxLength={120} placeholder="Shop, item or bounty" />
+          <input
+            name="reference"
+            maxLength={120}
+            placeholder="Shop, item or bounty"
+          />
         </label>
         <button disabled={busy}>Create trip</button>
         {error && <p role="alert">{error}</p>}
       </form>
       <p className="muted">
-        Trips tracked from the planner or research tabs arrive here with their prediction attached,
-        so you can compare what happened with what was expected.
+        Trips tracked from the planner or research tabs arrive here with their
+        prediction attached, so you can compare what happened with what was
+        expected.
       </p>
     </details>
   );
 }
 
-function VerifiedBadge({ verified, kind, legacy }: { verified: boolean; kind: Kind; legacy: boolean }) {
+function VerifiedBadge({
+  verified,
+  kind,
+  legacy,
+}: {
+  verified: boolean;
+  kind: Kind;
+  legacy: boolean;
+}) {
   if (kind === "household" || legacy) return null;
   return verified ? (
     <span className="badge ok">Verified</span>
@@ -540,8 +757,10 @@ function VerifiedBadge({ verified, kind, legacy }: { verified: boolean; kind: Ki
 }
 
 function PredictionBadge({ basis }: { basis: Basis | null }) {
-  if (basis === "sample") return <span className="badge sample">Sample prediction</span>;
-  if (basis === "unknown") return <span className="badge sample">Evidence unknown</span>;
+  if (basis === "sample")
+    return <span className="badge sample">Sample prediction</span>;
+  if (basis === "unknown")
+    return <span className="badge sample">Evidence unknown</span>;
   return null;
 }
 
@@ -550,17 +769,19 @@ function PredictionNotice({ trip }: { trip: Trip }) {
   if (trip.predictionBasis === "sample")
     return (
       <p className="notice">
-        Sample prediction: this trip was tracked with figures from sample or illustrative data, not
-        live evidence. Its prediction is not counted in potential proceeds or in the prediction
-        accuracy measures. Receipts, sales and payouts you record here are real and count as usual.
+        Sample prediction: this trip was tracked with figures from sample or
+        illustrative data, not live evidence. Its prediction is not counted in
+        potential proceeds or in the prediction accuracy measures. Receipts,
+        sales and payouts you record here are real and count as usual.
       </p>
     );
   if (trip.predictionBasis === "unknown")
     return (
       <p className="notice">
-        This trip was tracked without saying whether its prediction came from live evidence, so it
-        is treated like a sample: not counted in potential proceeds or in the prediction accuracy
-        measures. Receipts, sales and payouts you record here count as usual.
+        This trip was tracked without saying whether its prediction came from
+        live evidence, so it is treated like a sample: not counted in potential
+        proceeds or in the prediction accuracy measures. Receipts, sales and
+        payouts you record here count as usual.
       </p>
     );
   return null;
@@ -576,7 +797,12 @@ function TripList({
   onSelect: (id: number) => void;
 }) {
   if (!trips.length)
-    return <p className="muted">No trips yet. Create one, or track a trip from the planner or research tabs.</p>;
+    return (
+      <p className="muted">
+        No trips yet. Create one, or track a trip from the planner or research
+        tabs.
+      </p>
+    );
   return (
     <div className="ledger-trips">
       {trips.map((t) => (
@@ -589,12 +815,24 @@ function TripList({
           <span>
             <b>{t.label}</b>
             <span className="badges">
-              <span className={"badge" + (t.legacy ? " sample" : "")}>{SOURCE_LABEL[t.source]}</span>
-              {t.kind === "household" && <span className="badge">Household</span>}
+              <span className={"badge" + (t.legacy ? " sample" : "")}>
+                {SOURCE_LABEL[t.source]}
+              </span>
+              {t.kind === "household" && (
+                <span className="badge">Household</span>
+              )}
               <PredictionBadge basis={t.predictionBasis} />
-              <span className="badge">{t.status === "open" ? "Open" : "Closed"}</span>
-              <VerifiedBadge verified={t.verified} kind={t.kind} legacy={t.legacy} />
-              {t.discrepancies > 0 && <span className="badge warn">{t.discrepancies} to check</span>}
+              <span className="badge">
+                {t.status === "open" ? "Open" : "Closed"}
+              </span>
+              <VerifiedBadge
+                verified={t.verified}
+                kind={t.kind}
+                legacy={t.legacy}
+              />
+              {t.discrepancies > 0 && (
+                <span className="badge warn">{t.discrepancies} to check</span>
+              )}
             </span>
           </span>
           <span>
@@ -616,7 +854,15 @@ function TripList({
   );
 }
 
-function TripDetail({ id, version, onChanged }: { id: number; version: number; onChanged: () => void }) {
+function TripDetail({
+  id,
+  version,
+  onChanged,
+}: {
+  id: number;
+  version: number;
+  onChanged: () => void;
+}) {
   const [detail, setDetail] = useState<Detail | null>(null);
   const [error, setError] = useState("");
   const [actionError, setActionError] = useState("");
@@ -636,12 +882,18 @@ function TripDetail({ id, version, onChanged }: { id: number; version: number; o
   }, [id, version]);
 
   if (error) return <p role="alert">{error}</p>;
-  if (!detail || detail.trip.id !== id) return <p className="muted">Loading the trip.</p>;
+  if (!detail || detail.trip.id !== id)
+    return <p className="muted">Loading the trip.</p>;
   const { trip, entries, proofs, reconciliation: r } = detail;
   const editable = trip.status === "open" && !trip.legacy;
 
   async function close() {
-    if (!window.confirm("Close this trip? You will not be able to add entries afterwards. Closed trips feed the forecast measures.")) return;
+    if (
+      !window.confirm(
+        "Close this trip? You will not be able to add entries afterwards. Closed trips feed the forecast measures.",
+      )
+    )
+      return;
     try {
       await api("ledger/trips/" + id + "/close", {});
       onChanged();
@@ -654,7 +906,15 @@ function TripDetail({ id, version, onChanged }: { id: number; version: number; o
     const proofNote = proofs.some((p) => p.entry_id === entry.id)
       ? " Its proof stays stored as a whole-trip proof, which does not count towards verification until you link it to another entry."
       : "";
-    if (!window.confirm("Remove this " + TYPE_LABEL[entry.type].toLowerCase() + " entry?" + proofNote)) return;
+    if (
+      !window.confirm(
+        "Remove this " +
+          TYPE_LABEL[entry.type].toLowerCase() +
+          " entry?" +
+          proofNote,
+      )
+    )
+      return;
     try {
       await api("ledger/trips/" + id + "/entries/" + entry.id, {}, "DELETE");
       onChanged();
@@ -675,25 +935,40 @@ function TripDetail({ id, version, onChanged }: { id: number; version: number; o
       </div>
       {actionError && <p role="alert">{actionError}</p>}
       <p className="badges">
-        <span className={"badge" + (trip.legacy ? " sample" : "")}>{SOURCE_LABEL[trip.source]}</span>
-        <span className="badge">{trip.kind === "household" ? "Household" : "Resale"}</span>
+        <span className={"badge" + (trip.legacy ? " sample" : "")}>
+          {SOURCE_LABEL[trip.source]}
+        </span>
+        <span className="badge">
+          {trip.kind === "household" ? "Household" : "Resale"}
+        </span>
         <PredictionBadge basis={trip.predictionBasis} />
         <span className="badge">
           {trip.status === "open" ? "Open" : "Closed " + ukDay(trip.closed_at)}
         </span>
-        <VerifiedBadge verified={r.verified} kind={trip.kind} legacy={trip.legacy} />
-        {trip.reference && <span className="muted">Reference: {trip.reference}</span>}
+        <VerifiedBadge
+          verified={r.verified}
+          kind={trip.kind}
+          legacy={trip.legacy}
+        />
+        {trip.reference && (
+          <span className="muted">Reference: {trip.reference}</span>
+        )}
       </p>
       {trip.legacy && (
         <p className="notice">
-          Legacy totals: entered before the ledger existed as single figures for actual proceeds,
-          total costs and minutes. There is no receipt or sold listing behind them, so they cannot be
-          reconciled or verified, and they are left out of the forecast measures.
+          Legacy totals: entered before the ledger existed as single figures for
+          actual proceeds, total costs and minutes. There is no receipt or sold
+          listing behind them, so they cannot be reconciled or verified, and
+          they are left out of the forecast measures.
         </p>
       )}
       <PredictionNotice trip={trip} />
 
-      {trip.kind === "resale" ? <ResaleFigures r={r} /> : <HouseholdFigures r={r} />}
+      {trip.kind === "resale" ? (
+        <ResaleFigures r={r} keptRefund={entries.some((e) => e.type === "refund" && !(e.itemReturned ?? e.units !== null))} />
+      ) : (
+        <HouseholdFigures r={r} />
+      )}
       <Checklist r={r} />
       {trip.kind === "resale" && !trip.legacy && <Verification r={r} />}
       {r.forecast && <Forecast r={r} />}
@@ -701,10 +976,14 @@ function TripDetail({ id, version, onChanged }: { id: number; version: number; o
       <EntriesTable
         entries={entries}
         proofs={proofs}
-        proofed={trip.kind === "resale" && !trip.legacy ? r.proofedEntries : null}
+        proofed={
+          trip.kind === "resale" && !trip.legacy ? r.proofedEntries : null
+        }
         onRemove={editable ? remove : undefined}
       />
-      {editable && <EntryForm key={"entry-" + trip.id} trip={trip} onSaved={onChanged} />}
+      {editable && (
+        <EntryForm key={"entry-" + trip.id} trip={trip} onSaved={onChanged} />
+      )}
       {!trip.legacy && (
         <Proofs
           key={"proofs-" + trip.id}
@@ -719,7 +998,45 @@ function TripDetail({ id, version, onChanged }: { id: number; version: number; o
   );
 }
 
-function ResaleFigures({ r }: { r: Reconciliation }) {
+/**
+ * What the trip figure says about a trip that sold stock with no purchase
+ * recorded for all of it: why its earnings per hour are not known, whether
+ * the monthly figure can count it (never without work time), and what would
+ * let it count. keptRefund: the trip has a refund where the buyer kept the
+ * item, which may be one where the item in fact came back.
+ */
+function noPurchaseText(r: Reconciliation, keptRefund: boolean) {
+  const bought = r.checklist.receipt === "present";
+  const timed = r.minutes > 0;
+  const back =
+    r.unitsReturned === 0
+      ? ""
+      : r.unitsReturned === 1
+        ? ", less 1 a buyer sent back,"
+        : ", less " + r.unitsReturned.toLocaleString("en-GB") + " that buyers sent back,";
+  const parts = [
+    bought
+      ? "This trip sold " + plural(r.unitsSold, "unit") + back + " against " + r.unitsBought.toLocaleString("en-GB") +
+        " bought, so what the rest of the stock cost is not known and its real result can only be lower than recorded."
+      : "This trip sold stock with no purchase recorded for it, so what the stock cost is not known and its real result can only be lower than recorded.",
+    timed
+      ? "Monthly earnings per hour count it only where that lowers the figure."
+      : "Monthly earnings per hour leave it out, as they leave out every trip without work time.",
+  ];
+  if (r.status === "closed") {
+    parts.push("The trip is closed, so the purchase can no longer be added.");
+  } else {
+    parts.push(
+      "Record " + (bought ? "the purchase of the units sold beyond those bought" : "the purchase receipt") +
+        (timed ? "" : " and the work time") + " to count it" + (timed ? " in full" : "") + ".",
+    );
+    if (bought && keptRefund)
+      parts.push("If a buyer sent an item back but its refund says they kept it, delete that refund and record it again with the item back.");
+  }
+  return parts.join(" ");
+}
+
+function ResaleFigures({ r, keptRefund = false }: { r: Reconciliation; keptRefund?: boolean }) {
   return (
     <dl className="ledger-figures">
       <dt>Purchase receipts</dt>
@@ -733,17 +1050,48 @@ function ResaleFigures({ r }: { r: Reconciliation }) {
       <dt>Payouts received</dt>
       <dd>{money(r.payouts)}</dd>
       <dt>Realised contribution (payouts minus spending)</dt>
-      <dd className={r.realisedContribution !== null && r.realisedContribution < 0 ? "warn" : undefined}>
+      <dd
+        className={
+          r.realisedContribution !== null && r.realisedContribution < 0
+            ? "warn"
+            : undefined
+        }
+      >
         <b>{signed(r.realisedContribution)}</b>
       </dd>
       <dt>Work time</dt>
       <dd>{minutesText(r.minutes || null)}</dd>
-      <dt>Realised earnings per hour</dt>
-      <dd>{perHour(r.realisedHourly)}</dd>
+      <dt>Realised earnings per hour (the whole trip: all its payouts, costs and work time)</dt>
+      <dd>
+        {r.purchaseMissing && r.minutes > 0 ? BLANK : perHour(r.realisedHourly)}
+        {r.purchaseMissing && (
+          <span className="muted ledger-sub" data-hourly-left-out="no purchase">
+            {noPurchaseText(r, keptRefund)}
+          </span>
+        )}
+        {r.realisedHourly !== null && r.completedOn !== undefined && (
+          <span className="muted ledger-sub">
+            {r.completedOn
+              ? "Completed " + longDate(r.completedOn) + ", so it counts in " + monthName(r.completedOn.slice(0, 7)) + "'s earnings per hour."
+              : "So far: the trip is not completed yet, so no month's earnings per hour include it."}
+          </span>
+        )}
+      </dd>
       {r.status !== "closed" && (
         <>
           <dt>Pending payout (not realised)</dt>
-          <dd>{money(r.pendingPayout)}</dd>
+          <dd>
+            {money(r.pendingPayout)}
+            {(r.refundedUnpaid ?? 0) > 0 && (
+              <span className="muted ledger-sub" data-refunded-unpaid>
+                Not counted: {money(r.refundedUnpaid ?? 0)} for{" "}
+                {plural(r.refundedUnpaidUnits ?? 0, "unit")} refunded, with the item sent back, before{" "}
+                {r.refundedUnpaidUnits === 1 ? "it was" : "they were"} paid out. A sale refunded before
+                its payout is not normally paid out. If it is, record that payout with its units and it
+                will be matched.
+              </span>
+            )}
+          </dd>
           <dt>Cash tied up</dt>
           <dd>{money(r.cashTiedUp)}</dd>
         </>
@@ -770,9 +1118,10 @@ function ResaleFigures({ r }: { r: Reconciliation }) {
       </dd>
       {r.pendingBasis === "dates" && r.impliedFees !== null && (
         <dd className="ledger-figures-note muted">
-          A payout without a unit count is taken to cover every sale recorded up to its date, so the
-          gap is shown as fees rather than as a payout still to come. If part of it is still to be
-          paid, give the units each payout covers.
+          A payout without a unit count is taken to cover every sale recorded up
+          to its date, so the gap is shown as fees rather than as a payout still
+          to come. If part of it is still to be paid, give the units each payout
+          covers.
         </dd>
       )}
     </dl>
@@ -791,12 +1140,14 @@ function HouseholdFigures({ r }: { r: Reconciliation }) {
       <dt>Trip expenses</dt>
       <dd>{money(r.expenses)}</dd>
       <dt>Saving after trip expenses</dt>
-      <dd className={(r.netHouseholdSaving ?? 0) < 0 ? "warn" : undefined}>{money(r.netHouseholdSaving)}</dd>
+      <dd className={(r.netHouseholdSaving ?? 0) < 0 ? "warn" : undefined}>
+        {money(r.netHouseholdSaving)}
+      </dd>
       <dt>Work time</dt>
       <dd>{minutesText(r.minutes || null)}</dd>
       <dd className="ledger-figures-note muted">
-        Household savings are your own estimate against the usual price. They are never counted as
-        earnings or proceeds.
+        Household savings are your own estimate against the usual price. They
+        are never counted as earnings or proceeds.
       </dd>
     </dl>
   );
@@ -814,7 +1165,9 @@ const CHECK_LABEL: [keyof Reconciliation["checklist"], string][] = [
 
 function Checklist({ r }: { r: Reconciliation }) {
   const c = r.checklist;
-  const missing = c.required.filter((key) => c[key as keyof Reconciliation["checklist"]] !== "present");
+  const missing = c.required.filter(
+    (key) => c[key as keyof Reconciliation["checklist"]] !== "present",
+  );
   // Work time is needed for earnings per hour, not to prove a trade, so a
   // trip missing only its work time does not say "Records missing".
   const recordsMissing = missing.some((key) => key !== "work");
@@ -826,21 +1179,34 @@ function Checklist({ r }: { r: Reconciliation }) {
           <span className="badge ok">Complete</span>
         ) : (
           <span className="badge warn">
-            {recordsMissing ? "Records missing" : r.discrepancies.length > 0 ? "Check discrepancies" : "Work time missing"}
+            {recordsMissing
+              ? "Records missing"
+              : r.discrepancies.length > 0
+                ? "Check discrepancies"
+                : "Work time missing"}
           </span>
         )}
       </b>
       <ul className="checks">
-        {CHECK_LABEL.filter(([key]) => c[key] !== "not applicable").map(([key, label]) => {
-          const required = c.required.includes(key);
-          const present = c[key] === "present";
-          return (
-            <li key={key} className={present || !required ? "pass" : undefined}>
-              {label}:{" "}
-              {present ? "recorded" : required ? "missing" : "none recorded (fine if there were none)"}
-            </li>
-          );
-        })}
+        {CHECK_LABEL.filter(([key]) => c[key] !== "not applicable").map(
+          ([key, label]) => {
+            const required = c.required.includes(key);
+            const present = c[key] === "present";
+            return (
+              <li
+                key={key}
+                className={present || !required ? "pass" : undefined}
+              >
+                {label}:{" "}
+                {present
+                  ? "recorded"
+                  : required
+                    ? "missing"
+                    : "none recorded (fine if there were none)"}
+              </li>
+            );
+          },
+        )}
       </ul>
       {r.discrepancies.length > 0 && (
         <>
@@ -862,22 +1228,29 @@ function Verification({ r }: { r: Reconciliation }) {
     <div>
       <b>
         Verification{" "}
-        {r.verified ? <span className="badge ok">Verified</span> : <span className="badge warn">Unverified</span>}
+        {r.verified ? (
+          <span className="badge ok">Verified</span>
+        ) : (
+          <span className="badge warn">Unverified</span>
+        )}
       </b>
       {r.verified && (
         <p>
-          Verified: the purchase receipt and payout proofs are attached and the amounts, units and
-          dates agree.
-          {noWork && " Work time is not recorded, so earnings per hour for this trip are not known."}
+          Verified: the purchase receipt and payout proofs are attached and the
+          amounts, units and dates agree.
+          {noWork &&
+            " Work time is not recorded, so earnings per hour for this trip are not known."}
         </p>
       )}
       <p className="muted">
-        A trade is verified only when every purchase receipt and every payout has its own proof
-        attached to that entry, a sold listing is recorded, and the amounts, units and dates agree
-        with each other. One document proves one purchase or one payout: a file that is already the
-        proof for another entry, on this trip or any other, does not count again. Whole-trip proofs
-        do not count. Work time is not needed to verify a trade. Unverified figures still count in
-        your totals, but the summary and measures say how much is verified.
+        A trade is verified only when every purchase receipt and every payout
+        has its own proof attached to that entry, a sold listing is recorded,
+        and the amounts, units and dates agree with each other. One document
+        proves one purchase or one payout: a file that is already the proof for
+        another entry, on this trip or any other, does not count again.
+        Whole-trip proofs do not count. Work time is not needed to verify a
+        trade. Unverified figures still count in your totals, but the summary
+        and measures say how much is verified.
       </p>
       {!r.verified && (
         <>
@@ -906,7 +1279,9 @@ function Forecast({ r }: { r: Reconciliation }) {
         ) : !f.counted ? (
           <span className="badge">Nothing recorded yet</span>
         ) : (
-          !f.final && <span className="badge">Provisional until the trip is closed</span>
+          !f.final && (
+            <span className="badge">Provisional until the trip is closed</span>
+          )
         )}
       </b>
       <div className="scroll">
@@ -924,20 +1299,28 @@ function Forecast({ r }: { r: Reconciliation }) {
               <td>Contribution</td>
               <td className="num">{signed(f.predictedContribution)}</td>
               <td className="num">{signed(r.realisedContribution)}</td>
-              <td className={"num" + (f.contributionError < 0 ? " warn" : "")}>{signed(f.contributionError)}</td>
+              <td className={"num" + (f.contributionError < 0 ? " warn" : "")}>
+                {signed(f.contributionError)}
+              </td>
             </tr>
             <tr>
               <td>Active time</td>
               <td className="num">{hours(f.predictedMinutes)}</td>
               <td className="num">{minutesText(r.minutes || null)}</td>
               <td className="num">
-                {f.minutesError === null ? BLANK : (f.minutesError > 0 ? "+" : "") + f.minutesError + " min"}
+                {f.minutesError === null
+                  ? BLANK
+                  : (f.minutesError > 0 ? "+" : "") + f.minutesError + " min"}
               </td>
             </tr>
             <tr>
               <td>Per hour</td>
-              <td className="num">{f.predictedHourly === null ? BLANK : money(f.predictedHourly)}</td>
-              <td className="num">{r.realisedHourly === null ? BLANK : money(r.realisedHourly)}</td>
+              <td className="num">
+                {f.predictedHourly === null ? BLANK : money(f.predictedHourly)}
+              </td>
+              <td className="num">
+                {r.realisedHourly === null ? BLANK : money(r.realisedHourly)}
+              </td>
               <td />
             </tr>
             <tr>
@@ -959,10 +1342,13 @@ function Forecast({ r }: { r: Reconciliation }) {
       </div>
       <p className="muted">
         Predicted proceeds were {money(f.predictedProceeds)}
-        {f.basis === "sample" ? ", from sample figures" : ""}. Predictions are never counted as
-        realised cash.
+        {f.basis === "sample" ? ", from sample figures" : ""}. Predictions are
+        never counted as realised cash.
         {f.payoutBy && " Payout was expected by " + longDate(f.payoutBy) + "."}
-        {f.payoutLateDays !== null && " The last payout came " + plural(f.payoutLateDays, "day") + " later than that."}
+        {f.payoutLateDays !== null &&
+          " The last payout came " +
+            plural(f.payoutLateDays, "day") +
+            " later than that."}
       </p>
     </div>
   );
@@ -981,7 +1367,8 @@ function EntriesTable({
   onRemove?: (entry: Entry) => void;
 }) {
   if (!entries.length) return <p className="muted">No entries yet.</p>;
-  const proofCount = (id: number) => proofs.filter((p) => p.entry_id === id).length;
+  const proofCount = (id: number) =>
+    proofs.filter((p) => p.entry_id === id).length;
   const proofBadge = (e: Entry) => {
     const attached = proofCount(e.id) > 0;
     if (!proofed || (e.type !== "receipt" && e.type !== "payout"))
@@ -1012,9 +1399,18 @@ function EntriesTable({
               <td>{longDate(e.occurred)}</td>
               <td>
                 {TYPE_LABEL[e.type]}
+                {e.type === "refund" && (
+                  <span className="muted ledger-sub">
+                    {(e.itemReturned ?? e.units !== null)
+                      ? "Item came back into stock" + (e.returnedOn ? " on " + longDate(e.returnedOn) : "")
+                      : "Buyer kept the item"}
+                  </span>
+                )}
                 <span className="ledger-sub">{proofBadge(e)}</span>
               </td>
-              <td className="num">{e.type === "work" ? hours(e.minutes || 0) : money(e.amount)}</td>
+              <td className="num">
+                {e.type === "work" ? hours(e.minutes || 0) : money(e.amount)}
+              </td>
               <td className="num">{e.units ?? ""}</td>
               <td>
                 {e.reference}
@@ -1022,7 +1418,11 @@ function EntriesTable({
               </td>
               {onRemove && (
                 <td>
-                  <button type="button" className="ledger-remove" onClick={() => onRemove(e)}>
+                  <button
+                    type="button"
+                    className="ledger-remove"
+                    onClick={() => onRemove(e)}
+                  >
                     Remove
                   </button>
                 </td>
@@ -1038,9 +1438,13 @@ function EntriesTable({
 function EntryForm({ trip, onSaved }: { trip: Trip; onSaved: () => void }) {
   const types = ENTRY_TYPES[trip.kind];
   const [type, setType] = useState<EntryType>(types[0]);
+  // Refunds: whether the buyer sent the item back. Nothing is chosen for the
+  // operator: the form asks every time.
+  const [refundKind, setRefundKind] = useState<"" | "returned" | "kept">("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const unitsRequired = trip.kind === "resale" && ["receipt", "sale", "refund"].includes(type);
+  const unitsRequired =
+    trip.kind === "resale" && (["receipt", "sale"].includes(type) || (type === "refund" && refundKind === "returned"));
   const unitsOptional =
     (trip.kind === "resale" && type === "payout") ||
     (trip.kind === "household" && ["receipt", "saving"].includes(type));
@@ -1059,8 +1463,14 @@ function EntryForm({ trip, onSaved }: { trip: Trip; onSaved: () => void }) {
     if (type === "work") body.minutes = Math.round(Number(value("minutes")));
     else {
       const pounds = Number(value("amount"));
-      if (!Number.isFinite(pounds) || pounds <= 0) return setError("Enter an amount in pounds above zero.");
+      if (!Number.isFinite(pounds) || pounds <= 0)
+        return setError("Enter an amount in pounds above zero.");
       body.amount = toPence(pounds);
+    }
+    if (type === "refund") {
+      if (!refundKind) return setError("Say whether the buyer sent the item back.");
+      body.itemReturned = refundKind === "returned";
+      if (refundKind === "returned" && value("returnedOn")) body.returnedOn = value("returnedOn");
     }
     if ((unitsRequired || unitsOptional) && value("units")) body.units = Math.round(Number(value("units")));
     setBusy(true);
@@ -1069,6 +1479,7 @@ function EntryForm({ trip, onSaved }: { trip: Trip; onSaved: () => void }) {
       await api("ledger/trips/" + trip.id + "/entries", body);
       form.reset();
       setType(types[0]);
+      setRefundKind("");
       onSaved();
     } catch (err) {
       setError((err as Error).message);
@@ -1083,7 +1494,13 @@ function EntryForm({ trip, onSaved }: { trip: Trip; onSaved: () => void }) {
       <form className="ledger-form" onSubmit={submit}>
         <label>
           Entry
-          <select value={type} onChange={(e) => setType(e.target.value as EntryType)}>
+          <select
+            value={type}
+            onChange={(e) => {
+              setType(e.target.value as EntryType);
+              setRefundKind("");
+            }}
+          >
             {types.map((t) => (
               <option key={t} value={t}>
                 {TYPE_LABEL[t]}
@@ -1094,27 +1511,97 @@ function EntryForm({ trip, onSaved }: { trip: Trip; onSaved: () => void }) {
         {type === "work" ? (
           <label>
             Minutes
-            <input name="minutes" type="number" min={1} max={10080} step={1} required />
+            <input
+              name="minutes"
+              type="number"
+              min={1}
+              max={10080}
+              step={1}
+              required
+            />
           </label>
         ) : (
           <label>
             Amount (£)
-            <input name="amount" type="number" min={0.01} step={0.01} required inputMode="decimal" />
+            <input
+              name="amount"
+              type="number"
+              min={0.01}
+              step={0.01}
+              required
+              inputMode="decimal"
+            />
           </label>
+        )}
+        {type === "refund" && (
+          <fieldset className="ledger-choice ledger-form-wide">
+            <legend>Did the buyer send the item back?</legend>
+            <label>
+              <input
+                type="radio"
+                name="refundKind"
+                value="returned"
+                required
+                checked={refundKind === "returned"}
+                onChange={() => setRefundKind("returned")}
+              />
+              <span>Yes, it came back to me. It is back in stock and can be sold again.</span>
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="refundKind"
+                value="kept"
+                required
+                checked={refundKind === "kept"}
+                onChange={() => setRefundKind("kept")}
+              />
+              <span>No, the buyer kept it. I paid the money back and no stock comes back.</span>
+            </label>
+          </fieldset>
         )}
         {(unitsRequired || unitsOptional) && (
           <label>
-            {type === "payout" ? "Units this payout covers (optional)" : unitsRequired ? "Units" : "Units (optional)"}
+            {type === "payout"
+              ? "Units this payout covers (optional)"
+              : type === "refund"
+                ? "Units that came back"
+                : unitsRequired
+                  ? "Units"
+                  : "Units (optional)"}
             <input name="units" type="number" min={1} max={10000} step={1} required={unitsRequired} />
           </label>
         )}
         <label>
-          Date
+          {type === "refund" ? "Date the money went back" : "Date"}
           <input name="occurred" type="date" max={today()} defaultValue={today()} required />
         </label>
+        {type === "refund" && refundKind === "returned" && (
+          <>
+            <label>
+              Date the item came back (optional)
+              <input name="returnedOn" type="date" min={EARLIEST_DATE} max={today()} aria-describedby="returned-on-hint" />
+            </label>
+            <p id="returned-on-hint" className="muted ledger-form-wide ledger-form-hint">
+              Give it only if the item came back on a different day from the refund, for example
+              when you sold it again before the refund was paid. Stock counts from the day it came
+              back.
+            </p>
+          </>
+        )}
         <label>
           Reference (optional)
-          <input name="reference" maxLength={120} placeholder="Receipt number or listing id" />
+          <input
+            name="reference"
+            maxLength={120}
+            placeholder={
+              type === "refund"
+                ? "Order number of the sale"
+                : type === "sale"
+                  ? "Order number or listing id"
+                  : "Receipt number or listing id"
+            }
+          />
         </label>
         <label className="ledger-form-wide">
           Note (optional, private)
@@ -1133,13 +1620,15 @@ function EntryForm({ trip, onSaved }: { trip: Trip; onSaved: () => void }) {
 }
 
 /** Reads a file as base64 without the data URL prefix. */
-function readBase64(file: File): Promise<string> {
+export function readBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
       const result = String(reader.result || "");
       const comma = result.indexOf(",");
-      comma > 0 ? resolve(result.slice(comma + 1)) : reject(Error("The file could not be read"));
+      comma > 0
+        ? resolve(result.slice(comma + 1))
+        : reject(Error("The file could not be read"));
     };
     reader.onerror = () => reject(Error("The file could not be read"));
     reader.readAsDataURL(file);
@@ -1152,10 +1641,15 @@ function readBase64(file: File): Promise<string> {
  * newest entry. "" (whole trip) only when the trip has no entries.
  */
 function suggestedEntry(entries: Entry[], proofed: number[]): string {
-  const newest = (list: Entry[]) => (list.length ? list.reduce((a, b) => (b.id > a.id ? b : a)) : null);
-  const verifiable = entries.filter((e) => e.type === "receipt" || e.type === "payout");
+  const newest = (list: Entry[]) =>
+    list.length ? list.reduce((a, b) => (b.id > a.id ? b : a)) : null;
+  const verifiable = entries.filter(
+    (e) => e.type === "receipt" || e.type === "payout",
+  );
   const pick =
-    newest(verifiable.filter((e) => !proofed.includes(e.id))) ?? newest(verifiable) ?? newest(entries);
+    newest(verifiable.filter((e) => !proofed.includes(e.id))) ??
+    newest(verifiable) ??
+    newest(entries);
   return pick ? String(pick.id) : "";
 }
 
@@ -1196,19 +1690,28 @@ function Proofs({
       );
     return names;
   }, [entries]);
-  const typeOf = useMemo(() => new Map(entries.map((e) => [e.id, e.type])), [entries]);
+  const typeOf = useMemo(
+    () => new Map(entries.map((e) => [e.id, e.type])),
+    [entries],
+  );
   const valid = (value: string | null) =>
-    value !== null && (value === "" || entries.some((e) => String(e.id) === value));
-  const supports = valid(choice) ? (choice as string) : suggestedEntry(entries, proofed);
+    value !== null &&
+    (value === "" || entries.some((e) => String(e.id) === value));
+  const supports = valid(choice)
+    ? (choice as string)
+    : suggestedEntry(entries, proofed);
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const form = e.currentTarget;
     const f = new FormData(form);
     const file = f.get("file");
-    if (!(file instanceof File) || !file.size) return setError("Choose a file.");
-    if (!PROOF_TYPES.includes(file.type)) return setError("Proofs must be JPEG or PNG photos, or PDF documents.");
-    if (file.size > MAX_PROOF_BYTES) return setError("Proof files must be 5 MB or smaller.");
+    if (!(file instanceof File) || !file.size)
+      return setError("Choose a file.");
+    if (!PROOF_TYPES.includes(file.type))
+      return setError("Proofs must be JPEG or PNG photos, or PDF documents.");
+    if (file.size > MAX_PROOF_BYTES)
+      return setError("Proof files must be 5 MB or smaller.");
     setBusy(true);
     setError("");
     setListError("");
@@ -1235,25 +1738,49 @@ function Proofs({
     setListError("");
     setNotice("");
     try {
-      await api("ledger/trips/" + trip.id + "/proofs/" + proof.id, { entryId: value ? Number(value) : null }, "PATCH");
-      setNotice('"' + proof.label + '" now supports ' + (value ? entryName.get(Number(value)) : "the whole trip") + ".");
+      await api(
+        "ledger/trips/" + trip.id + "/proofs/" + proof.id,
+        { entryId: value ? Number(value) : null },
+        "PATCH",
+      );
+      setNotice(
+        '"' +
+          proof.label +
+          '" now supports ' +
+          (value ? entryName.get(Number(value)) : "the whole trip") +
+          ".",
+      );
       onSaved();
     } catch (err) {
-      setListError('"' + proof.label + '" was not moved. ' + (err as Error).message);
+      setListError(
+        '"' + proof.label + '" was not moved. ' + (err as Error).message,
+      );
     }
   }
 
   async function remove(proof: Proof) {
-    if (!window.confirm('Remove the proof "' + proof.label + '"? The stored file is deleted unless another proof uses the same file.'))
+    if (
+      !window.confirm(
+        'Remove the proof "' +
+          proof.label +
+          '"? The stored file is deleted unless another proof uses the same file.',
+      )
+    )
       return;
     setError("");
     setListError("");
     setNotice("");
     try {
-      const result = await api<{ removed: { file: string } }>("ledger/trips/" + trip.id + "/proofs/" + proof.id, {}, "DELETE");
+      const result = await api<{ removed: { file: string } }>(
+        "ledger/trips/" + trip.id + "/proofs/" + proof.id,
+        {},
+        "DELETE",
+      );
       const file = result.removed.file;
       setNotice(
-        '"' + proof.label + '" removed. ' +
+        '"' +
+          proof.label +
+          '" removed. ' +
           (file === "in use"
             ? "The stored file is kept because another proof uses the same file."
             : file === "error"
@@ -1269,14 +1796,23 @@ function Proofs({
   /** Whether a stored proof counts towards verification, in words. */
   const standing = (p: Proof) => {
     if (!resale) return null;
-    if (p.entry_id === null) return <span className="warn">Does not count towards verification</span>;
+    if (p.entry_id === null)
+      return <span className="warn">Does not count towards verification</span>;
     const type = typeOf.get(p.entry_id);
     if (type !== "receipt" && type !== "payout")
-      return <span className="muted">Kept as evidence. Only receipt and payout proofs count towards verification.</span>;
+      return (
+        <span className="muted">
+          Kept as evidence. Only receipt and payout proofs count towards
+          verification.
+        </span>
+      );
     return proofed.includes(p.entry_id) ? (
       <span className="ok">Counts towards verification</span>
     ) : (
-      <span className="warn">Does not count: the same file is also attached to another receipt or payout, on this trip or another</span>
+      <span className="warn">
+        Does not count: the same file is also attached to another receipt or
+        payout, on this trip or another
+      </span>
     );
   };
 
@@ -1284,11 +1820,13 @@ function Proofs({
     <fieldset>
       <legend>Private proofs</legend>
       <p className="muted">
-        Proofs stay on this computer. Bounty stores them in its private data folder, readable only by
-        your user account, and never shows or sends their contents: only the label, type, size and a
-        fingerprint (SHA-256 hash) appear here. Photos (JPEG or PNG) have their location and camera
-        data removed before they are stored. PDF documents are stored unchanged, so their document
-        properties, such as author and creation date, are kept.
+        Proofs stay on this computer. Bounty stores them in its private data
+        folder, readable only by your user account, and never shows or sends
+        their contents: only the label, type, size and a fingerprint (SHA-256
+        hash) appear here. Photos (JPEG or PNG) have their location and camera
+        data removed before they are stored. PDF documents are stored unchanged,
+        so their document properties, such as author and creation date, are
+        kept.
       </p>
       {proofs.length > 0 && (
         <ul className="ledger-proofs">
@@ -1297,14 +1835,25 @@ function Proofs({
               <div className="ledger-proof-file">
                 <b>{p.label}</b>
                 <span className="muted">
-                  {p.media_type === "application/pdf" ? "PDF" : p.media_type === "image/png" ? "PNG" : "JPEG"},{" "}
-                  {size(p.bytes)}, {p.metadataRemoved ? "location data removed" : "document properties kept"}.
-                  Fingerprint <code title={p.sha256}>{p.sha256.slice(0, 12)}…</code>
+                  {p.media_type === "application/pdf"
+                    ? "PDF"
+                    : p.media_type === "image/png"
+                      ? "PNG"
+                      : "JPEG"}
+                  , {size(p.bytes)},{" "}
+                  {p.metadataRemoved
+                    ? "location data removed"
+                    : "document properties kept"}
+                  . Fingerprint{" "}
+                  <code title={p.sha256}>{p.sha256.slice(0, 12)}…</code>
                 </span>
               </div>
               <label className="ledger-proof-link">
                 Supports
-                <select value={p.entry_id === null ? "" : String(p.entry_id)} onChange={(e) => relink(p, e.target.value)}>
+                <select
+                  value={p.entry_id === null ? "" : String(p.entry_id)}
+                  onChange={(e) => relink(p, e.target.value)}
+                >
                   {entries.map((e) => (
                     <option key={e.id} value={e.id}>
                       {entryName.get(e.id)}
@@ -1314,7 +1863,11 @@ function Proofs({
                 </select>
                 {standing(p)}
               </label>
-              <button type="button" className="ledger-remove" onClick={() => remove(p)}>
+              <button
+                type="button"
+                className="ledger-remove"
+                onClick={() => remove(p)}
+              >
                 Remove
               </button>
             </li>
@@ -1326,11 +1879,20 @@ function Proofs({
       <form className="ledger-form" onSubmit={submit}>
         <label>
           File (JPEG, PNG or PDF, up to 5 MB)
-          <input name="file" type="file" accept="image/jpeg,image/png,application/pdf" required />
+          <input
+            name="file"
+            type="file"
+            accept="image/jpeg,image/png,application/pdf"
+            required
+          />
         </label>
         <label>
           Supports
-          <select name="entryId" value={supports} onChange={(e) => setChoice(e.target.value)}>
+          <select
+            name="entryId"
+            value={supports}
+            onChange={(e) => setChoice(e.target.value)}
+          >
             {entries.map((e) => (
               <option key={e.id} value={e.id}>
                 {entryName.get(e.id)}
@@ -1344,7 +1906,11 @@ function Proofs({
           <input name="label" maxLength={120} placeholder="Till receipt" />
         </label>
         {resale && (
-          <p className={"ledger-form-wide " + (supports === "" ? "warn" : "muted")}>
+          <p
+            className={
+              "ledger-form-wide " + (supports === "" ? "warn" : "muted")
+            }
+          >
             {supports !== ""
               ? "Attach each document to the entry it records. Only proofs on the purchase receipt and payout entries count towards verification, one file per entry. A file that is already the proof for another entry, on any trip, is refused. Whole-trip proofs do not count."
               : entries.length
@@ -1363,10 +1929,14 @@ function metricsLeftOut(left: Metrics["forecast"]["leftOut"] | undefined) {
   if (!left) return "";
   const parts = [
     left.sample && plural(left.sample, "trip") + " with a sample prediction",
-    left.basisUnknown && plural(left.basisUnknown, "trip") + " whose evidence is unknown",
-    left.notTaken && plural(left.notTaken, "trip") + " closed with nothing recorded",
+    left.basisUnknown &&
+      plural(left.basisUnknown, "trip") + " whose evidence is unknown",
+    left.notTaken &&
+      plural(left.notTaken, "trip") + " closed with nothing recorded",
   ].filter(Boolean);
-  return parts.length ? " Left out of the prediction measures: " + parts.join(", ") + "." : "";
+  return parts.length
+    ? " Left out of the prediction measures: " + parts.join(", ") + "."
+    : "";
 }
 
 function MetricsPanel({ version }: { version: number }) {
@@ -1385,7 +1955,12 @@ function MetricsPanel({ version }: { version: number }) {
       active = false;
     };
   }, [version]);
-  if (error) return <article><p role="alert">{error}</p></article>;
+  if (error)
+    return (
+      <article>
+        <p role="alert">{error}</p>
+      </article>
+    );
   if (!data) return null;
   const f = data.forecast;
   const c = data.cash;
@@ -1393,10 +1968,13 @@ function MetricsPanel({ version }: { version: number }) {
     <article>
       <h2>Prediction accuracy</h2>
       <p className="muted">
-        Closed resale trips only: {data.closedTrips} closed, {data.verifiedTrips} of them verified.
-        {data.legacyTrips > 0 && ` Legacy totals (${data.legacyTrips}) are left out because they cannot be reconciled.`}{" "}
-        Differences are realised minus predicted, so a negative figure means a trip did worse than
-        predicted. Only predictions from live evidence on trips that were taken are measured.
+        Closed resale trips only: {data.closedTrips} closed,{" "}
+        {data.verifiedTrips} of them verified.
+        {data.legacyTrips > 0 &&
+          ` Legacy totals (${data.legacyTrips}) are left out because they cannot be reconciled.`}{" "}
+        Differences are realised minus predicted, so a negative figure means a
+        trip did worse than predicted. Only predictions from live evidence on
+        trips that were taken are measured.
         {metricsLeftOut(f.leftOut)}
       </p>
       {data.closedTrips === 0 ? (
@@ -1406,32 +1984,65 @@ function MetricsPanel({ version }: { version: number }) {
           <dt>Trips with a measured prediction</dt>
           <dd>{f.trips}</dd>
           <dt>Average contribution error (size)</dt>
-          <dd>{f.meanAbsoluteContributionError === null ? BLANK : money(f.meanAbsoluteContributionError)}</dd>
+          <dd>
+            {f.meanAbsoluteContributionError === null
+              ? BLANK
+              : money(f.meanAbsoluteContributionError)}
+          </dd>
           <dt>Average contribution error (direction)</dt>
           <dd>{signed(f.meanContributionError)}</dd>
           <dt>Average time error</dt>
           <dd>
             {f.meanMinutesError === null
               ? BLANK
-              : (f.meanMinutesError > 0 ? "+" : "") + f.meanMinutesError + " min (size " + f.meanAbsoluteMinutesError + " min)"}
+              : (f.meanMinutesError > 0 ? "+" : "") +
+                f.meanMinutesError +
+                " min (size " +
+                f.meanAbsoluteMinutesError +
+                " min)"}
           </dd>
           <dt>Cash recovered (payouts over money spent)</dt>
           <dd>
-            {c.recoveryRate === null ? BLANK : percent(c.recoveryRate)} ({money(c.payouts)} of {money(c.spend)})
+            {c.recoveryRate === null ? BLANK : percent(c.recoveryRate)} (
+            {money(c.payouts)} of {money(c.spend)})
           </dd>
           <dt>Verified share of payouts</dt>
-          <dd>{c.payouts > 0 ? percent(c.verifiedPayouts / c.payouts) + " (" + money(c.verifiedPayouts) + ")" : BLANK}</dd>
+          <dd>
+            {c.payouts > 0
+              ? percent(c.verifiedPayouts / c.payouts) +
+                " (" +
+                money(c.verifiedPayouts) +
+                ")"
+              : BLANK}
+          </dd>
           <dt>Median time to payout</dt>
           <dd>
             {data.medianTimeToPayoutDays === null
               ? BLANK
-              : data.medianTimeToPayoutDays.toLocaleString("en-GB") + " days over " + plural(data.payoutTrips, "trip")}
+              : data.medianTimeToPayoutDays.toLocaleString("en-GB") +
+                " days over " +
+                plural(data.payoutTrips, "trip")}
           </dd>
           <dt>Units left unsold at close</dt>
           <dd>{data.unsoldUnits}</dd>
-          <dt>Realised per hour</dt>
+          <dt>Realised per hour (whole trips: all their payouts, costs and work time)</dt>
           <dd>
-            {data.hourly.realised === null ? BLANK : money(data.hourly.realised)} over {plural(data.hourly.trips, "trip")} with work time
+            {data.hourly.realised === null ? BLANK : money(data.hourly.realised)} over {plural(data.hourly.trips, "closed trip")} with work time
+            {(data.hourly.noPurchaseCountedTrips ?? 0) > 0 && (
+              <span className="muted ledger-sub" data-hourly-counted="no purchase">
+                Counted: {plural(data.hourly.noPurchaseCountedTrips ?? 0, "closed trip")} that sold stock
+                with no purchase recorded ({signed(data.hourly.noPurchaseCountedEarnings ?? 0)}), at the
+                recorded result, because that lowers the figure. What the stock cost is not known, so
+                the real result can only be lower.
+              </span>
+            )}
+            {(data.hourly.noPurchaseTrips ?? 0) > 0 && (
+              <span className="muted ledger-sub" data-hourly-left-out="no purchase">
+                Left out: {plural(data.hourly.noPurchaseTrips ?? 0, "closed trip")} that sold stock with no
+                purchase recorded ({signed(data.hourly.noPurchaseEarnings ?? 0)}), because what the stock
+                cost is not known.
+              </span>
+            )}
           </dd>
           <dt>Realised against predicted per hour</dt>
           <dd>

@@ -1,0 +1,21 @@
+/* My trip layout (proto/TripPage.tsx). Pieces come from src/ui/kit.css;
+   tp- prefixed because older global classes clash with plain names. */
+.tp { display: grid; gap: 22px; font-family: var(--k-sans); }
+.tp-p { margin: 0; font: 400 14px/1.5 var(--k-sans); color: var(--k-muted); }
+.tp-small { margin: 0; font: 400 12.5px/1.5 var(--k-sans); color: var(--k-muted); }
+.tp-small .k-btn.text { font-size: 12.5px; color: inherit; }
+.tp-big { font-size: 40px; line-height: 1; color: var(--k-ink); }
+.tp-fill { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.tp-fill .k-field { flex: 1 1 160px; }
+.tp-stop { display: grid; gap: 2px; }
+.tp-stop + .tp-stop { margin-top: 8px; }
+.tp-shop { display: flex; align-items: center; gap: 10px; padding: 6px 0 2px; font: 600 15px/1.2 var(--k-sans); color: var(--k-ink); }
+.tp-shop small { margin-left: auto; font: 500 12.5px/1 var(--k-sans); color: var(--k-muted); }
+.tp-n { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; background: var(--k-ink); color: #fff; font: 700 12.5px/1 var(--k-sans); }
+.tp-link { border: 0; background: none; padding: 0; font: inherit; color: inherit; cursor: pointer; text-align: left; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tp-link:hover { text-decoration: underline; }
+.tp-notes { display: grid; gap: 8px; }
+.tp-pending { gap: 12px; }
+@media (max-width: 640px) {
+  .tp-fill > .k-btn { flex: 1 1 100%; }
+}
