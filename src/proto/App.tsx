@@ -198,8 +198,11 @@ type Report = { at: number; kind: "saw" | "gone" };
 export default function ProtoApp({
   legacy,
   account,
+  operator = true,
 }: {
   legacy: (view: View) => React.ReactNode;
+  // May use Admin. The server checks this too; here it only hides the way in.
+  operator?: boolean;
   // Member sign-in on a hosted pilot; absent on your own computer, where
   // there are no accounts. email is null while signed out.
   account?: { email: string | null; signIn: () => void; signOut: () => void };
@@ -976,9 +979,11 @@ export default function ProtoApp({
                   <button type="button" onClick={() => go("plans")}>
                     Plans
                   </button>
-                  <button type="button" onClick={() => go("admin")}>
-                    Admin (operators)
-                  </button>
+                  {operator && (
+                    <button type="button" onClick={() => go("admin")}>
+                      Admin (operators)
+                    </button>
+                  )}
                   {account && !account.email && (
                     <button type="button" onClick={account.signIn}>
                       Sign in
@@ -2191,7 +2196,17 @@ export default function ProtoApp({
   else if (view === "blocks") body = <Blocks />;
   else if (view === "scan") body = <Scan />;
   else if (view === "tips") body = <TipsScreen go={(v) => go(v)} />;
-  else if (view === "admin") body = <Admin />;
+  else if (view === "admin" || view === "sources")
+    body = operator ? (
+      <Admin />
+    ) : (
+      <div className="crew-note">
+        <p className="sub">
+          Admin is for Bounty's operators only. Sign in with an operator
+          account to use it.
+        </p>
+      </div>
+    );
   else if (view === "plans") body = <PlansScreen />;
   else if (view === "crew") body = <CrewScreen go={(v) => go(v)} />;
   else if (view === "research")

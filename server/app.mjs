@@ -42,14 +42,43 @@ const originHost = (value) => {
 // them the API answers only requests addressed to this machine. members is
 // accounts() from accounts.mjs: when given, anyone may read, every change
 // needs a signed-in member, and the shared password is not used.
-export function createApi(db, { modules = routeModules, publicHosts = [], password = null, members = null } = {}) {
+//
+// operators lists the emails allowed to use routes marked { operator: true }
+// (the Admin tools). With member accounts on, only a signed-in operator may
+// call them. Without accounts the API is either on this machine or behind
+// the shared password, and whoever is there is the operator.
+// The Admin tools: setting up and checking tips, verifying shelf reports,
+// sending alerts, recording branch checks, sources, display permissions and
+// the audit. Only an operator may use them (see operators below). A route can
+// also mark itself with { operator: true }.
+export const OPERATOR_ROUTES = new Set([
+  "POST /api/members/:id/seller-confirmation",
+  "POST /api/bounties",
+  "POST /api/bounties/:id/recheck",
+  "POST /api/bounties/:id/withdraw",
+  "POST /api/claims/:id/reconcile",
+  "POST /api/reports/:id/verify",
+  "POST /api/bounties/:id/alerts",
+  "POST /api/research/checks",
+  "POST /api/audit",
+  "POST /api/audit/signoff",
+  "GET /api/sources",
+  "POST /api/permissions",
+]);
+
+export function createApi(
+  db,
+  { modules = routeModules, publicHosts = [], password = null, members = null, operators = [] } = {},
+) {
   const allowedHosts = new Set([...LOCAL_HOSTS, ...publicHosts]);
+  const operatorEmails = new Set(operators.map((e) => String(e).trim().toLowerCase()));
+  const isOperator = (user) => !members || Boolean(user && operatorEmails.has(String(user.email).toLowerCase()));
   const table = [...modules.flatMap((m) => m.routes(db)), ...plans.routes(db, members)]
     .map(([method, pattern, handler, options = {}]) => ({
       method,
       parts: pattern.split("/").filter(Boolean),
       handler,
-      options,
+      options: OPERATOR_ROUTES.has(`${method} ${pattern}`) ? { ...options, operator: true } : options,
     }));
   function find(method, path) {
     const parts = path.split("/").filter(Boolean);
@@ -111,12 +140,13 @@ export function createApi(db, { modules = routeModules, publicHosts = [], passwo
           return send(415, { error: "Send JSON with Content-Type: application/json" });
       }
       if (url.pathname === "/api/auth/me" && method === "GET") {
-        if (!members) return send(200, { required: false, user: null });
+        if (!members) return send(200, { required: false, user: null, operator: true });
         const user = await members.user(req);
         return send(200, {
           required: true,
           user: user ? members.publicUser(user) : null,
           inviteOpen: members.inviteOpen,
+          operator: isOperator(user),
         });
       }
       if (members) {
@@ -143,8 +173,13 @@ export function createApi(db, { modules = routeModules, publicHosts = [], passwo
       // routes marked { read: true } that only work something out, are open.
       // Saving or changing anything needs a signed-in member.
       const reading = method === "GET" || method === "HEAD" || found.route.options.read === true;
-      if (members && !reading && !(await members.user(req)))
-        return send(401, { signIn: true, error: "Sign in to save changes" });
+      if (members && (!reading || found.route.options.operator)) {
+        const user = await members.user(req);
+        if (!user) return send(401, { signIn: true, error: "Sign in to save changes" });
+        // Admin tools: operators only, reads included.
+        if (found.route.options.operator && !isOperator(user))
+          return send(403, { error: "Only an operator can do this" });
+      }
       const body =
         method === "GET" || method === "HEAD"
           ? undefined

@@ -13,11 +13,11 @@ try {
   console.error("Bounty API not started: " + error.message);
   process.exit(1);
 }
-const { listenHost, publicHosts, password, databaseUrl, inviteCode } = access;
+const { listenHost, publicHosts, password, databaseUrl, inviteCode, operators } = access;
 const members = databaseUrl ? accounts(await neonStore(databaseUrl), { inviteCode }) : null;
 const db = database();
 seedSampleTips(db);
-createServer(createApi(db, { publicHosts, password, members })).listen(port, listenHost, () =>
+createServer(createApi(db, { publicHosts, password, members, operators })).listen(port, listenHost, () =>
   console.log(
     `Bounty API listening on ${listenHost}:${port}` +
       (publicHosts.length ? ` for ${publicHosts.join(", ")}` : "") +

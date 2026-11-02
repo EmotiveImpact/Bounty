@@ -13,6 +13,14 @@ const echo = {
   ],
 };
 
+// An Admin tool: marked for operators only.
+const admin = {
+  routes: () => [
+    ["GET", "/api/desk", () => ({ desk: true }), { operator: true }],
+    ["POST", "/api/desk", ({ body }) => body, { operator: true }],
+  ],
+};
+
 // The same shape as postgresStore, kept in memory.
 function memoryStore() {
   const users = [];
@@ -44,10 +52,10 @@ function memoryStore() {
   };
 }
 
-async function start(options = {}) {
+async function start(options = {}, operators = []) {
   const store = memoryStore();
   const members = accounts(store, { inviteCode: INVITE, ...options });
-  const api = await serve(memoryDb(), [echo], { members, password: null });
+  const api = await serve(memoryDb(), [echo, admin], { members, password: null, operators });
   const call = async (method, path, body, cookie) => {
     const res = await fetch(api.base + path, {
       method,
@@ -89,7 +97,7 @@ test("signed out, anyone can look around but every change asks to sign in", asyn
     assert.equal(write.status, 401);
     assert.equal(write.body.signIn, true);
     const me = await call("GET", "/api/auth/me");
-    assert.deepEqual(me, { status: 200, body: { required: true, user: null, inviteOpen: true }, setCookie: null });
+    assert.deepEqual(me, { status: 200, body: { required: true, user: null, inviteOpen: true, operator: false }, setCookie: null });
     const res = await fetch(api.base + "/api/echo", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -122,7 +130,7 @@ test("sign up with the invite code, stay signed in, then sign out", async () => 
 
     assert.deepEqual((await call("POST", "/api/echo", { a: 1 }, cookie)).body, { a: 1 });
     const me = await call("GET", "/api/auth/me", undefined, cookie);
-    assert.deepEqual(me.body, { required: true, user: { email: "edem@example.co.uk", name: "Edem" }, inviteOpen: true });
+    assert.deepEqual(me.body, { required: true, user: { email: "edem@example.co.uk", name: "Edem" }, inviteOpen: true, operator: false });
 
     const again = await call("POST", "/api/auth/signup", { email: "edem@example.co.uk", password: "0123456789", invite: INVITE });
     assert.equal(again.status, 409);
@@ -178,7 +186,7 @@ test("sign-up is closed without an invite code; sign-in writes still need JSON",
 test("without accounts the app reports that no sign-in is needed", async () => {
   const api = await serve(memoryDb(), [echo]);
   try {
-    assert.deepEqual(await api.call("GET", "/api/auth/me"), { status: 200, body: { required: false, user: null } });
+    assert.deepEqual(await api.call("GET", "/api/auth/me"), { status: 200, body: { required: false, user: null, operator: true } });
   } finally {
     await api.close();
   }
@@ -190,4 +198,39 @@ test("a database URL replaces the shared password for hosted use", () => {
   assert.equal(config.inviteCode, INVITE);
   assert.equal(config.password, null);
   assert.throws(() => accessConfig({ DATABASE_URL: "postgres://x", BOUNTY_INVITE_CODE: "short" }), /at least 8/);
+});
+
+test("Admin tools answer only a signed-in operator", async () => {
+  const { api, call } = await start({}, [" Boss@Example.co.uk "]);
+  try {
+    assert.equal((await call("GET", "/api/desk")).status, 401, "signed out: sign in first, even to read");
+    const member = sessionCookie(
+      (await call("POST", "/api/auth/signup", { email: "member@example.co.uk", password: "0123456789", invite: INVITE })).setCookie,
+    );
+    assert.equal((await call("GET", "/api/desk", undefined, member)).status, 403);
+    assert.equal((await call("POST", "/api/desk", { a: 1 }, member)).status, 403);
+    assert.equal((await call("GET", "/api/auth/me", undefined, member)).body.operator, false);
+    const boss = sessionCookie(
+      (await call("POST", "/api/auth/signup", { email: "boss@example.co.uk", password: "0123456789", invite: INVITE })).setCookie,
+    );
+    assert.equal((await call("GET", "/api/auth/me", undefined, boss)).body.operator, true);
+    assert.deepEqual((await call("GET", "/api/desk", undefined, boss)).body, { desk: true });
+    assert.deepEqual((await call("POST", "/api/desk", { a: 1 }, boss)).body, { a: 1 });
+    assert.deepEqual((await call("POST", "/api/echo", { a: 2 }, member)).body, { a: 2 }, "members still save their own changes");
+  } finally {
+    await api.close();
+  }
+});
+
+test("the real Admin routes are marked for operators", async () => {
+  const { OPERATOR_ROUTES } = await import("./app.mjs");
+  for (const r of ["POST /api/bounties", "POST /api/reports/:id/verify", "POST /api/audit/signoff", "GET /api/sources", "POST /api/permissions"])
+    assert.ok(OPERATOR_ROUTES.has(r), r);
+  assert.deepEqual(accessConfig({ BOUNTY_OPERATORS: "A@b.co, c@d.co ,," }).operators, ["a@b.co", "c@d.co"]);
+});
+
+test("every operator route names a real route", async () => {
+  const { OPERATOR_ROUTES, routeModules } = await import("./app.mjs");
+  const real = new Set(routeModules.flatMap((m) => m.routes(memoryDb())).map(([method, pattern]) => `${method} ${pattern}`));
+  for (const r of OPERATOR_ROUTES) assert.ok(real.has(r), r);
 });
