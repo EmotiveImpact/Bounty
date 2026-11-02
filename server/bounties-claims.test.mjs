@@ -134,7 +134,12 @@ function estimateFor(request = {}, over = {}) {
 }
 
 const JOURNEY = { cost: 300, minutes: 30 };
-const TRIP = { journeyCost: JOURNEY.cost, journeyMinutes: JOURNEY.minutes };
+// Round 5: a member's trip profile (a car, so the units fit) and the cash
+// they can spend on a trip; a claim without them is refused.
+const CASH = 100000;
+const FIT = { transport: "Car", carryKg: 25, storageUnits: 50 };
+const FIT_PROFILE = { ...FIT, cashAvailable: CASH };
+const TRIP = { journeyCost: JOURNEY.cost, journeyMinutes: JOURNEY.minutes, cashAvailable: CASH };
 const bountyInput = (over = {}) => ({
   title: "Travel kettle",
   locality: "Camden",
@@ -159,13 +164,13 @@ const memberRow = (db, id) => ({ ...db.prepare("SELECT * FROM members WHERE id =
 const member = (db, name, over = {}) =>
   createMember(
     db,
-    { name, alertsOptIn: true, alertLocalities: ["Camden"], paidTier: "diamond", paidUntil: "2026-12-31", ...over },
+    { name, alertsOptIn: true, alertLocalities: ["Camden"], paidTier: "diamond", paidUntil: "2026-12-31", ...FIT, ...over },
     { now: T0 },
   );
 const viewAs = (db, b, m, now = T0) => bountyView(db, b, { viewer: { kind: "member", member: memberRow(db, m.id) }, now });
 // claim() with the member's own figures worked out at the units they claim.
 const claim = (db, args) =>
-  rawClaim(db, { journey: JOURNEY, check: estimateFor({ units: args.units, costs: { journeyCost: 300, journeyMinutes: 30 } }), ...args });
+  rawClaim(db, { journey: JOURNEY, check: estimateFor({ units: args.units, costs: { journeyCost: 300, journeyMinutes: 30 } }), cashAvailable: CASH, ...args });
 const status = (fn) => {
   try {
     fn();
@@ -204,6 +209,7 @@ async function setup(over = {}) {
         alertLocalities: ["Camden"],
         paidTier: "diamond",
         paidUntil: "2026-12-31",
+        ...FIT,
         ...extra,
       })
     ).body.member;
@@ -442,12 +448,12 @@ test("other members' units count against demand and come before the member's pay
   const slow = estimateFor({ units: 1, costs: { journeyCost: 300, journeyMinutes: 30 } }, { sampleCount: 8, listings: 0 });
   const shared = (committed, extra = {}) => ({ committed, mine: 0, sellWindowWeeks: 2, salesPerWeekLimit: null, now: T0, ...extra });
   // Nobody else yet: the one unit two weeks of sales support passes, and the member hears when it is likely to sell.
-  const alone = memberTripCheck(slow, { units: 1, journey: JOURNEY, shared: shared(0) });
+  const alone = memberTripCheck(slow, { units: 1, journey: JOURNEY, profile: FIT_PROFILE, shared: shared(0) });
   assert.equal(alone.ok, true, alone.reasons.join("; "));
   assert.equal(alone.shared.note, "At about 1 sale a fortnight, your unit is likely to sell in about 5 days.");
   assert.match(memberTripText(alone), /At about 1 sale a fortnight, your unit is likely to sell in about 5 days\. Every check passes\.$/);
   // Five units already claimed: the sixth member is told why not.
-  const sixth = memberTripCheck(slow, { units: 1, journey: JOURNEY, shared: shared(5) });
+  const sixth = memberTripCheck(slow, { units: 1, journey: JOURNEY, profile: FIT_PROFILE, shared: shared(5) });
   assert.equal(sixth.ok, false);
   assert.deepEqual(sixth.reasons, [
     "Other members have already claimed 5 units. At about 1 sale a fortnight, your unit is likely to sell in about 10 weeks, but sales support about 1 unit within 2 weeks after competing listings, and those are already claimed",
@@ -456,28 +462,28 @@ test("other members' units count against demand and come before the member's pay
   assert.equal(sixth.shared.demandLeft, 0);
   // A faster item with room: passes and says so.
   const fast = estimateFor({ units: 1, costs: { journeyCost: 300, journeyMinutes: 30 } });
-  const third = memberTripCheck(fast, { units: 1, journey: JOURNEY, shared: shared(2) });
+  const third = memberTripCheck(fast, { units: 1, journey: JOURNEY, profile: FIT_PROFILE, shared: shared(2) });
   assert.equal(third.ok, true, third.reasons.join("; "));
   assert.equal(third.shared.note, "Other members have already claimed 2 units. At about 2 sales a week, your unit is likely to sell in about 11 days.");
   // The payout is scheduled after the others' units: sold 13 Nov, posted
   // the same Friday, delivered 15 Nov, paid out 17 Nov.
   assert.equal(third.shared.payoutDate, "2026-11-17");
   assert.equal(third.figures.payoutDate, "2026-11-17");
-  const late = memberTripCheck(fast, { units: 1, journey: JOURNEY, shared: shared(2), terms: { cashNeededBy: "2026-11-14", floor: null } });
+  const late = memberTripCheck(fast, { units: 1, journey: JOURNEY, profile: FIT_PROFILE, shared: shared(2), terms: { cashNeededBy: "2026-11-14", floor: null } });
   assert.equal(late.ok, false);
   assert.deepEqual(late.reasons, [
     "Other members have already claimed 2 units. Your unit is likely to be paid out on 17 Nov 2026, after 14 Nov 2026, when you need the cash",
   ]);
-  assert.equal(memberTripCheck(fast, { units: 1, journey: JOURNEY, shared: shared(2), terms: { cashNeededBy: "2026-11-17", floor: null } }).ok, true);
+  assert.equal(memberTripCheck(fast, { units: 1, journey: JOURNEY, profile: FIT_PROFILE, shared: shared(2), terms: { cashNeededBy: "2026-11-17", floor: null } }).ok, true);
   // The member's own bought units are named as theirs.
-  const mine = memberTripCheck(fast, { units: 1, journey: JOURNEY, shared: shared(2, { mine: 1 }) });
+  const mine = memberTripCheck(fast, { units: 1, journey: JOURNEY, profile: FIT_PROFILE, shared: shared(2, { mine: 1 }) });
   assert.match(mine.shared.note, /^Other members have already claimed 1 unit and you have claimed or bought 1\./);
   // A shorter operator window is stricter: one week supports 1 unit after the listing.
-  const week = memberTripCheck(fast, { units: 1, journey: JOURNEY, shared: shared(1, { sellWindowWeeks: 1 }) });
+  const week = memberTripCheck(fast, { units: 1, journey: JOURNEY, profile: FIT_PROFILE, shared: shared(1, { sellWindowWeeks: 1 }) });
   assert.equal(week.ok, false);
   assert.match(week.reasons[0], /sales support about 1 unit within 1 week after competing listings, and those are already claimed$/);
   // Without `shared` nothing changes (older callers).
-  assert.equal(memberTripCheck(fast, { units: 1, journey: JOURNEY }).shared, null);
+  assert.equal(memberTripCheck(fast, { units: 1, journey: JOURNEY, profile: FIT_PROFILE }).shared, null);
 });
 
 test("sharedDemand counts live and bought units and caps the operator's window at the gate's", () => {
@@ -565,7 +571,7 @@ test("routes: the claim check uses the stricter hourly floor and says whose (R3P
     const b = (await api.call("POST", "/api/bounties", { ...bountyInput(), estimate: { ...REQUEST, hourlyFloor: 1200, cashNeededBy: "2026-11-05" } })).body.bounty;
     const ann = await makeMember("Ann");
     // 1 unit, no fare, 10 minutes: £10.00 over 30 active minutes, £20.00 an hour.
-    const walk = { journeyCost: 0, journeyMinutes: 10 };
+    const walk = { journeyCost: 0, journeyMinutes: 10, cashAvailable: CASH };
     const high = await api.call("POST", `/api/bounties/${b.id}/claim-check`, { memberId: ann.id, units: 1, ...walk, hourlyFloor: 2500 });
     assert.equal(high.status, 200);
     assert.equal(high.body.check.ok, false);
@@ -595,7 +601,7 @@ test("routes: a member's higher minimum profit fails their own check and claim (
     assert.equal(b.opportunity.unitProfit, 750);
     const pat = await makeMember("Pat", { rules: { minUnitProfit: 700 } });
     // Pat's own trip: 1 unit, £4.00 journey, £6.00 profit, under her £7.00.
-    const own = { units: 1, journeyCost: 400, journeyMinutes: 30 };
+    const own = { units: 1, journeyCost: 400, journeyMinutes: 30, cashAvailable: CASH };
     const preview = await api.call("POST", `/api/bounties/${b.id}/claim-check`, { memberId: pat.id, ...own });
     assert.equal(preview.status, 200);
     assert.equal(preview.body.check.ok, false);
@@ -631,7 +637,7 @@ test("routes: the claim check on a paused trip is not ok and leads with the bloc
     assert.match(res.body.message, /\. Your own figures would otherwise pass\.$/);
     assert.doesNotMatch(res.body.message, /Every check passes/);
     // When their own figures fail too, both are said.
-    const costly = await api.call("POST", `/api/bounties/${b.id}/claim-check`, { memberId: ann.id, units: 1, journeyCost: 900, journeyMinutes: 30, hourlyFloor: 5000 });
+    const costly = await api.call("POST", `/api/bounties/${b.id}/claim-check`, { memberId: ann.id, units: 1, journeyCost: 900, journeyMinutes: 30, cashAvailable: CASH, hourlyFloor: 5000 });
     assert.equal(costly.body.check.ok, false);
     assert.match(costly.body.message, /^Don't make the trip: .*At 1 unit with your journey \(£9\.00, 30 minutes\) your own figures also fail: .*Below the hourly floor: about £[\d.]+ an active hour, under your floor of £50\.00\.$/);
   } finally {
@@ -640,7 +646,7 @@ test("routes: the claim check on a paused trip is not ok and leads with the bloc
 });
 
 test("blockedTripCheck keeps the member's own result and leaves an unblocked check alone", () => {
-  const ok = memberTripCheck(estimateFor({ units: 1, costs: { journeyCost: 300, journeyMinutes: 30 } }), { units: 1, journey: JOURNEY });
+  const ok = memberTripCheck(estimateFor({ units: 1, costs: { journeyCost: 300, journeyMinutes: 30 } }), { units: 1, journey: JOURNEY, profile: FIT_PROFILE });
   assert.equal(blockedTripCheck(ok, { blockers: [], headline: null }), ok);
   const blocked = blockedTripCheck(ok, { blockers: ["The offer price is not from the last 7 days"], headline: null });
   assert.equal(blocked.ok, false);
@@ -670,7 +676,8 @@ test("a claim stores the member's own hourly floor and cash date, so a re-check 
   const ann = member(db, "Ann");
   const bob = member(db, "Bob");
   const withTerms = claim(db, { bountyId: b.id, memberId: ann.id, units: 1, terms: { hourlyFloor: 500, cashNeededBy: "2026-11-20" }, now: T0 });
-  assert.deepEqual(JSON.parse(withTerms.terms), { hourlyFloor: 500, cashNeededBy: "2026-11-20" });
+  // The cash the member can spend is stored with the terms too (round 5).
+  assert.deepEqual(JSON.parse(withTerms.terms), { hourlyFloor: 500, cashNeededBy: "2026-11-20", cashAvailable: CASH });
   const without = claim(db, { bountyId: b.id, memberId: bob.id, units: 1, now: T0 });
-  assert.deepEqual(JSON.parse(without.terms), { hourlyFloor: null, cashNeededBy: null });
+  assert.deepEqual(JSON.parse(without.terms), { hourlyFloor: null, cashNeededBy: null, cashAvailable: CASH });
 });

@@ -8,8 +8,12 @@ import {
   MemberRules,
   money,
   percent,
+  editedTripFields,
   Profile,
+  profileEdited,
   RuleKey as ApiRuleKey,
+  TRIP_FIELDS,
+  type TripField,
   saveMemberRules,
   saveProfile,
   toPence,
@@ -50,6 +54,18 @@ export type Economics = {
   allSellAssumed: boolean;
   journeyKnown?: false;
 };
+// The same figures before travel while a public transport fare is blank:
+// the best the trip can do, shown only labelled "before your fare".
+export type BeforeTravel = {
+  contribution: number;
+  unitProfit: number | null;
+  returnOnCost: number | null;
+  cashRequired: number;
+  hourly: number | null;
+  unsoldLoss: number;
+  halfSells: number | null;
+  breakEvenSale: number | null;
+};
 type Check = { id: string; ok: boolean; detail: string };
 export type Opportunity = {
   tier: string;
@@ -65,7 +81,10 @@ export type Thresholds = {
   returnOnCost: number | null;
   ok: boolean;
   failures: string[];
-  fareNeeded?: boolean; // the verdict waits for a public transport fare
+  // Inside every threshold before travel, shortlisted while the public
+  // transport fare is blank; the verdict after travel waits for the fare.
+  fareNeeded?: boolean;
+  beforeTravel?: { unitProfit: number | null; returnOnCost: number | null; ok: boolean } | null;
 };
 export type AccessNeed = { id: string; label: string; detail: string };
 export type Checked = { price: string | null; stock: string | null };
@@ -102,6 +121,7 @@ type ModeSummary = {
   contribution: number | null;
   hourly: number | null;
   fareMissing: boolean;
+  beforeTravel?: { cashRequired: number; contribution: number; hourly: number | null } | null;
   reason: string;
   fits: boolean;
 };
@@ -142,6 +162,8 @@ type Trip = {
   journey: { mode: string; miles: number; cost: number | null; minutes: number };
   fareMissing: boolean;
   economics: Economics;
+  beforeTravel?: BeforeTravel | null; // set while the public transport fare is blank
+  travelNote?: string | null;
   downside: { nothingSells: number | null; halfSellsUnits: number; halfSells: number | null };
   thresholds: Thresholds;
   hardFilters: string[];
@@ -158,6 +180,7 @@ type Trip = {
     current: ModeSummary;
     alternative: ModeSummary;
     difference: Record<string, number | null>;
+    differenceBeforeTravel?: Record<string, number | null>;
     timeSaved: number | null;
     assumptions: string[];
   };
@@ -175,7 +198,6 @@ type Rejected = {
   unitProfit: number | null;
   returnOnCost: number | null;
   reasons: string[];
-  fareNeeded?: boolean; // waits for a public transport fare
   tier: string;
   accessNeeds: AccessNeed[];
 };
@@ -187,6 +209,7 @@ type DriveOption = {
   loadKg: number;
   contribution: number | null;
   hourly: number | null;
+  beforeTravel?: { cashRequired: number; contribution: number; hourly: number | null } | null;
   reason: string;
 };
 type Drive = {
@@ -197,7 +220,7 @@ type Drive = {
   alternativeFareMissing?: boolean;
   extra: DriveOption[];
   lost: DriveOption[];
-  fareNeeded?: DriveOption[]; // fit now; by public transport they wait for a fare
+  fareNeeded?: DriveOption[]; // fit now; by public transport only before the fare
 };
 export type RuleKey = ApiRuleKey;
 export type Rules = MemberRules;
@@ -211,6 +234,9 @@ type PlanResponse = {
   sample: true;
   trips: Trip[];
   rejected: Rejected[];
+  // "after travel", "before travel" (a blank public transport fare) or
+  // "known first" (trips with a known travel cost before the others).
+  ranking?: "after travel" | "before travel" | "known first";
   drive: Drive;
   timing: TripTiming | null;
   accessNeeds: { id: string; label: string }[];
@@ -222,20 +248,38 @@ export const pounds = (pence: number | null | undefined) =>
   pence === null || pence === undefined || !Number.isFinite(pence)
     ? "not known"
     : money(pence);
-/** What a figure that needs the journey cost reads while the fare is blank. */
-export const FARE_UNKNOWN = "not known until you enter your fare";
-const FARE_NEEDED_TEXT = "Enter your return fare to see whether this trip meets your thresholds.";
-/** A figure that depends on the journey: unknown while the fare is blank, never £0. */
-export const fareFigure = (pence: number | null | undefined, fareMissing: boolean) =>
-  fareMissing && (pence === null || pence === undefined) ? FARE_UNKNOWN : pounds(pence);
+/** What a blank public transport fare (the travel cost) reads: never £0. */
+export const FARE_NOT_KNOWN = "not known yet";
+/** The label every figure worked out before the fare carries. */
+export const BEFORE_FARE = "before your fare";
+/** The note a trip carries while its fare is blank (catalog.mjs FARE_NEEDED). */
+export const TRAVEL_NOTE =
+  "Travel cost still to be added: enter your return fare to check this trip against your thresholds after travel";
+/**
+ * A figure that depends on the journey. With the travel cost known it is
+ * the figure itself. While the public transport fare is blank (pending) it
+ * is the figure before the fare, labelled "before your fare" or, for cash
+ * that the fare adds to, "plus your fare"; with no such figure it reads
+ * "not known yet". A blank fare is never shown as £0.
+ */
+export function fareDependent(
+  known: number | null | undefined,
+  before: number | null | undefined,
+  pending: boolean,
+  { plus = false, unit = "", share = false }: { plus?: boolean; unit?: string; share?: boolean } = {},
+) {
+  const has = (v: number | null | undefined): v is number => typeof v === "number" && Number.isFinite(v);
+  if (!pending) return has(known) ? money(known) + unit : "not known";
+  if (!has(before)) return FARE_NOT_KNOWN;
+  if (plus) return money(before) + unit + (share ? " plus a share of your fare" : " plus your fare");
+  return money(before) + unit + " " + BEFORE_FARE;
+}
 const signed = (pence: number | null) =>
   pence === null ? "not comparable" : (pence > 0 ? "+" : "") + money(pence);
 const signedNumber = (n: number | null, unit: string) =>
   n === null ? "not comparable" : (n > 0 ? "+" : "") + n + unit;
-const perHour = (pence: number | null, fareMissing = false) =>
-  pence === null ? (fareMissing ? FARE_UNKNOWN : "no trip") : money(pence) + " an hour";
-const perHourShort = (pence: number | null, fareMissing = false) =>
-  pence === null ? (fareMissing ? FARE_UNKNOWN : "no trip") : money(pence) + "/h";
+const perHour = (pence: number | null) => (pence === null ? "no trip" : money(pence) + " an hour");
+const perHourShort = (pence: number | null) => (pence === null ? "no trip" : money(pence) + "/h");
 const minutesText = (m: number) => m + " min";
 /** "on foot", "by bicycle", "by public transport", "by car" or "by van". */
 export const byMode = (mode: string) => (mode === "Walk" ? "on foot" : "by " + mode.toLowerCase());
@@ -521,11 +565,25 @@ export default function Planner() {
   const [selected, setSelected] = useState("");
   // Display only: whether the profile editor is open.
   const [profileOpen, setProfileOpen] = useState(false);
-  const set = (patch: Partial<PlannerProfile>) => setProfile({ ...profile, ...patch });
+  // The profile is stored only once someone changes it here (round 5b), with
+  // a mark naming the trip fields they changed: opening the Planner never
+  // saves its starting values as if someone had entered them, and changing
+  // one field never marks the others (Research and the member form fill in
+  // only the marked trip fields).
+  const [edited, setEdited] = useState<boolean>(profileEdited);
+  const [tripEdited, setTripEdited] = useState<TripField[]>(editedTripFields);
+  const set = (patch: Partial<PlannerProfile>) => {
+    setEdited(true);
+    const changed = TRIP_FIELDS.filter((k) => Object.hasOwn(patch, k) && !tripEdited.includes(k));
+    if (changed.length) setTripEdited([...tripEdited, ...changed]);
+    setProfile({ ...profile, ...patch });
+  };
   const problem = profileProblem(profile);
   const noFare = fareNotEntered(profile);
 
-  useEffect(() => saveProfile(profile), [profile]);
+  useEffect(() => {
+    if (edited) saveProfile(profile, { edited: tripEdited });
+  }, [profile, edited, tripEdited]);
   useEffect(() => saveHidden(hidden), [hidden]);
   useEffect(() => {
     if (problem) {
@@ -653,7 +711,11 @@ export default function Planner() {
             Done
           </button>
         </div>
-        <p className="muted">Changes apply as you type, and the trips behind this panel update.</p>
+        <p className="muted">
+          Changes apply as you type, and the trips behind this panel update. The transport, cash,
+          carry limit and storage you change here are kept in this browser to fill in Research and
+          member forms.
+        </p>
         <label>
           Local area
           <input value={profile.area ?? ""} onChange={(e) => set({ area: e.target.value })} />
@@ -719,8 +781,8 @@ export default function Planner() {
               {profile.fare === 0
                 ? "A fare of £0 counts only when you tick that your travel is free. "
                 : "Enter your return fare, or tick the box if your travel is free. "}
-              A blank fare is never counted as free: until then profit per unit, contribution and
-              earnings per hour are not known for any trip, and nothing is shortlisted.
+              A blank fare is never counted as free. Trips are still shortlisted on their figures
+              before your fare, labelled so, and the cash needed is shown plus your fare.
             </p>
           )}
           <NumberField
@@ -804,12 +866,18 @@ export default function Planner() {
       </div>
       {result && !all.length && (
         <p className="planner-empty">
-          {result.rejected.some((r) => r.fareNeeded)
-            ? `Enter your return fare to see whether these trips meet your thresholds: ${result.rejected
-                .filter((r) => r.fareNeeded)
-                .map((r) => r.name)
-                .join(", ")}. Until then nothing is shortlisted. The list of offers not shortlisted says why for each one.`
+          {noFare
+            ? "No offer is inside your buying thresholds, even before your fare, so nothing is shortlisted. The list of offers not shortlisted says why."
             : "No offer is inside your buying thresholds, so nothing is shortlisted. The list of offers not shortlisted says why."}
+        </p>
+      )}
+      {result && all.some((t) => t.beforeTravel) && (
+        <p className="notice warn planner-ranking" role="status">
+          {result.ranking === "known first"
+            ? "Trips whose travel cost is known come first. The others wait for your public transport fare and follow, ranked by profit per unit before your fare."
+            : "Ranked by profit per unit before your fare, because your public transport fare is not known yet. Trips that fit your profile before the fare come first."}{" "}
+          Each one's travel cost is still to be added: enter your return fare to rank them after
+          travel and check them against your thresholds.
         </p>
       )}
       {cats.length > 1 && (
@@ -862,7 +930,7 @@ export default function Planner() {
       )}
       {trip && <TripView key={trip.sku} trip={trip} profile={profile} />}
       {result && result.rejected.length > 0 && (
-        <RejectedList rejected={result.rejected} rules={result.rules.effective} />
+        <RejectedList rejected={result.rejected} rules={result.rules.effective} noFare={noFare} />
       )}
       <div className="planner-more">
         {result && <DriveSummary drive={result.drive} />}
@@ -1039,31 +1107,36 @@ export function thresholdsSentence(rules: Record<RuleKey, number>) {
   return `${money(rules.minUnitPrice)} to ${money(rules.maxUnitPrice)} per unit, under ${rules.maxWeightKg} kg, at least ${money(rules.minUnitProfit)} profit per unit after every cost including its share of travel, and at least ${percent(rules.minReturn)} return on the purchase price`;
 }
 
-function RejectedList({ rejected, rules }: { rejected: Rejected[]; rules: Record<RuleKey, number> }) {
-  const waiting = rejected.filter((r) => r.fareNeeded).length;
+function RejectedList({
+  rejected,
+  rules,
+  noFare,
+}: {
+  rejected: Rejected[];
+  rules: Record<RuleKey, number>;
+  noFare: boolean;
+}) {
   return (
     <section className="planner-rejected">
       <div className="planner-head">
         <h2>Not shortlisted</h2>
         <span className="muted">
-          {waiting
-            ? `${plural(rejected.length, "offer")}, ${waiting} waiting for your fare`
-            : `${plural(rejected.length, "offer")} outside your buying thresholds`}
+          {`${plural(rejected.length, "offer")} outside your buying thresholds`}
         </span>
       </div>
       <p className="muted">
         An offer is shortlisted only when it is inside every buying threshold that applies to you:{" "}
         {thresholdsSentence(rules)}.
-        {waiting
-          ? " By public transport your fare is part of each unit's share of travel, so whether an offer meets these is not known until you enter your return fare (or tick that your travel is free)."
+        {noFare
+          ? " While your public transport fare is not known yet, an offer is shortlisted when it is inside them before your fare; those listed here fail even before it, or for another reason."
           : ""}
       </p>
       <ul className="planner-rejected-grid">
         {rejected.map((r) => (
           <li key={r.sku}>
-            <div className={"planner-band small" + (r.fareNeeded ? " none" : " rej")}>
+            <div className="planner-band small rej">
               <span>
-                <small>{r.fareNeeded ? "Waiting for your fare" : "Why not"}</small>
+                <small>Why not</small>
                 <span className="planner-reason">{r.reasons.join("; ")}.</span>
               </span>
             </div>
@@ -1084,7 +1157,7 @@ function RejectedList({ rejected, rules }: { rejected: Rejected[]; rules: Record
                 </span>
                 <span>
                   <span className="badge">Profit a unit</span>
-                  <b>{r.fareNeeded && r.unitProfit === null ? "needs fare" : pounds(r.unitProfit)}</b>
+                  <b>{pounds(r.unitProfit)}</b>
                 </span>
               </span>
               <span className="planner-badges">
@@ -1114,9 +1187,16 @@ function Figures({ rows }: { rows: [string, React.ReactNode][] }) {
 
 function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile }) {
   const e = t.economics;
-  // Figures that need the journey cost read "not known until you enter your
-  // fare" while a public transport fare is blank, never £0.
-  const fig = (pence: number | null | undefined) => fareFigure(pence, t.fareMissing);
+  // While a public transport fare is blank, every figure that needs the
+  // journey cost is shown before the fare and labelled so (the travel cost
+  // itself reads "not known yet"), never as the trip's figure or as £0.
+  const bt = t.beforeTravel ?? null;
+  const pending = bt !== null;
+  const fig = (
+    known: number | null | undefined,
+    before: number | null | undefined,
+    options?: Parameters<typeof fareDependent>[3],
+  ) => fareDependent(known, before, pending, options);
   const [ledger, setLedger] = useState({ busy: false, notice: "" });
   const failing = t.alert.checks.filter((c) => !c.ok).length;
   // Display only: short forms for the headline figures; the fare notice below explains a gap.
@@ -1232,11 +1312,13 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile })
           item, your other limits would allow {plural(t.afterTrial, "unit")}.
         </p>
       )}
-      {t.fareMissing && (
-        <p className="notice warn">
-          No public transport fare is entered, so the cash required, contribution, profit per unit
-          and earnings per hour are {FARE_UNKNOWN}. {FARE_NEEDED_TEXT} Enter it in the profile (or
-          tick that your travel is free).
+      {pending && (
+        <p className="notice warn planner-travel-note">
+          {t.travelNote ?? TRAVEL_NOTE}. No public transport fare is entered, so your fare is{" "}
+          {FARE_NOT_KNOWN}. The figures below are before your fare: profit per unit, contribution and
+          earnings per hour can only fall once it is added, and the cash needed and the loss if
+          nothing sells can only rise. Enter your fare in the profile (or tick that your travel is
+          free).
         </p>
       )}
       {t.reason === "Outside your area" && (
@@ -1257,16 +1339,19 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile })
           <h3>Money</h3>
           <Figures
             rows={[
-              ["Cash required before payout", <strong key="c">{fig(e.cashRequired)}</strong>],
+              [
+                "Cash required before payout",
+                <strong key="c">{fig(e.cashRequired, bt?.cashRequired, { plus: true })}</strong>,
+              ],
               ["Stock", money(e.costs.stock)],
               ["Packaging", money(e.costs.packaging)],
               ["Parcel costs (illustrative)", money(e.costs.postage)],
               ["Marketplace fees", money(e.costs.fees)],
               [`Returns allowance (${percent(t.returnsRate)})`, money(e.costs.returns)],
-              ["Travel (one journey)", fig(e.costs.travel)],
-              ["Travel per unit", fig(e.journeyPerUnit)],
+              ["Travel (one journey)", fig(e.costs.travel, null)],
+              ["Travel per unit", fig(e.journeyPerUnit, null)],
               ["Proceeds if every unit sells (estimate)", money(e.proceeds)],
-              ["Contribution", <strong key="p">{fig(e.contribution)}</strong>],
+              ["Contribution", <strong key="p">{fig(e.contribution, bt?.contribution)}</strong>],
             ]}
           />
         </div>
@@ -1275,17 +1360,17 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile })
           <Figures
             rows={[
               ["Active hours", hours(e.activeMinutes)],
-              ["Earnings per hour", perHour(e.hourly, t.fareMissing)],
+              [
+                "Earnings per hour",
+                pending ? fig(null, bt?.hourly, { unit: " an hour" }) : perHour(e.hourly),
+              ],
               [
                 "Time until payment",
                 t.units ? paymentText(t.timing?.payoutDays, t.timing?.payout.date) : "no trip",
               ],
-              ["Loss if nothing sells", fig(t.downside.nothingSells)],
-              [
-                `If only ${t.downside.halfSellsUnits} of ${t.units} sell`,
-                fig(t.downside.halfSells),
-              ],
-              ["Break-even sale price per unit", fig(e.breakEvenSale)],
+              ["Loss if nothing sells", fig(t.downside.nothingSells, bt?.unsoldLoss)],
+              [`If only ${t.downside.halfSellsUnits} of ${t.units} sell`, fig(t.downside.halfSells, bt?.halfSells)],
+              ["Break-even sale price per unit", fig(e.breakEvenSale, bt?.breakEvenSale)],
               ["Sale price used per unit", pounds(t.salePrice)],
               ["Shelf price per unit", money(t.buy)],
             ]}
@@ -1303,19 +1388,40 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile })
       </p>
 
       <h3>Buying thresholds</h3>
-      <p>
-        Profit per unit after fees, postage, packaging, returns and the unit's share of travel:{" "}
-        {fig(t.thresholds.unitProfit)}. Return on the purchase price:{" "}
-        {t.thresholds.returnOnCost === null
-          ? t.fareMissing
-            ? FARE_UNKNOWN
-            : "not known"
-          : percent(t.thresholds.returnOnCost)}
-        .
-      </p>
+      {t.thresholds.fareNeeded ? (
+        <p>
+          Profit per unit after fees, postage, packaging and returns:{" "}
+          {pounds(t.thresholds.beforeTravel?.unitProfit)} profit per unit {BEFORE_FARE}. Return on the
+          purchase price:{" "}
+          {typeof t.thresholds.beforeTravel?.returnOnCost === "number"
+            ? percent(t.thresholds.beforeTravel.returnOnCost) + " " + BEFORE_FARE
+            : "not known"}
+          . Each unit's share of your fare is still to be taken off.
+        </p>
+      ) : (
+        <p>
+          Profit per unit after fees, postage, packaging, returns and the unit's share of travel:{" "}
+          {fig(t.thresholds.unitProfit, null)}. Return on the purchase price:{" "}
+          {t.thresholds.returnOnCost === null
+            ? pending
+              ? FARE_NOT_KNOWN
+              : "not known"
+            : percent(t.thresholds.returnOnCost)}
+          .
+        </p>
+      )}
       <ul className="checks">
         {t.thresholds.ok ? (
           <li className="pass">Inside your buying thresholds</li>
+        ) : t.thresholds.fareNeeded ? (
+          <>
+            <li className="pass">Inside your buying thresholds {BEFORE_FARE}</li>
+            {t.thresholds.failures.map((f) => (
+              <li key={f} className={f === TRAVEL_NOTE ? "planner-pending" : undefined}>
+                {f}
+              </li>
+            ))}
+          </>
         ) : (
           t.thresholds.failures.map((f) => <li key={f}>{f}</li>)
         )}
@@ -1403,25 +1509,42 @@ function DriveComparison({ compare: c }: { compare: Trip["compare"] }) {
   const a = c.current;
   const b = c.alternative;
   const d = c.difference;
-  // A side with a blank public transport fare has no journey cost, so the
-  // figures built on it are not known (and neither is the difference).
-  const fig = (s: ModeSummary, pence: number | null) => fareFigure(pence, s.fareMissing);
+  const dbt = c.differenceBeforeTravel ?? {};
+  // A side with a blank public transport fare shows its figures before the
+  // fare, labelled so, and its travel cost reads "not known yet". The
+  // difference is then also before the fare, never one after travel.
+  const fig = (s: ModeSummary, k: "travelCost" | "cashRequired" | "contribution" | "hourly", unit = "") =>
+    s.beforeTravel
+      ? k === "travelCost"
+        ? FARE_NOT_KNOWN
+        : fareDependent(null, s.beforeTravel[k], true, { plus: k === "cashRequired", unit })
+      : k === "hourly"
+        ? perHourShort(s.hourly)
+        : pounds(s[k]);
+  const pending = Boolean(a.beforeTravel || b.beforeTravel);
+  const diff = (k: "travelCost" | "cashRequired" | "contribution" | "hourly", unit = "") => {
+    const known = d[k];
+    if (known !== null && known !== undefined) return signed(known);
+    if (!pending) return "not comparable";
+    if (k === "travelCost") return FARE_NOT_KNOWN;
+    const v = dbt[k];
+    return v === null || v === undefined ? "not comparable" : signed(v) + unit + " " + BEFORE_FARE;
+  };
+  // Before the fare, the difference leaves out the public transport fare, so
+  // it moves towards the car by the amount of that fare once it is entered.
+  const transitSide = a.beforeTravel ? a.mode : b.beforeTravel ? b.mode : null;
+  const otherSide = a.beforeTravel ? b.mode : a.mode;
   const rows: [string, string, string, string][] = [
     ["Load limit", a.carry + " kg", b.carry + " kg", ""],
     ["Units", String(a.units), String(b.units), signedNumber(d.units, "")],
     ["Total load", a.loadKg + " kg", b.loadKg + " kg", signedNumber(d.loadKg, " kg")],
     ["Mileage (return)", a.miles + " mi", b.miles + " mi", signedNumber(d.miles, " mi")],
-    ["Travel cost", fig(a, a.travelCost), fig(b, b.travelCost), signed(d.travelCost)],
+    ["Travel cost", fig(a, "travelCost"), fig(b, "travelCost"), diff("travelCost")],
     ["Parking or tolls (in travel cost)", money(a.parking), money(b.parking), signed(d.parking)],
     ["Travel time", minutesText(a.travelMinutes), minutesText(b.travelMinutes), signedNumber(d.travelMinutes, " min")],
-    ["Cash required before payout", fig(a, a.cashRequired), fig(b, b.cashRequired), signed(d.cashRequired)],
-    ["Contribution", fig(a, a.contribution), fig(b, b.contribution), signed(d.contribution)],
-    [
-      "Earnings per hour",
-      perHourShort(a.hourly, a.fareMissing && a.units > 0),
-      perHourShort(b.hourly, b.fareMissing && b.units > 0),
-      signed(d.hourly),
-    ],
+    ["Cash required before payout", fig(a, "cashRequired"), fig(b, "cashRequired"), diff("cashRequired")],
+    ["Contribution", fig(a, "contribution"), fig(b, "contribution"), diff("contribution")],
+    ["Earnings per hour", fig(a, "hourly", "/h"), fig(b, "hourly", "/h"), diff("hourly", "/h")],
   ];
   return (
     <>
@@ -1437,6 +1560,12 @@ function DriveComparison({ compare: c }: { compare: Trip["compare"] }) {
               ? `${b.mode} takes ${-c.timeSaved} minutes longer.`
               : "Travel time is the same.")}
       </p>
+      {transitSide && (
+        <p className="muted">
+          Differences marked &ldquo;before your fare&rdquo; leave out the {transitSide.toLowerCase()} fare, which is not known yet.
+          Once you enter it, each money difference moves in favour of the {otherSide.toLowerCase()} by the amount of the fare.
+        </p>
+      )}
       <div className="scroll">
         <table className="planner-compare">
           <thead>
@@ -1482,7 +1611,9 @@ function DriveComparison({ compare: c }: { compare: Trip["compare"] }) {
 
 function DriveSummary({ drive }: { drive: Drive }) {
   const line = (o: DriveOption) =>
-    `${o.name} at ${o.shop}: ${plural(o.units, "unit")}, ${o.loadKg} kg, ${pounds(o.contribution)}, ${perHour(o.hourly)}`;
+    o.beforeTravel
+      ? `${o.name} at ${o.shop}: ${plural(o.units, "unit")}, ${o.loadKg} kg, ${fareDependent(null, o.beforeTravel.contribution, true)}, ${fareDependent(null, o.beforeTravel.hourly, true, { unit: " an hour" })}`
+      : `${o.name} at ${o.shop}: ${plural(o.units, "unit")}, ${o.loadKg} kg, ${pounds(o.contribution)}, ${perHour(o.hourly)}`;
   const waiting = drive.fareNeeded ?? [];
   return (
     <article className="planner-card">
@@ -1494,7 +1625,7 @@ function DriveSummary({ drive }: { drive: Drive }) {
         <>
           <p>
             {drive.currentFareMissing
-              ? `These fit your profile ${byMode(drive.alternative)}. ${byMode(drive.current).replace(/^b/, "B")} they cannot be checked until you enter your return fare:`
+              ? `These fit your profile ${byMode(drive.alternative)}. ${byMode(drive.current).replace(/^b/, "B")} they fit only before your fare, which is ${FARE_NOT_KNOWN}:`
               : `These fit your profile ${byMode(drive.alternative)} but not ${byMode(drive.current)}:`}
           </p>
           <ul>
@@ -1505,9 +1636,9 @@ function DriveSummary({ drive }: { drive: Drive }) {
         </>
       ) : drive.alternativeFareMissing ? (
         <p>
-          No public transport fare is entered, so whether any trip works by public transport is not
-          known until you enter your return fare (or tick that your travel is free). A blank fare is
-          never counted as free.
+          No public transport fare is entered, so your fare is {FARE_NOT_KNOWN} and every trip by
+          public transport is shown before your fare. Enter your return fare (or tick that your travel
+          is free) to see which work after travel. A blank fare is never counted as free.
         </p>
       ) : (
         <p>
@@ -1517,8 +1648,8 @@ function DriveSummary({ drive }: { drive: Drive }) {
       )}
       {waiting.length > 0 && (
         <p>
-          These fit now; {byMode(drive.alternative)} they cannot be checked until you enter your
-          return fare: {waiting.map((o) => `${o.name} at ${o.shop}`).join(" and ")}.
+          These fit now; {byMode(drive.alternative)} they fit only before your fare, which is{" "}
+          {FARE_NOT_KNOWN}: {waiting.map((o) => `${o.name} at ${o.shop}`).join(" and ")}.
         </p>
       )}
       {drive.lost.length > 0 && (

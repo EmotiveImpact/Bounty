@@ -90,6 +90,12 @@ h3 .badge {
 .notice.warn {
   color: var(--fail);
 }
+/* A check still to be done rather than one that failed: the travel cost
+   while the public transport fare is not known yet. */
+.checks li.planner-pending::before {
+  content: "○ ";
+  color: #6b3f00;
+}
 /* Access needs. */
 .badge.planner-access {
   background: var(--paid-soft);

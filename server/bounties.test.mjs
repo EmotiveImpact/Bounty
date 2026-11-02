@@ -135,10 +135,14 @@ function fakeEstimate(over = {}) {
 // their own figures at the units they claim (the route re-runs the
 // estimate; these unit tests pass the result in).
 const JOURNEY = { cost: 300, minutes: 30 };
-const TRIP = { journeyCost: JOURNEY.cost, journeyMinutes: JOURNEY.minutes };
+// Round 5: a member's trip profile (a car, so the units fit) and the cash
+// they can spend on a trip; a claim without them is refused.
+const CASH = 100000;
+const FIT = { transport: "Car", carryKg: 25, storageUnits: 50 };
+const TRIP = { journeyCost: JOURNEY.cost, journeyMinutes: JOURNEY.minutes, cashAvailable: CASH };
 const ownCheck = (units, journey = JOURNEY) =>
   fakeEstimate({ units, journeyCost: journey.cost, journeyMinutes: journey.minutes });
-const claim = (db, args) => rawClaim(db, { journey: JOURNEY, check: ownCheck(args.units), ...args });
+const claim = (db, args) => rawClaim(db, { journey: JOURNEY, check: ownCheck(args.units), cashAvailable: CASH, ...args });
 const ineligible = (reason = "Branch stock not confirmed") =>
   fakeEstimate({ alert: { eligible: false, reasons: [reason], checks: [] } });
 
@@ -160,7 +164,7 @@ const sampleBounty = (db, over = {}) =>
   createBounty(db, bountyInput({ sample: true, competingListings: 2, competingSellers: 2, ...over }), { now: T0 });
 
 const member = (db, name, over = {}) =>
-  createMember(db, { name, alertsOptIn: true, alertLocalities: ["Camden"], ...over }, { now: T0 });
+  createMember(db, { name, alertsOptIn: true, alertLocalities: ["Camden"], ...FIT, ...over }, { now: T0 });
 const diamond = (db, name, over = {}) => member(db, name, { paidTier: "diamond", paidUntil: "2026-12-31", ...over });
 const grant = (db, memberId, points) =>
   db
@@ -1008,12 +1012,15 @@ test("one member's units of an unproven item stay within one trial batch", () =>
     dispatchAlerts(db, next.id, at(31)).notAlerted.find((x) => x.name === "M").reason,
     /Already holds or bought a trial batch/,
   );
-  // Partial: 2 bought leaves 1.
+  // Partial: 2 bought leaves 1. N's own figures use the same 90 sales as
+  // the bounty: M's 3 units from the earlier bounty still count against the
+  // demand for the item (round 5), and with 26 sales they would take it all.
   const n = diamond(db, "N");
-  const part = claim(db, { bountyId: next.id, memberId: n.id, units: 2, now: at(32) });
+  const roomyCheck = (units) => fakeEstimate({ sample: { count: 90 }, units, journeyCost: JOURNEY.cost, journeyMinutes: JOURNEY.minutes });
+  const part = claim(db, { bountyId: next.id, memberId: n.id, units: 2, now: at(32), check: roomyCheck(2) });
   completeClaim(db, { claimId: part.id, memberId: n.id, now: at(33) });
-  assert.match(status(() => claim(db, { bountyId: next.id, memberId: n.id, units: 2, now: at(34) })).message, /at most 1 more unit/);
-  assert.equal(claim(db, { bountyId: next.id, memberId: n.id, units: 1, now: at(34) }).units, 1);
+  assert.match(status(() => claim(db, { bountyId: next.id, memberId: n.id, units: 2, now: at(34), check: roomyCheck(2) })).message, /at most 1 more unit/);
+  assert.equal(claim(db, { bountyId: next.id, memberId: n.id, units: 1, now: at(34), check: roomyCheck(1) }).units, 1);
 });
 
 test("before the locality's 30-item validation is complete, cards and alerts say so", () => {
@@ -1156,17 +1163,17 @@ const request = { offer: { provider: "awin", sourceId: "A1" }, units: 2, now: "2
 test("routes: members show paid and earned status separately and validate input", async () => {
   const { api } = await setup();
   try {
-    const created = await api.call("POST", "/api/members", { name: "Ada", alertsOptIn: true, alertLocalities: ["Camden", "camden"] });
+    const created = await api.call("POST", "/api/members", { ...FIT, name: "Ada", alertsOptIn: true, alertLocalities: ["Camden", "camden"] });
     assert.equal(created.status, 201);
     assert.deepEqual(created.body.member.alertLocalities, ["Camden"]);
     assert.equal(created.body.member.paid.tier, null);
     assert.equal(created.body.member.earned.points, 0);
     assert.match(created.body.notice, /not authenticated/);
     const id = created.body.member.id;
-    assert.equal((await api.call("POST", "/api/members", { name: "" })).status, 400);
-    assert.equal((await api.call("POST", "/api/members", { name: "Bo", paidTier: "gold" })).status, 400);
-    assert.equal((await api.call("POST", "/api/members", { name: "Bo", paidTier: "new" })).status, 400);
-    assert.equal((await api.call("POST", "/api/members", { name: "Bo", paidUntil: "2026-12-01" })).status, 400);
+    assert.equal((await api.call("POST", "/api/members", { ...FIT, name: "" })).status, 400);
+    assert.equal((await api.call("POST", "/api/members", { ...FIT, name: "Bo", paidTier: "gold" })).status, 400);
+    assert.equal((await api.call("POST", "/api/members", { ...FIT, name: "Bo", paidTier: "new" })).status, 400);
+    assert.equal((await api.call("POST", "/api/members", { ...FIT, name: "Bo", paidUntil: "2026-12-01" })).status, 400);
     assert.equal((await api.call("PATCH", `/api/members/${id}`, { alertsOptIn: "yes" })).status, 400);
     const patched = await api.call("PATCH", `/api/members/${id}`, { paidTier: "ruby", paidUntil: "2026-12-01" });
     assert.equal(patched.status, 200);
@@ -1237,7 +1244,7 @@ test("routes: claims re-check the evidence and race for the last unit", async ()
     assert.equal(b.cap, 1);
     const ids = [];
     for (const name of ["Ada", "Cy"])
-      ids.push((await api.call("POST", "/api/members", { name, paidTier: "diamond", paidUntil: "2026-12-31" })).body.member.id);
+      ids.push((await api.call("POST", "/api/members", { ...FIT, name, paidTier: "diamond", paidUntil: "2026-12-31" })).body.member.id);
     const results = await Promise.all(ids.map((memberId) => api.call("POST", `/api/bounties/${b.id}/claims`, { memberId, units: 1, ...TRIP })));
     assert.deepEqual(results.map((r) => r.status).sort(), [201, 409]);
     const won = results.find((r) => r.status === 201);
@@ -1267,8 +1274,8 @@ test("routes: alerts dispatch after a server re-check and land in each member's 
   const { api, state, calls } = await setup();
   try {
     const b = (await api.call("POST", "/api/bounties", { ...bountyInput(), estimate: request })).body.bounty;
-    const paid = (await api.call("POST", "/api/members", { name: "Paid", alertsOptIn: true, alertLocalities: ["Camden"], paidTier: "diamond", paidUntil: "2026-12-31" })).body.member;
-    const fresh = (await api.call("POST", "/api/members", { name: "Fresh", alertsOptIn: true, alertLocalities: ["Camden"] })).body.member;
+    const paid = (await api.call("POST", "/api/members", { ...FIT, name: "Paid", alertsOptIn: true, alertLocalities: ["Camden"], paidTier: "diamond", paidUntil: "2026-12-31" })).body.member;
+    const fresh = (await api.call("POST", "/api/members", { ...FIT, name: "Fresh", alertsOptIn: true, alertLocalities: ["Camden"] })).body.member;
     const before = calls.length;
     const first = await api.call("POST", `/api/bounties/${b.id}/alerts`, {});
     assert.equal(first.status, 200);
@@ -1285,7 +1292,7 @@ test("routes: alerts dispatch after a server re-check and land in each member's 
     assert.equal(freshInbox.body.alerts[0].label, "Earned release");
     // A failing re-check stops alerts (fail closed).
     state.estimate = new Error("Offer not found");
-    await api.call("POST", "/api/members", { name: "Late", alertsOptIn: true, alertLocalities: ["Camden"], paidTier: "diamond", paidUntil: "2026-12-31" });
+    await api.call("POST", "/api/members", { ...FIT, name: "Late", alertsOptIn: true, alertLocalities: ["Camden"], paidTier: "diamond", paidUntil: "2026-12-31" });
     const stopped = await api.call("POST", `/api/bounties/${b.id}/alerts`, {});
     assert.equal(stopped.body.sent.length, 0);
     assert.match(stopped.body.blockers.join(" "), /could not be re-checked: Offer not found/);
@@ -1298,8 +1305,8 @@ test("routes: stock reports with a private shelf photo, and operator verificatio
   const { api, db, checks, photoDir } = await setup();
   try {
     const b = (await api.call("POST", "/api/bounties", { ...bountyInput(), estimate: request })).body.bounty;
-    const author = (await api.call("POST", "/api/members", { name: "Author" })).body.member;
-    const other = (await api.call("POST", "/api/members", { name: "Other" })).body.member;
+    const author = (await api.call("POST", "/api/members", { ...FIT, name: "Author" })).body.member;
+    const other = (await api.call("POST", "/api/members", { ...FIT, name: "Other" })).body.member;
     const data = jpeg.toString("base64");
     const wrongType = await api.call("POST", `/api/bounties/${b.id}/reports`, {
       memberId: author.id,
@@ -1393,7 +1400,7 @@ test("routes: honest creation messages, asking-price lookups, re-checks and memb
     const b = rechecked.body.bounty;
 
     // Member thresholds: tighten only.
-    const loose = await api.call("POST", "/api/members", { name: "Lo", rules: { minUnitProfit: 100 } });
+    const loose = await api.call("POST", "/api/members", { ...FIT, name: "Lo", rules: { minUnitProfit: 100 } });
     assert.equal(loose.status, 400);
     const strict = await api.call("POST", "/api/members", {
       name: "Hi", paidTier: "diamond", paidUntil: "2026-12-31", rules: { minUnitProfit: 800 },
@@ -1406,14 +1413,14 @@ test("routes: honest creation messages, asking-price lookups, re-checks and memb
     assert.equal(eased.status, 200);
 
     // Claim messages use people's times; the promotion flag must be true or false.
-    const ann = (await api.call("POST", "/api/members", { name: "Ann", paidTier: "diamond", paidUntil: "2026-12-31", alertsOptIn: true, alertLocalities: ["Camden"] })).body.member;
+    const ann = (await api.call("POST", "/api/members", { ...FIT, name: "Ann", paidTier: "diamond", paidUntil: "2026-12-31", alertsOptIn: true, alertLocalities: ["Camden"] })).body.member;
     assert.equal((await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: ann.id, units: 1, qualifiesForPromotion: "yes", ...TRIP })).status, 400);
     const made = await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: ann.id, units: 1, ...TRIP });
     assert.equal(made.status, 201);
     assert.match(made.body.message, /^Claim recorded for 1 unit until 2 Nov 2026, 12:00\./);
 
     // An empty-shelf report lands in Ann's inbox as a stop notice.
-    const zed = (await api.call("POST", "/api/members", { name: "Zed" })).body.member;
+    const zed = (await api.call("POST", "/api/members", { ...FIT, name: "Zed" })).body.member;
     const neg = await api.call("POST", `/api/bounties/${b.id}/reports`, { memberId: zed.id, unitsSeen: 0 });
     assert.match(neg.body.message, /told not to make the trip/);
     const inbox = await api.call("GET", `/api/members/${ann.id}/alerts`);
@@ -1629,17 +1636,17 @@ test("a claim takes the member's own journey and is checked at the units claimed
   // Both journey figures are required; a blank is never zero.
   for (const journey of [undefined, { cost: 300 }, { minutes: 30 }, { cost: "", minutes: 30 }, { cost: null, minutes: 0 }])
     assert.match(
-      status(() => rawClaim(db, { bountyId: b.id, memberId: ann.id, units: 1, journey, check: ownCheck(1), now: T0 })).message,
+      status(() => rawClaim(db, { cashAvailable: CASH, bountyId: b.id, memberId: ann.id, units: 1, journey, check: ownCheck(1), now: T0 })).message,
       /A blank is never counted as zero/,
     );
   assert.equal(status(() => journeyInput({ journeyCost: -1, journeyMinutes: 10 })).status, 400);
   assert.deepEqual(journeyInput({ journeyCost: 0, journeyMinutes: 0 }), { cost: 0, minutes: 0 });
   // Figures for other units, or another journey, are refused.
-  const wrongUnits = status(() => rawClaim(db, { bountyId: b.id, memberId: ann.id, units: 1, journey: JOURNEY, check: ownCheck(2), now: T0 }));
+  const wrongUnits = status(() => rawClaim(db, { cashAvailable: CASH, bountyId: b.id, memberId: ann.id, units: 1, journey: JOURNEY, check: ownCheck(2), now: T0 }));
   assert.equal(wrongUnits.status, 409);
   assert.match(wrongUnits.message, /worked out for 2 units, not your 1/);
   const wrongTrip = status(() =>
-    rawClaim(db, { bountyId: b.id, memberId: ann.id, units: 1, journey: JOURNEY, check: ownCheck(1, { cost: 900, minutes: 30 }), now: T0 }),
+    rawClaim(db, { cashAvailable: CASH, bountyId: b.id, memberId: ann.id, units: 1, journey: JOURNEY, check: ownCheck(1, { cost: 900, minutes: 30 }), now: T0 }),
   );
   assert.match(wrongTrip.message, /do not use your journey cost/);
   // Failing on the member's own figures: 409 with the reasons.
@@ -1649,7 +1656,7 @@ test("a claim takes the member's own journey and is checked at the units claimed
     alert: { eligible: false, reasons: ["Below the hourly floor or working time unknown"], checks: [] },
     opportunity: { meetsThresholds: false, reasons: ["Profit per unit below £5"] },
   });
-  const refused = status(() => rawClaim(db, { bountyId: b.id, memberId: ann.id, units: 1, journey: JOURNEY, check: failing, now: T0 }));
+  const refused = status(() => rawClaim(db, { cashAvailable: CASH, bountyId: b.id, memberId: ann.id, units: 1, journey: JOURNEY, check: failing, now: T0 }));
   assert.equal(refused.status, 409);
   assert.equal(
     refused.message,
@@ -1657,7 +1664,7 @@ test("a claim takes the member's own journey and is checked at the units claimed
   );
   assert.equal(memberTripCheck({ error: "Offer not found" }, { units: 1, journey: JOURNEY }).ok, false);
   // Passing: the claim keeps the journey and the figures it was checked on.
-  const made = rawClaim(db, { bountyId: b.id, memberId: ann.id, units: 1, journey: JOURNEY, check: ownCheck(1), now: T0 });
+  const made = rawClaim(db, { cashAvailable: CASH, bountyId: b.id, memberId: ann.id, units: 1, journey: JOURNEY, check: ownCheck(1), now: T0 });
   assert.equal(made.journey_cost, 300);
   assert.equal(made.journey_minutes, 30);
   assert.equal(JSON.parse(made.figures).units, 1);
@@ -1736,7 +1743,7 @@ test("promotion answers: a first-order offer already used at a retailer is never
     state.estimate = fakeEstimate({ offer: { promotion: "New customers only: 20% off your first order", price: 1500, regularPrice: null } });
     const b = (await api.call("POST", "/api/bounties", { ...bountyInput(), estimate: request })).body.bounty;
     const make = async (name) =>
-      (await api.call("POST", "/api/members", { name, alertsOptIn: true, alertLocalities: ["Camden"], paidTier: "diamond", paidUntil: "2026-12-31" })).body.member;
+      (await api.call("POST", "/api/members", { ...FIT, name, alertsOptIn: true, alertLocalities: ["Camden"], paidTier: "diamond", paidUntil: "2026-12-31" })).body.member;
     const pat = await make("Pat");
     const sam = await make("Sam");
     const sent = (await api.call("POST", `/api/bounties/${b.id}/alerts`, {})).body;
@@ -1826,11 +1833,11 @@ test("routes: claims need the member's journey and re-run the figures at their u
     assert.equal(b.figures.units, 1);
     assert.equal(b.alert.eligible, true);
     assert.match(b.figures.label, /^Figures for 1 unit, the most one member can claim, using the operator's return journey/);
-    const ann = (await api.call("POST", "/api/members", { name: "Ann", paidTier: "diamond", paidUntil: "2026-12-31" })).body.member;
+    const ann = (await api.call("POST", "/api/members", { ...FIT, name: "Ann", paidTier: "diamond", paidUntil: "2026-12-31" })).body.member;
     const blank = await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: ann.id, units: 1, journeyCost: 300 });
     assert.equal(blank.status, 400);
     assert.match(blank.body.error, /A blank is never counted as zero/);
-    const costly = await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: ann.id, units: 1, journeyCost: 1200, journeyMinutes: 90 });
+    const costly = await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: ann.id, units: 1, journeyCost: 1200, journeyMinutes: 90, cashAvailable: CASH });
     assert.equal(costly.status, 409);
     assert.match(costly.body.error, /^At 1 unit with your journey \(£12.00, 90 minutes\) this trip fails: Below the hourly floor/);
     const own = seen.at(-1);
@@ -1838,7 +1845,7 @@ test("routes: claims need the member's journey and re-run the figures at their u
     assert.equal(own.costs.journeyCost, 1200);
     assert.equal(own.costs.journeyMinutes, 90);
     assert.equal(own.promotionEligible, false);
-    const made = await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: ann.id, units: 1, journeyCost: 0, journeyMinutes: 20 });
+    const made = await api.call("POST", `/api/bounties/${b.id}/claims`, { memberId: ann.id, units: 1, journeyCost: 0, journeyMinutes: 20, cashAvailable: CASH });
     assert.equal(made.status, 201);
     assert.equal(made.body.check.ok, true);
     assert.match(made.body.message, /At 1 unit with your journey \(£0.00, 20 minutes\): profit per unit £10.00/);
@@ -1851,8 +1858,8 @@ test("routes: a report of stock while an earlier empty shelf holds the bounty sa
   const { api, state } = await setup();
   try {
     const b = (await api.call("POST", "/api/bounties", { ...bountyInput(), estimate: request })).body.bounty;
-    const bob = (await api.call("POST", "/api/members", { name: "Bob" })).body.member;
-    const alice = (await api.call("POST", "/api/members", { name: "Alice" })).body.member;
+    const bob = (await api.call("POST", "/api/members", { ...FIT, name: "Bob" })).body.member;
+    const alice = (await api.call("POST", "/api/members", { ...FIT, name: "Alice" })).body.member;
     const empty = await api.call("POST", `/api/bounties/${b.id}/reports`, { memberId: bob.id, unitsSeen: 0 });
     // The operator verifies it; the re-check's branch check is that report.
     state.estimate = fakeEstimate({

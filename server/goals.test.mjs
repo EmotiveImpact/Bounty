@@ -434,18 +434,23 @@ test("a payout one day after the cash date is late and blocks the recommendation
   assert.notEqual(onTheDay.recommended, null);
 });
 
-test("public transport with no fare entered puts nothing in a basket", () => {
-  // A blank fare is a missing input, never a free journey: no basket is
-  // built, and each offer that would be searched waits for the fare.
+test("public transport with no fare entered builds baskets before travel and recommends none", () => {
+  // A blank fare is a missing input, never a free journey, but no longer a
+  // reason to leave an item out (round 5, Edem): baskets are built before
+  // travel, with every figure after travel null, and none is recommended
+  // until the fare is entered. The old rule built no basket at all.
   const missing = basketOptions([A, B], profile({ transport: "Public transport", fare: null, budget: 100000 }), goals(), { now: NOW });
   assert.equal(missing.constraints.fareMissing, true);
-  assert.deepEqual(missing.baskets, []);
-  assert.equal(missing.bestSingle, null);
+  assert.ok(missing.baskets.length > 0);
+  assert.ok(missing.bestSingle);
   assert.equal(missing.recommended, null);
-  assert.deepEqual(missing.excluded, [
-    { sku: "a", name: "Item A", shop: "Shop A", reason: FARE_NEEDED, fareNeeded: true },
-    { sku: "b", name: "Item B", shop: "Shop B", reason: FARE_NEEDED, fareNeeded: true },
-  ]);
+  assert.deepEqual(missing.excluded, []);
+  for (const b of missing.baskets) {
+    assert.equal(b.economics.contribution, null, b.id);
+    assert.equal(b.economics.costs.travel, null, b.id);
+    assert.ok(b.beforeTravel.contribution > 0, b.id);
+    assert.ok(b.reasons.includes(FARE_NEEDED), b.id);
+  }
   // Ticking free (a fare of 0) or entering a fare searches again.
   const free = basketOptions([A, B], profile({ transport: "Public transport", fare: 0, budget: 100000 }), goals(), { now: NOW });
   assert.notEqual(free.recommended, null);
@@ -453,16 +458,13 @@ test("public transport with no fare entered puts nothing in a basket", () => {
   const fare = basketOptions([A, B], profile({ transport: "Public transport", fare: 300, budget: 100000 }), goals(), { now: NOW });
   assert.ok(fare.baskets.length > 0);
   assert.ok(fare.baskets.every((b) => b.economics.costs.travel === 300));
-  // The sample offers: the two inside the thresholds wait for the fare; the
+  // The sample offers: the two inside the thresholds before travel are in
+  // the baskets (the old rule left them out waiting for the fare); the
   // jumper fails even before its share of the journey and stays rejected.
   const sample = basketOptions(offers, { ...defaults, transport: "Public transport", fare: null }, goals(), { now: NOW });
-  assert.deepEqual(sample.baskets, []);
+  assert.equal(sample.baskets[0].id, "jacket:3,bottle:1");
   const why = Object.fromEntries(sample.excluded.map((e) => [e.sku, e]));
-  for (const sku of ["jacket", "bottle"]) {
-    assert.equal(why[sku].reason, FARE_NEEDED, sku);
-    assert.equal(why[sku].fareNeeded, true, sku);
-    assert.equal(why[sku].rejected, undefined, "not outside the thresholds: not yet checked");
-  }
+  assert.deepEqual(Object.keys(why).sort(), ["baby", "knit", "pot"]);
   assert.equal(why.knit.rejected, true);
   assert.equal(why.knit.reason, "Profit per unit of £2.42 is below £5.00 (even before its share of the journey)");
   // A blank cost and a blank fare are named together.
@@ -561,25 +563,25 @@ test("plan, goals and baskets routes validate their input", async () => {
     assert.equal(jacketTrip.timing.units, jacketTrip.units);
     assert.equal(jacketTrip.timing.daysToSellOneUnit, 7);
     // A fare left blank (null) is "not entered": a walker does not need it,
-    // and by public transport nothing is shortlisted until it is entered.
+    // and by public transport the offers inside the thresholds before travel
+    // are shortlisted with their figures after travel unknown (round 5: the
+    // old rule shortlisted nothing until the fare was entered).
     const walk = await api.call("POST", "/api/plan", { ...defaults, transport: "Walk", fare: null });
     assert.equal(walk.status, 200);
     assert.equal(walk.body.trips.length, 2);
     const blank = await api.call("POST", "/api/plan", { ...defaults, transport: "Public transport", fare: null });
     assert.equal(blank.status, 200);
-    assert.deepEqual(blank.body.trips, []);
-    const waiting = blank.body.rejected.filter((r) => r.fareNeeded).map((r) => r.sku).sort();
-    assert.deepEqual(waiting, ["bottle", "jacket"]);
-    for (const r of blank.body.rejected.filter((x) => x.fareNeeded)) {
-      assert.deepEqual(r.reasons, [FARE_NEEDED]);
-      assert.equal(r.unitProfit, null);
+    assert.deepEqual(blank.body.trips.map((t) => t.sku).sort(), ["bottle", "jacket"]);
+    for (const t of blank.body.trips) {
+      assert.deepEqual(t.thresholds.failures, [FARE_NEEDED]);
+      assert.equal(t.thresholds.unitProfit, null);
     }
+    assert.ok(!blank.body.rejected.some((r) => r.fareNeeded));
     const bus = await api.call("POST", "/api/baskets", { profile: { ...defaults, transport: "Public transport", fare: null } });
     assert.equal(bus.status, 200);
-    assert.deepEqual(bus.body.baskets, [], "no basket until the fare is entered");
-    assert.equal(bus.body.bestSingle, null);
-    assert.equal(bus.body.recommended, null);
-    assert.deepEqual(bus.body.excluded.filter((e) => e.fareNeeded).map((e) => e.sku).sort(), ["bottle", "jacket"]);
+    assert.ok(bus.body.baskets.length > 0, "baskets before travel");
+    assert.equal(bus.body.recommended, null, "none recommended until the fare is entered");
+    assert.ok(!bus.body.excluded.some((e) => e.fareNeeded));
     for (const bad of [
       { ...defaults, transport: "Rocket" },
       { ...defaults, quantity: 0 },
