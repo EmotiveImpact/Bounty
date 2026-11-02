@@ -7,7 +7,6 @@ import {
   type AuditDraft,
   type EvidenceRow,
 } from "./ResearchCalculator";
-import Audit from "./Audit";
 import "./Research.css";
 
 // Display only: the colour each evidence class is drawn in (style.css).
@@ -48,7 +47,18 @@ const KINDS = [
 ] as const;
 const PAGE = 50;
 
-export default function Research() {
+/** Research for members: the six-step check. The evidence register and the
+    audit sign-off are operator tools and live on the Admin page. */
+export default function Research({ onAuditDraft }: { onAuditDraft?: (d: AuditDraft) => void } = {}) {
+  return (
+    <section className="research">
+      <ResearchCalculator onAuditDraft={onAuditDraft} />
+    </section>
+  );
+}
+
+/** Imported records by evidence class (Admin). */
+export function EvidenceRegister() {
   const [kind, setKind] = useState<string>(KINDS[0].kind);
   const [filter, setFilter] = useState("");
   const [offset, setOffset] = useState(0);
@@ -58,7 +68,6 @@ export default function Research() {
   });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
-  const [draft, setDraft] = useState<AuditDraft | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -89,16 +98,6 @@ export default function Research() {
   const last = Math.min(offset + data.rows.length, data.total);
   return (
     <section className="research">
-      <ResearchCalculator
-        onAuditDraft={(d) => {
-          setDraft(d);
-          setTimeout(() => document.getElementById("audit")?.scrollIntoView({ behavior: "smooth" }), 0);
-        }}
-      />
-      <div id="audit">
-        <Audit draft={draft} />
-      </div>
-
       <article>
         <small>Research desk</small>
         <h2>Evidence register</h2>

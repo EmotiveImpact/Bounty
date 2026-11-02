@@ -456,3 +456,34 @@ input[type="file"].k-input { height: auto; padding: 10px 12px; font-size: 14px; 
   .k-overlay, .k-window, .k-window.wide, .k-menu, .k-toast { animation: none !important; }
   .k-btn, .k-track > div { transition: none; }
 }
+
+/* Stepper */
+.k-step { display: inline-flex; align-items: center; gap: 2px; padding: 3px; border-radius: 999px; background: var(--k-tile); }
+.k-step button { width: 34px; height: 34px; border: 0; border-radius: 50%; background: var(--k-surface); color: var(--k-ink); display: grid; place-items: center; cursor: pointer; box-shadow: 0 1px 2px rgba(20, 16, 40, 0.1); }
+.k-step button:hover { background: #fff; box-shadow: 0 0 0 1.5px var(--k-ink); }
+.k-step button:focus-visible { outline: 2.5px solid var(--k-ink); outline-offset: 1px; }
+.k-step svg { width: 14px; height: 14px; }
+.k-step output { min-width: 28px; text-align: center; font: 700 15px/1 var(--k-sans); font-variant-numeric: tabular-nums; color: var(--k-ink); }
+
+/* Labels, sections, more below */
+.k-label { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font: 700 12px/1.2 var(--k-sans); letter-spacing: 0.08em; text-transform: uppercase; color: var(--k-muted); }
+.k-label > *:last-child:not(:first-child) { font-weight: 500; letter-spacing: 0; text-transform: none; font-size: 12.5px; }
+.k-section { display: grid; gap: 14px; }
+.k-sechead { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px 20px; flex-wrap: wrap; }
+.k-sechead > div { min-width: 0; }
+.k-sechead h2 { margin: 0; font-size: 30px; line-height: 1.05; color: var(--k-ink); }
+.k-sechead p { margin: 4px 0 0; font: 400 14.5px/1.5 var(--k-sans); color: var(--k-muted); max-width: 62ch; }
+.k-more { display: grid; gap: 16px; margin-top: 12px; padding-top: 24px; border-top: 1px solid var(--k-line); }
+.k-more .k-sechead h2 { font-size: 28px; }
+.k-split { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+.k-col { display: grid; gap: 18px; align-content: start; min-width: 0; }
+@media (max-width: 1100px) { .k-split { grid-template-columns: 1fr; } }
+.k-headacts { display: flex; gap: 10px; flex-wrap: wrap; }
+@media (max-width: 640px) {
+  /* On a phone a row's control (stepper, Sold one) sits under its text,
+     so names and prices are not squeezed. */
+  .k-row:has(> .k-slot) { grid-template-columns: auto minmax(0, 1fr); row-gap: 10px; }
+  .k-row > .k-slot { grid-column: 2; justify-self: start; }
+  .k-row:has(> .k-slot) > .k-rv:empty, .k-row:has(> .k-slot) > span:empty { display: none; }
+  .k-row .k-rt b { white-space: normal; }
+}

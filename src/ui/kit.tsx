@@ -472,18 +472,21 @@ export function Empty({ title, text, action }: { title: string; text: React.Reac
 /** The one answer a screen gives: Buy, Think or Leave. */
 export function Answer({
   verdict,
+  word: wordText,
   headline,
   why,
   facts,
   children,
 }: {
   verdict: "buy" | "think" | "leave";
+  /** Replaces Buy, Think or Leave, like "Worth it" for a trip. */
+  word?: string;
   headline?: React.ReactNode;
   why: React.ReactNode;
   facts?: [string, React.ReactNode][];
   children?: React.ReactNode;
 }) {
-  const word = { buy: "Buy", think: "Think", leave: "Leave" }[verdict];
+  const word = wordText ?? { buy: "Buy", think: "Think", leave: "Leave" }[verdict];
   return (
     <section className={cx("k-answer", verdict)}>
       <div className="k-atop">
@@ -502,6 +505,99 @@ export function Answer({
         </div>
       )}
       {children}
+    </section>
+  );
+}
+
+/** Minus, the number, plus. For quantities on a trip. */
+export function Stepper({
+  value,
+  onChange,
+  label,
+  min = 0,
+}: {
+  value: number;
+  onChange: (n: number) => void;
+  label: string;
+  min?: number;
+}) {
+  return (
+    <span className="k-step" role="group" aria-label={label}>
+      <button type="button" aria-label={"One fewer " + label} onClick={() => onChange(Math.max(min, value - 1))}>
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg>
+      </button>
+      <output aria-live="polite">{value}</output>
+      <button type="button" aria-label={"One more " + label} onClick={() => onChange(value + 1)}>
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9M8 3.5v9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg>
+      </button>
+    </span>
+  );
+}
+
+/** A section heading inside a card or window, small and uppercase. */
+export function Label({ children, aside }: { children: React.ReactNode; aside?: React.ReactNode }) {
+  return (
+    <div className="k-label">
+      <span>{children}</span>
+      {aside}
+    </div>
+  );
+}
+
+/** A section of the page with a title and an optional line under it. */
+export function Section({
+  title,
+  lead,
+  aside,
+  children,
+}: {
+  title: string;
+  lead?: React.ReactNode;
+  aside?: React.ReactNode;
+  children?: React.ReactNode;
+}) {
+  return (
+    <section className="k-section">
+      <div className="k-sechead">
+        <div>
+          <h2 className="k-display">{title}</h2>
+          {lead && <p>{lead}</p>}
+        </div>
+        {aside}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+/** Older, deeper tools kept one tap away under a heading. */
+export function MoreBelow({
+  title,
+  lead,
+  open,
+  onToggle,
+  showLabel,
+  children,
+}: {
+  title: string;
+  lead: React.ReactNode;
+  open: boolean;
+  onToggle: () => void;
+  showLabel: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="k-more">
+      <div className="k-sechead">
+        <div>
+          <h2 className="k-display">{title}</h2>
+          <p>{lead}</p>
+        </div>
+        <Button variant="line" onClick={onToggle} aria-expanded={open}>
+          {open ? "Hide" : showLabel}
+        </Button>
+      </div>
+      {open && children}
     </section>
   );
 }

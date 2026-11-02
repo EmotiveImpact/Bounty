@@ -22,6 +22,10 @@ import MoneyScreen from "./Money";
 import TripPage from "./TripPage";
 import StockScreen from "./StockScreen";
 import Blocks from "../ui/Blocks";
+import Scan from "../Scan";
+import TipsScreen from "./TipsScreen";
+import Admin from "./Admin";
+import { PageHead } from "../ui/kit";
 import { GoalsSettings } from "../Goals";
 import SignOff from "./SignOff";
 import "./proto.css";
@@ -55,7 +59,8 @@ export type View =
   | "sources"
   | "profile"
   | "watching"
-  | "blocks";
+  | "blocks"
+  | "admin";
 
 // The address for each screen. The older screens keep their old names, so
 // links inside them such as #Planner still work.
@@ -72,6 +77,7 @@ const HASH: Record<View, string> = {
   profile: "Profile",
   watching: "Saved",
   blocks: "Blocks",
+  admin: "Admin",
 };
 /* When a find is saved the heart pops and a few short lines flick out
    around it, like Pinterest. Skipped for people who ask for reduced motion. */
@@ -571,13 +577,11 @@ export default function ProtoApp({
         {nav("planner", "Trip")}
         {nav("research", "Research")}
         {nav("watching", "Saved", "", "heart")}
-        {nav("sources", "Sources")}
       </span>
       <span className="more2">
         <span className="head">Tools</span>
         {nav("planner", "My trip")}
         {nav("research", "Research")}
-        {nav("sources", "Sources")}
         <span className="head">You</span>
         {nav("watching", "Saved", "", "heart")}
         {nav("profile", "Alerts", "", "bell")}
@@ -965,6 +969,9 @@ export default function ProtoApp({
                   </button>
                   <button type="button" onClick={() => go("watching")}>
                     Saved finds
+                  </button>
+                  <button type="button" onClick={() => go("admin")}>
+                    Admin (operators)
                   </button>
                   {account && !account.email && (
                     <button type="button" onClick={account.signIn}>
@@ -2164,30 +2171,35 @@ export default function ProtoApp({
   else if (view === "profile") body = vProfile();
   else if (view === "watching") body = vWatching();
   else if (view === "blocks") body = <Blocks />;
+  else if (view === "scan") body = <Scan />;
+  else if (view === "tips") body = <TipsScreen go={(v) => go(v)} />;
+  else if (view === "admin") body = <Admin />;
+  else if (view === "research")
+    body = (
+      <div className="rs">
+        <PageHead
+          title="Research"
+          tint="butter"
+          lead="Check one find properly before you buy: the exact item, what it really sold for, your costs and fees, and a straight answer."
+        />
+        <div className="legacy">{legacy(view)}</div>
+      </div>
+    );
   else if (view === "planner")
     body = (
-      <>
-        <TripPage
-          deals={all}
-          trip={trip}
-          setTrip={setTrip}
-          profile={profile}
-          going={going}
-          onStart={() => (setGoing(true), setTripOpen(true))}
-          onFinish={() => (setTripOpen(true), setSigning(true))}
-          openDeal={(s) => go("item", s)}
-          say={say}
-          go={(v) => go(v)}
-        />
-        <section className="tripmore">
-          <h2>Your travel, cash and fees</h2>
-          <p>
-            The full planner: how you travel, your fares and fuel, selling fees,
-            one-item plans and the several-items basket plan.
-          </p>
-          <div className="legacy">{legacy(view)}</div>
-        </section>
-      </>
+      <TripPage
+        deals={all}
+        trip={trip}
+        setTrip={setTrip}
+        profile={profile}
+        going={going}
+        onStart={() => (setGoing(true), setTripOpen(true))}
+        onFinish={() => (setTripOpen(true), setSigning(true))}
+        openDeal={(s) => go("item", s)}
+        say={say}
+        go={(v) => go(v)}
+        legacy={legacy(view)}
+      />
     );
   else if (view === "stock")
     body = <StockScreen legacy={legacy(view)} go={(v) => go(v)} />;
@@ -2319,7 +2331,6 @@ function MegaMenu({ go }: { go: (v: View) => void }) {
         <h4>Tools</h4>
         {it("planner", "My trip", "Plan it and check it is worth it")}
         {it("research", "Research", "Look up any product")}
-        {it("sources", "Sources", "Where prices come from")}
       </div>
       <div className="mmc">
         <h4>Account</h4>

@@ -4,8 +4,8 @@ import "./Bounties.css";
 import { ItemTile } from "./Planner";
 
 // Shapes returned by server/routes-bounties.mjs. Money is integer pence.
-type Tier = { id: string; name: string; offsetMinutes: number; earnPoints: number | null };
-type Terms = {
+export type Tier = { id: string; name: string; offsetMinutes: number; earnPoints: number | null };
+export type Terms = {
   buyAndResell: string;
   reputation: string;
   claim: string;
@@ -21,7 +21,7 @@ type Terms = {
   hidden: string;
   times: string;
 };
-type Member = {
+export type Member = {
   id: number;
   name: string;
   locality: string | null;
@@ -35,7 +35,7 @@ type Member = {
   rules: MemberRules;
   effectiveRules: Record<RuleKey, number>;
 };
-type MembersResponse = {
+export type MembersResponse = {
   members: Member[];
   tiers: Tier[];
   paidTierIds: string[];
@@ -223,7 +223,7 @@ type Economics = {
   unsoldLoss: number;
   breakEvenSale: number | null;
 };
-type Bounty = {
+export type Bounty = {
   id: number;
   title: string;
   barcode: string | null;
@@ -358,7 +358,7 @@ type Bounty = {
   } | null;
   terms: Terms;
 };
-type BountiesResponse = { bounties: Bounty[]; terms: Terms; rules: { maxClaimUnits: number; maxDays: number } };
+export type BountiesResponse = { bounties: Bounty[]; terms: Terms; rules: { maxClaimUnits: number; maxDays: number } };
 type Dispatch = {
   sent: { memberId: number; name: string; tier: Tier; label: string; reputation: number }[];
   asked?: { memberId: number; name: string; condition: string | null }[];
@@ -405,7 +405,7 @@ type MemberAlert = {
 type Draft = { estimate: unknown; title?: string; retailer?: string | null; locality?: string };
 
 const DRAFT_KEY = "bounty-draft";
-const ACTING_KEY = "bounty-acting-as";
+export const ACTING_KEY = "bounty-acting-as";
 const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
 
 const cash = (pence: number | null | undefined) =>
@@ -553,7 +553,7 @@ function textToRules(text: RuleText): MemberRules {
   return out;
 }
 
-function MemberForm({
+export function MemberForm({
   tiers,
   paidTierIds,
   member,
@@ -673,7 +673,7 @@ function MemberForm({
   );
 }
 
-function MemberSummary({ member }: { member: Member }) {
+export function MemberSummary({ member }: { member: Member }) {
   return (
     <div className="member-summary">
       <b>{member.name}</b>
@@ -723,7 +723,7 @@ function MemberSummary({ member }: { member: Member }) {
   );
 }
 
-function TierTable({ tiers, points }: { tiers: Tier[]; points: number }) {
+export function TierTable({ tiers, points }: { tiers: Tier[]; points: number }) {
   return (
     <details>
       <summary>Early access tiers</summary>
@@ -1090,7 +1090,7 @@ function CategoryLine({ category }: { category: Category | null | undefined }) {
   );
 }
 
-type EligibilityReply = { message: string; bounty?: Bounty; eligibility?: Eligibility };
+export type EligibilityReply = { message: string; bounty?: Bounty; eligibility?: Eligibility };
 
 /** Posts a member's answer to a promotion question ("undo" removes it). */
 async function sendAnswer(bountyId: number, memberId: number, answer: "qualifies" | "not" | "used" | "undo") {
@@ -1671,7 +1671,7 @@ function Places({ bounty }: { bounty: Bounty }) {
   );
 }
 
-function BountyCard({
+export function BountyCard({
   bounty,
   acting,
   onChanged,
@@ -2120,7 +2120,7 @@ function BountyCard({
   );
 }
 
-function AlertInbox({ memberId, refresh, onChanged }: { memberId: number; refresh: number; onChanged: () => void }) {
+export function AlertInbox({ memberId, refresh, onChanged }: { memberId: number; refresh: number; onChanged: () => void }) {
   const [alerts, setAlerts] = useState<MemberAlert[] | null>(null);
   const [stops, setStops] = useState<Notice[]>([]);
   const [notice, setNotice] = useState("");

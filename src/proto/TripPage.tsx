@@ -1,4 +1,4 @@
-// My trip as a full page, built from the agreed full-site mock: is this trip
+// My trip, built from the building blocks (src/ui/kit.tsx): is this trip
 // worth the journey, the route shop by shop, your cash, carry and space
 // limits, and "Fill it for me". It works on the same trip list as the
 // My trip drawer. Figures come from the deals (profit after fees and
@@ -6,6 +6,22 @@
 import React, { useEffect, useState } from "react";
 import { api, money, type Profile } from "../api";
 import type { Deal } from "../Deals";
+import {
+  Answer,
+  Button,
+  Card,
+  Empty,
+  Field,
+  Label,
+  Meter,
+  MoneyInput,
+  MoreBelow,
+  Notice,
+  PageHead,
+  Row,
+  Rows,
+  Stepper,
+} from "../ui/kit";
 import "./trip.css";
 
 type Timing = { daysToSell: number; deliveryDays: number; payoutDelayDays: number };
@@ -90,7 +106,13 @@ export function fillTrip(deals: Deal[], cash: number, p: Profile) {
 
 const hm = (m: number) => (m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`);
 const ukDate = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", timeZone: "Europe/London" });
-const pct = (a: number, b: number) => Math.max(0, Math.min(100, b > 0 ? (a / b) * 100 : 0));
+const shopInitials = (name: string) =>
+  name
+    .split(/[\s,]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((w) => w[0].toUpperCase())
+    .join("");
 
 export default function TripPage({
   deals,
@@ -103,6 +125,7 @@ export default function TripPage({
   openDeal,
   say,
   go,
+  legacy,
 }: {
   deals: Deal[];
   trip: Record<string, number>;
@@ -114,9 +137,12 @@ export default function TripPage({
   openDeal: (sku: string) => void;
   say: (t: string) => void;
   go: (v: "deals" | "profile") => void;
+  legacy?: React.ReactNode;
 }) {
   const [cash, setCash] = useState(String(p.budget));
+  const [cashErr, setCashErr] = useState("");
   const [timing, setTiming] = useState<Timing | null>(null);
+  const [more, setMore] = useState(false);
   useEffect(() => {
     api<Timing>("goals")
       .then(setTiming)
@@ -144,16 +170,17 @@ export default function TripPage({
         )
       : null;
 
-  const qty = (sku: string, by: number) => {
-    const n = { ...trip, [sku]: (trip[sku] ?? 0) + by };
-    if (n[sku] <= 0) delete n[sku];
-    setTrip(n);
+  const setQty = (sku: string, n: number) => {
+    const next = { ...trip, [sku]: n };
+    if (n <= 0) delete next[sku];
+    setTrip(next);
   };
   const fill = () => {
-    const pounds = Number(cash);
-    if (!Number.isFinite(pounds) || pounds <= 0) return say("Type how much cash you have, in pounds.");
+    const pounds = Number(cash.replace(/[£,\s]/g, ""));
+    if (!Number.isFinite(pounds) || pounds <= 0) return setCashErr("Type how much cash you have, like 60.");
+    setCashErr("");
     const pick = fillTrip(deals, Math.round(pounds * 100), p);
-    if (!Object.keys(pick).length) return say("Nothing fits that cash right now. Try a bit more.");
+    if (!Object.keys(pick).length) return setCashErr("Nothing fits that cash right now. Try a bit more.");
     setTrip(pick);
     say("Filled with the best finds for £" + pounds.toLocaleString("en-GB") + ".");
   };
@@ -181,223 +208,217 @@ export default function TripPage({
     if (d.unitProfit === null) warns.push(`${d.name}: profit not known yet, so it is not counted.`);
   }
   const sample = items.some((d) => d.sample);
-  if (items.length && f.travel === null)
-    warns.push(
-      p.transport === PUBLIC
-        ? "Add your bus or train fare in settings to count travel."
-        : "Say how you travel in settings to count travel and time.",
-    );
+  const noTravel = items.length > 0 && f.travel === null;
 
   const head = (
-    <div className="titlebar">
-      <div>
-        <h1>My trip</h1>
-        <p>Check the trip is worth the journey before you go. Travel is counted here and never hides a deal.</p>
-      </div>
-      {items.length > 0 && (
-        <div className="btns">
-          <button type="button" className="bt ghost" onClick={copy}>
-            Copy list
-          </button>
-          {going ? (
-            <button type="button" className="bt" onClick={onFinish}>
-              Finish trip
-            </button>
-          ) : (
-            <button type="button" className="bt" onClick={onStart}>
-              Start trip
-            </button>
-          )}
-        </div>
-      )}
-    </div>
+    <PageHead
+      title="My trip"
+      tint="pistachio"
+      lead="Check the trip is worth the journey before you go. Travel is counted here and never hides a deal."
+      aside={
+        items.length > 0 && (
+          <div className="k-headacts">
+            <Button variant="line" onClick={copy}>
+              Copy list
+            </Button>
+            <Button variant="main" onClick={going ? onFinish : onStart}>
+              {going ? "Finish trip" : "Start trip"}
+            </Button>
+          </div>
+        )
+      }
+    />
   );
 
-  const fillPanel = (
-    <div className="panel fillbar">
-      <h3>
-        Fill it for me <small>best finds for your cash</small>
-      </h3>
-      <div>
-        <label className="cashin">
-          Cash, £
-          <input type="number" min={1} inputMode="decimal" value={cash} onChange={(e) => setCash(e.target.value)} />
-        </label>
-        <button type="button" className="bt sm" onClick={fill}>
+  const fillCard = (
+    <Card>
+      <Label>Fill it for me</Label>
+      <p className="tp-p">
+        Bounty picks finds marked Buy with the best return on your cash, from up to 3 shops, within your carry
+        limit and space.{items.length ? " Refilling replaces your list." : ""}
+      </p>
+      <form
+        className="tp-fill"
+        noValidate
+        onSubmit={(e) => {
+          e.preventDefault();
+          fill();
+        }}
+      >
+        <Field label="Cash you have" htmlFor="tp-cash" error={cashErr}>
+          <MoneyInput id="tp-cash" value={cash} onChange={(e) => setCash(e.target.value)} />
+        </Field>
+        <Button variant={items.length ? "line" : "main"} type="submit">
           {items.length ? "Refill my trip" : "Fill my trip"}
-        </button>
-      </div>
-      <small className="muted">
-        Picks finds marked Buy with the best return on cash, up to 3 shops, within your carry limit and
-        space. {items.length ? "Refilling replaces your list." : ""}
-      </small>
-    </div>
+        </Button>
+      </form>
+    </Card>
   );
+
+  const legacyBlock = legacy ? (
+    <MoreBelow
+      title="Your travel, cash and fees"
+      lead="The full planner: how you travel, fares and fuel, selling fees, one-item plans and the several-items basket plan."
+      open={more}
+      onToggle={() => setMore((m) => !m)}
+      showLabel="Show the full planner"
+    >
+      <div className="legacy">{legacy}</div>
+    </MoreBelow>
+  ) : null;
 
   if (!items.length)
     return (
-      <>
+      <div className="tp">
         {head}
-        <div className="tripgrid">
-          <div className="panel tnone">
-            <h3>Nothing on your trip yet</h3>
-            <p className="muted">
-              Add finds from Deals with the + button, or let Bounty fill a trip for the cash you have.
-            </p>
-            <button type="button" className="bt ghost sm" onClick={() => go("deals")}>
-              Browse deals
-            </button>
-          </div>
-          {fillPanel}
+        <div className="k-split">
+          <Empty
+            title="Nothing on your trip yet"
+            text="Add finds from Deals with the + button, or let Bounty fill a trip for the cash you have."
+            action={
+              <Button variant="main" onClick={() => go("deals")}>
+                Browse deals
+              </Button>
+            }
+          />
+          {fillCard}
         </div>
-      </>
+        {legacyBlock}
+      </div>
     );
 
-  const words = {
-    ok: ["Worth it", `It beats your ${money(target)} an hour target.`],
-    thin: ["Thin", `It makes money but less than your ${money(target)} an hour target.`],
-    bad: ["Not worth it", "Travel costs more than this trip keeps."],
-  };
+  const answer =
+    verdict === null
+      ? null
+      : ({
+          ok: { v: "buy", word: "Worth it", why: `It beats your ${money(target)} an hour target.` },
+          thin: { v: "think", word: "Thin", why: `It makes money, but less than your ${money(target)} an hour target.` },
+          bad: { v: "leave", word: "Not worth it", why: "Travel costs more than this trip keeps." },
+        } as const)[verdict];
+
+  const facts: [string, React.ReactNode][] = [
+    ["You keep", f.after === null ? money(f.keep) : money(f.after)],
+    ["Time", f.minutes === null ? "Not known" : hm(f.minutes)],
+    ["Per hour", f.perHour === null ? "Not known" : money(f.perHour)],
+    ["Money back", backBy ? "by " + backBy : "Not known"],
+  ];
 
   return (
-    <>
+    <div className="tp">
       {head}
       {sample && (
-        <p className="note">Some finds on this trip are sample data, so their figures are illustrations.</p>
+        <Notice title="Sample data.">Some finds on this trip are illustrations, so their figures are not real offers.</Notice>
       )}
-      <div className="tripgrid">
-        <div className="tcol">
-          <div className={"panel worth " + (verdict ?? "")}>
-            <div className="wtop">
-              <span className="wv">{verdict ? words[verdict][0] : "Not checked yet"}</span>
-              <span>{verdict ? words[verdict][1] : "Add how you travel to check it."}</span>
-            </div>
-            <div className="wnums">
+      <div className="k-split">
+        <div className="k-col">
+          {answer ? (
+            <Answer verdict={answer.v} word={answer.word} headline={`${money(f.after ?? 0)} after travel`} why={answer.why} facts={facts}>
+              <p className="tp-small">
+                {f.stops.length} {f.stops.length === 1 ? "shop" : "shops"}, about {f.routeMiles} miles, {money(f.travel ?? 0)} travel.
+                Time adds {SHOP_MINUTES} minutes in each shop. Money back uses the selling pace in your{" "}
+                <Button variant="text" size="sm" onClick={() => go("profile")}>
+                  settings
+                </Button>
+                .
+              </p>
+            </Answer>
+          ) : (
+            <Card className="tp-pending">
+              <Label>Before travel</Label>
+              <b className="k-display tp-big">{money(f.keep)}</b>
+              <p className="tp-p">
+                What this trip keeps after fees and postage. To check it is worth the journey, say how you travel
+                in settings.
+              </p>
               <div>
-                <small>You keep</small>
-                <b>{f.after === null ? money(f.keep) : money(f.after)}</b>
-                <span>{f.travel === null ? "before travel" : `after ${money(f.travel)} travel`}</span>
+                <Button variant="tab" tint="pistachio" onClick={() => go("profile")}>
+                  Add how you travel
+                </Button>
               </div>
-              <div>
-                <small>Time</small>
-                <b>{f.minutes === null ? "Not known" : hm(f.minutes)}</b>
-                <span>
-                  {f.stops.length} {f.stops.length === 1 ? "shop" : "shops"}, about {f.routeMiles} miles
-                </span>
-              </div>
-              <div>
-                <small>Per hour</small>
-                <b>{f.perHour === null ? "Not known" : money(f.perHour)}</b>
-                <span>your target {money(target)}</span>
-              </div>
-              <div>
-                <small>Money back</small>
-                <b>{backBy ? "by " + backBy : "Not known"}</b>
-                <span>if it sells at your usual pace</span>
-              </div>
-            </div>
-            <small className="muted">
-              Time adds {SHOP_MINUTES} minutes in each shop to your journey. Money back uses the selling
-              pace in{" "}
-              <button type="button" className="linkbtn" onClick={() => go("profile")}>
-                settings
-              </button>
-              .
-            </small>
-          </div>
+            </Card>
+          )}
 
-          <div className="panel">
-            <h3>
-              Your route <small>nearest first</small>
-            </h3>
+          <Card>
+            <Label aside={<span>nearest first</span>}>Your route</Label>
             {f.stops.map((s, i) => (
-              <React.Fragment key={s.name}>
-                <div className="tstop">
-                  <span className="sn">{i + 1}</span>
+              <div key={s.name} className="tp-stop">
+                <div className="tp-shop">
+                  <span className="tp-n">{i + 1}</span>
                   <b>{s.name}</b>
                   <small>{s.miles !== null ? `${s.miles} mi` : ""}</small>
                 </div>
-                {s.items.map((d) => (
-                  <div key={d.sku} className="trow">
-                    <div className="tname">
-                      <button type="button" className="linkish" onClick={() => openDeal(d.sku)}>
-                        {d.name}
-                      </button>
-                      <small>
-                        {money(d.buy)} each · keep {d.unitProfit === null ? "not known" : money(d.unitProfit)} each
-                        {d.walkAway !== null ? ` · walk away above ${money(d.walkAway)}` : ""}
-                      </small>
-                    </div>
-                    <div className="qty">
-                      <button type="button" aria-label="One fewer" onClick={() => qty(d.sku, -1)}>
-                        −
-                      </button>
-                      <span>{trip[d.sku]}</span>
-                      <button type="button" aria-label="One more" onClick={() => qty(d.sku, 1)}>
-                        +
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </React.Fragment>
+                <Rows>
+                  {s.items.map((d) => (
+                    <Row
+                      key={d.sku}
+                      badge={shopInitials(d.shop)}
+                      tint="pistachio"
+                      title={
+                        <button type="button" className="tp-link" onClick={() => openDeal(d.sku)}>
+                          {d.name}
+                        </button>
+                      }
+                      sub={`${money(d.buy)} each · keep ${d.unitProfit === null ? "not known" : money(d.unitProfit)} each${
+                        d.walkAway !== null ? ` · walk away above ${money(d.walkAway)}` : ""
+                      }`}
+                      slot={<Stepper label={d.name} value={trip[d.sku]} onChange={(n) => setQty(d.sku, n)} />}
+                    />
+                  ))}
+                </Rows>
+              </div>
             ))}
-          </div>
+          </Card>
         </div>
 
-        <div className="tcol">
-          <div className="panel">
-            <h3>Your limits</h3>
-            <div className="lim">
-              <div className="row2">
-                <span>Cash</span>
-                <span>
-                  {money(f.spend)} of {money(p.budget * 100)}
-                </span>
-              </div>
-              <div className={"bar" + (f.spend > p.budget * 100 ? " over" : "")}>
-                <i style={{ width: pct(f.spend, p.budget * 100) + "%" }} />
-              </div>
-            </div>
-            <div className="lim">
-              <div className="row2">
-                <span>Carry</span>
-                <span>
-                  {f.kg.toFixed(1)} of {kgMax} kg{f.noWeight ? ` (${f.noWeight} without a weight)` : ""}
-                </span>
-              </div>
-              <div className={"bar" + (f.kg > kgMax ? " over" : "")}>
-                <i style={{ width: pct(f.kg, kgMax) + "%" }} />
-              </div>
-            </div>
-            <div className="lim">
-              <div className="row2">
-                <span>Units</span>
-                <span>
-                  {f.units} of {unitMax}
-                </span>
-              </div>
-              <div className={"bar" + (f.units > unitMax ? " over" : "")}>
-                <i style={{ width: pct(f.units, unitMax) + "%" }} />
-              </div>
-            </div>
-            <small className="muted">
-              From your settings: cash, carry limit by {p.transport.toLowerCase()}, and the smaller of your
-              maximum units and storage space.
-            </small>
-          </div>
-          {warns.length > 0 ? (
-            <div className="panel warnp">
-              <h3>Check before you go</h3>
+        <div className="k-col">
+          <Card>
+            <Label>Your limits</Label>
+            <Meter
+              label="Cash"
+              value={f.spend}
+              max={p.budget * 100}
+              shown={`${money(f.spend)} of ${money(p.budget * 100)}`}
+              over={f.spend > p.budget * 100}
+              ink
+            />
+            <Meter
+              label={"Carry" + (f.noWeight ? ` (${f.noWeight} without a weight)` : "")}
+              value={f.kg}
+              max={kgMax}
+              shown={`${f.kg.toFixed(1)} of ${kgMax} kg`}
+              over={f.kg > kgMax}
+              ink
+            />
+            <Meter label="Units" value={f.units} max={unitMax} shown={`${f.units} of ${unitMax}`} over={f.units > unitMax} ink />
+            <p className="tp-small">
+              From your settings: cash, carry limit by {p.transport.toLowerCase()}, and the smaller of your maximum
+              units and storage space.
+            </p>
+          </Card>
+          {warns.length > 0 || noTravel ? (
+            <div className="tp-notes">
               {warns.map((w) => (
-                <p key={w}>{w}</p>
+                <Notice key={w} tone="warn" title="Check first.">
+                  {w}
+                </Notice>
               ))}
+              {noTravel && (
+                <Notice title="Travel not counted.">
+                  {p.transport === PUBLIC
+                    ? "Add your bus or train fare in settings to count travel."
+                    : "Say how you travel in settings to count travel and time."}
+                </Notice>
+              )}
             </div>
           ) : (
-            <div className="panel okp">Everything fits your cash, carry limit and space.</div>
+            <Notice tone="profit" title="All set.">
+              Everything fits your cash, carry limit and space.
+            </Notice>
           )}
-          {fillPanel}
+          {fillCard}
         </div>
       </div>
-    </>
+      {legacyBlock}
+    </div>
   );
 }
