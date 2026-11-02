@@ -61,8 +61,12 @@
   /* The current tab's colour on the menus. */
   .strip .nav[aria-current="page"],
   :scope.side-yt .frame:not(.open) .strip .nav[aria-current="page"] { background: var(--tab); color: var(--tab-ink); font-weight: 700; }
+  /* On computers Scan is coloured only while it is the open tab, like the
+     others; the phone bar below keeps it coloured all the time. */
   .strip .nav.scan,
-  :scope.side-yt .frame:not(.open) .strip .nav.scan { background: var(--c-periwinkle); color: #111; font-weight: 700; }
+  :scope.side-yt .frame:not(.open) .strip .nav.scan { background: transparent; color: inherit; font-weight: inherit; }
+  .strip .nav.scan[aria-current="page"],
+  :scope.side-yt .frame:not(.open) .strip .nav.scan[aria-current="page"] { background: var(--c-periwinkle); color: #111; font-weight: 700; }
   .phone-nav .sc { background: var(--c-periwinkle) !important; color: #111 !important; }
   .phone-nav button[aria-current="true"]:not(.sc) { color: #111; font-weight: 700; }
   .phone-nav button[aria-current="true"]:not(.sc) svg { background: var(--tab); color: var(--tab-ink); border-radius: 999px; padding: 3px 12px; box-sizing: content-box; }
