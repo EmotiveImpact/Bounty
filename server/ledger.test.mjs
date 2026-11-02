@@ -608,11 +608,22 @@ test("summary: cash basis by month and separate figures", () => {
   assert.equal(oct.realisedEarnings, 2600 + 1700 - 3000 - 1200 - 200);
   assert.equal(oct.payouts, 4300);
   assert.equal(oct.realisedMinutes, 60);
-  // Only trip A logged work time in October: its October money (payout 26.00
-  // less the 2.00 expense) over its hour. B (-30.00) and C (+5.00) have no
-  // work time, so they are left out rather than divided by A's hour.
-  assert.equal(oct.realisedHourly, 2400);
-  assert.deepEqual(oct.hourly, { trips: 1, minutes: 60, earnings: 2400, leftOutTrips: 2, leftOutEarnings: -3000 + 500 });
+  // Round five: per hour covers whole trips completed in the month. Trip A
+  // (closed, last entry 4 October) counts with its September receipt too:
+  // 26.00 - 20.00 - 2.00 over its hour, never its October money alone
+  // (24.00). C is finished (sold and paid out) with no work time, so it is
+  // left out; B is still open, so it is left out until it is completed.
+  assert.equal(oct.realisedHourly, 400);
+  assert.deepEqual(oct.hourly, {
+    trips: 1,
+    minutes: 60,
+    earnings: 400,
+    leftOutTrips: 1,
+    leftOutEarnings: 500,
+    stillOpen: 1,
+    completedLater: 0,
+  });
+  assert.equal(sept.hourly.completedLater, 1);
   // Current position of open trips only.
   // B's unpaid sale. C's payout has no units, so it covers C's earlier sale
   // and the 3.00 gap is fees, not money still to come.
@@ -827,18 +838,41 @@ test("month hourly divides only the money of trips with work time by that time (
   s = summary(db, "2026-10");
   assert.equal(s.realisedEarnings, 4000 + 1900 - 1200);
   assert.equal(s.realisedHourly, 2000, "never 47.00 over 2 h");
-  assert.deepEqual(s.hourly, { trips: 1, minutes: 120, earnings: 4000, leftOutTrips: 2, leftOutEarnings: 700 });
+  // Round five: the research trip is still open (bought, not sold), so it is
+  // left out as still open rather than as a trip without work time.
+  assert.deepEqual(s.hourly, {
+    trips: 1,
+    minutes: 120,
+    earnings: 4000,
+    leftOutTrips: 1,
+    leftOutEarnings: 1900,
+    stillOpen: 1,
+    completedLater: 0,
+  });
   assert.match(s.basis, /trips without work time is left out|trips without work time are left out|money from trips without work time is left out/);
   // The month figure agrees with the measures once the trips are closed.
   for (const t of [worked, manual, research]) closeTrip(db, t, clock);
   assert.equal(metrics(db).hourly.realised, 2000);
   assert.equal(metrics(db).hourly.trips, 1);
-  // Time on a trip with no cash yet still counts as time spent this month.
+  // Round five: time on a trip that is still open is left out until the trip
+  // is completed, and then counts in full (here 2 h for nothing).
   const listing = trip("Listing only");
   addEntry(db, listing, { type: "work", minutes: 120, occurred: "2026-10-25" }, clock);
   s = summary(db, "2026-10");
+  assert.equal(s.realisedHourly, 2000);
+  assert.equal(s.hourly.stillOpen, 1);
+  closeTrip(db, listing, clock);
+  s = summary(db, "2026-10");
   assert.equal(s.realisedHourly, 1000);
-  assert.deepEqual(s.hourly, { trips: 2, minutes: 240, earnings: 4000, leftOutTrips: 2, leftOutEarnings: 700 });
+  assert.deepEqual(s.hourly, {
+    trips: 2,
+    minutes: 240,
+    earnings: 4000,
+    leftOutTrips: 2,
+    leftOutEarnings: 700,
+    stillOpen: 0,
+    completedLater: 0,
+  });
 
   // Not known when no trip with money has work time.
   const other = memoryDb(schema);
@@ -851,7 +885,16 @@ test("month hourly divides only the money of trips with work time by that time (
   s = summary(other, "2026-10");
   assert.equal(s.realisedHourly, null);
   assert.equal(s.realisedMinutes, 60);
-  assert.deepEqual(s.hourly, { trips: 1, minutes: 60, earnings: 0, leftOutTrips: 1, leftOutEarnings: 300 });
+  // Round five: the time-only trip is still open, so nothing is measured.
+  assert.deepEqual(s.hourly, {
+    trips: 0,
+    minutes: 0,
+    earnings: 0,
+    leftOutTrips: 1,
+    leftOutEarnings: 300,
+    stillOpen: 1,
+    completedLater: 0,
+  });
   // A sale alone is not money yet, so a trip with only a sale and work time is not enough.
   addEntry(other, timeOnly, { type: "receipt", amount: 100, units: 1, occurred: "2026-09-30" }, clock);
   addEntry(other, timeOnly, { type: "sale", amount: 900, units: 1, occurred: "2026-10-06" }, clock);

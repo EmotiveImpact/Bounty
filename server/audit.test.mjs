@@ -43,6 +43,8 @@ const status = (fn) => {
   }
 };
 
+// The check records the shelf price seen at the branch (the same £15.00 the
+// feed lists), so the price applies at the branch checked (round 5).
 const check = (db, extra = {}) =>
   recordCheck(
     db,
@@ -54,6 +56,7 @@ const check = (db, extra = {}) =>
       inStock: true,
       unitsSeen: 4,
       checkedAt: hoursBefore(2),
+      pricePence: 1500,
       ...extra,
     },
     { now: NOW },
@@ -303,7 +306,7 @@ test("an audit item passes only on stored evidence", () => {
   assert.equal(passed.evidence.offer.retailer, "Argos");
   assert.deepEqual(passed.sales, SALES, "the confirmed sales are stored with the item");
   assert.deepEqual(passed.outcome.checks.map((x) => x.id), [
-    "barcode", "offer", "live-evidence", "offer-fresh", "availability", "promotion", "shipping",
+    "barcode", "offer", "live-evidence", "offer-fresh", "availability", "price-at-branch", "promotion", "shipping",
     "days-to-sell", "independent-sales", "display-permitted", "match", "estimate-tier",
   ]);
   // Typed readings that agree with the evidence still pass.
@@ -442,7 +445,8 @@ test("sample data, a stale offer or a later empty shelf never pass", () => {
   assert.ok(s.outcome.reasons.includes(AUDIT_FAILURES.sample), reasonsOf(s));
 
   const stale = evidenceDb({ offer: { observed: daysBefore(9) } });
-  const c2 = check(stale);
+  // A stock-only check: the feed's own (stale) price is the one judged.
+  const c2 = check(stale, { pricePence: null });
   const old = item(stale, { availabilityCheckId: c2.id });
   assert.equal(old.evidence.offerFresh, false);
   assert.ok(old.outcome.reasons.includes(AUDIT_FAILURES.offerStale), reasonsOf(old));
@@ -884,7 +888,9 @@ test("an item is judged on its copy of the offer, and a changed live offer is sh
   const [after] = listItems(db, LOCALITY);
   assert.equal(after.outcome.passed, true, reasonsOf(after));
   assert.equal(after.evidence.offer.price, 1500);
-  assert.equal(after.evidence.offer.observed, OFFER.observed);
+  // The shelf price on the branch check is the price judged, dated at the
+  // check (round 5); the live feed row never changes it.
+  assert.equal(after.evidence.offer.observed, c.checked_at);
   assert.equal(after.evidence.offerFresh, true);
   assert.deepEqual(after.evidence.offerChange.changed, ["price", "observed"]);
   assert.deepEqual(after.evidence.offerChange.now, { price: 950, observed: later, retailer: "Argos", barcode: GTIN });
@@ -925,7 +931,10 @@ test("an item is judged on its copy of the offer, and a changed live offer is sh
   );
   assert.equal(resaved.audited_offer.price, 950);
   assert.equal(resaved.audited_offer.observed, later);
-  assert.equal(resaved.evidence.offer.price, 950);
+  // The feed now lists £9.50, but the trip pays the £15.00 shelf price the
+  // branch check recorded (round 5).
+  assert.equal(resaved.evidence.priceAtBranch.seen.price, 950);
+  assert.equal(resaved.evidence.offer.price, 1500);
   assert.equal(resaved.evidence.offerChange, null);
 });
 
@@ -978,7 +987,9 @@ test("items saved before the offer copy get one from the current offer, and a si
 
   // An offer a later import changed before the copy was taken: the copy is
   // dated after the audit, so the item fails with that reason, never with
-  // "not observed within 7 days".
+  // "not observed within 7 days". (Without a shelf price on the check, so
+  // the offer's own price and date are the ones judged.)
+  db.prepare("UPDATE availability_checks SET price_pence = NULL").run();
   db.prepare("UPDATE validation_items SET audited_offer = NULL").run();
   upsertResearch(db, "awin", [{ ...OFFER, price: 950, observed: hoursAfter(1) }], { now: hoursAfter(1) });
   schema(db);
@@ -1048,6 +1059,7 @@ test("audit and check routes validate input and report progress", async () => {
       locality: LOCALITY,
       method: "phone",
       inStock: true,
+      pricePence: 1500,
     });
     assert.equal(created.status, 201);
     assert.equal(created.body.barcode, GTIN);

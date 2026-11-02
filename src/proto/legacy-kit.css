@@ -1,0 +1,132 @@
+/* Older components shown inside the new screens: the full tip in the tip
+   window and scout profile (.tps-full), and the operator tools on Admin
+   (.adm-legacy). Their logic is unchanged; these rules give their buttons,
+   fields, badges, notices and fact lists the building-block look. */
+:is(.tps-full, .adm-legacy) {
+  font-family: var(--k-sans);
+  color: var(--k-text);
+  min-width: 0;
+}
+
+/* Buttons */
+:is(.tps-full, .adm-legacy) button {
+  height: 42px;
+  padding: 0 18px;
+  border-radius: 999px;
+  border: 1.5px solid var(--k-line-2);
+  background: var(--k-surface);
+  color: var(--k-ink);
+  font: 600 14px/1 var(--k-sans);
+  box-shadow: none;
+}
+:is(.tps-full, .adm-legacy) button:hover:not(:disabled) { border-color: var(--k-ink); }
+:is(.tps-full, .adm-legacy) button[aria-pressed="true"],
+:is(.tps-full, .adm-legacy) form button:not([type="button"]),
+:is(.tps-full, .adm-legacy) .actions button:first-child {
+  background: var(--k-ink);
+  border-color: var(--k-ink);
+  color: #fff;
+}
+:is(.tps-full, .adm-legacy) button:disabled { opacity: 0.45; cursor: default; }
+
+/* Fields */
+:is(.tps-full, .adm-legacy) label {
+  align-content: start;
+  font: 600 13.5px/1.35 var(--k-sans);
+  color: var(--k-ink);
+}
+:is(.tps-full, .adm-legacy) input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+:is(.tps-full, .adm-legacy) select,
+:is(.tps-full, .adm-legacy) textarea {
+  height: 44px;
+  padding: 0 14px;
+  border: 1.5px solid var(--k-line-2);
+  border-radius: 14px;
+  background: var(--k-surface);
+  color: var(--k-ink);
+  font: 400 15px/1.2 var(--k-sans);
+}
+:is(.tps-full, .adm-legacy) textarea { height: auto; padding: 10px 14px; }
+:is(.tps-full, .adm-legacy) :is(input, select, textarea):focus {
+  outline: none;
+  border-color: var(--k-ink);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--k-sky) 80%, transparent);
+}
+:is(.tps-full, .adm-legacy) input[type="checkbox"],
+:is(.tps-full, .adm-legacy) input[type="radio"] { accent-color: var(--k-ink); }
+
+/* Badges as kit chips */
+:is(.tps-full, .adm-legacy) .badge {
+  height: 24px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  box-shadow: none;
+  background: var(--k-tile);
+  color: var(--k-ink);
+  font: 600 12px/1 var(--k-sans);
+}
+:is(.tps-full, .adm-legacy) .badge.sample { background: var(--k-lemon); }
+:is(.tps-full, .adm-legacy) .badge.sponsored { background: var(--k-lilac); }
+:is(.tps-full, .adm-legacy) .badge.ok { background: var(--k-profit-bg); color: var(--k-profit); }
+:is(.tps-full, .adm-legacy) .badge.warn { background: var(--k-loss-bg); color: var(--k-loss); }
+:is(.tps-full, .adm-legacy) .badge.ev-retail { background: var(--k-sky); border: 1.5px solid #3b6fd8; color: #173f8f; border-radius: 8px; }
+:is(.tps-full, .adm-legacy) .badge.ev-sold { background: var(--k-profit-bg); border: 1.5px solid var(--k-profit); color: var(--k-profit); border-radius: 8px; }
+:is(.tps-full, .adm-legacy) .badge.ev-asking { background: var(--k-warn-bg); border: 1.5px dashed var(--k-warn); color: var(--k-warn); border-radius: 8px; }
+:is(.tps-full, .adm-legacy) .badge.ev-estimate { background: var(--k-surface); border: 1.5px dotted var(--k-muted); color: var(--k-ink); border-radius: 8px; }
+
+/* Notices */
+:is(.tps-full, .adm-legacy) .notice {
+  border: 0;
+  border-radius: 16px;
+  padding: 12px 16px;
+  background: var(--k-tile);
+  color: var(--k-ink);
+}
+:is(.tps-full, .adm-legacy) .stop { color: var(--k-loss); }
+:is(.tps-full, .adm-legacy) .muted { color: var(--k-muted); }
+:is(.tps-full, .adm-legacy) .ok { color: var(--k-profit); }
+:is(.tps-full, .adm-legacy) .warn:not(.badge) { color: var(--k-loss); }
+
+/* Fact lists */
+:is(.tps-full, .adm-legacy) dl.facts dt { color: var(--k-muted); font-weight: 400; }
+:is(.tps-full, .adm-legacy) dl.facts dd { color: var(--k-ink); font-weight: 600; }
+:is(.tps-full, .adm-legacy) details > summary {
+  cursor: pointer;
+  font: 600 14px/1.4 var(--k-sans);
+  color: var(--k-ink);
+}
+
+/* The tip window already names the tip, so the card drops its own title,
+   frame and picture and starts at its badges and places. */
+.k-window .tps-full .bounty {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: none;
+  padding: 0;
+  overflow: visible;
+}
+.k-window .tps-full .bounty > :not(.bounty-hero):not(.bounty-deal) { margin-left: 0; margin-right: 0; }
+.k-window .tps-full .bounty-hero {
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 300px);
+  padding: 0 0 16px;
+}
+.k-window .tps-full .bounty-hero > .planner-tile,
+.k-window .tps-full .bounty-title > h3,
+.k-window .tps-full .bounty-meta { display: none; }
+.k-window .tps-full .bounty-places {
+  border: 0;
+  border-radius: 18px;
+  background: var(--k-tile);
+  padding: 14px 16px;
+}
+.k-window .tps-full .bounty-deal {
+  border-radius: 18px;
+  margin: 0 0 4px;
+}
+.k-window .tps-full .bounty-places-label { color: var(--k-profit); font-family: var(--k-display); font-weight: 500; }
+@media (max-width: 640px) {
+  .k-window .tps-full .bounty-hero { grid-template-columns: 1fr; }
+  :is(.tps-full, .adm-legacy) .actions button { flex: 1 1 auto; }
+}

@@ -63,6 +63,8 @@ const EVIDENCE_CHECKS = new Set([
   "independent-sales",
   "days-to-sell",
   "shipping",
+  // The price is not shown to apply at the branch the stock check covers.
+  "price-at-branch",
 ]);
 // Checks about branch stock. Unknown stock caps a tier at Priority 2.
 const STOCK_CHECKS = new Set(["local-stock", "availability"]);

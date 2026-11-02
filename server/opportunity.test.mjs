@@ -43,6 +43,8 @@ const passingAlert = (economics, over = {}) =>
     now: "2026-10-31T12:00:00Z",
     localStockConfirmed: true,
     availability: "in_stock",
+    // The price applies at the branch checked (round 5).
+    priceAtBranch: true,
     shippingKnown: true,
     recentIndependentSales: 8,
     daysToSell: 5,
