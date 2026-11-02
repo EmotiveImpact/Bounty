@@ -103,6 +103,11 @@
   .mytab b { background: var(--c-lemon); }
   .note { background: #f6f6f8; border: 0; color: #111; border-radius: 16px; }
 
+  /* Saved heart on the product page fills in pink. */
+  .savebt.on svg { color: var(--c-badge); }
+  .savebt.on svg path { fill: currentColor; }
+  .heart.on { color: var(--c-badge); }
+
   /* Welcome card opens on the campaign picture. */
   .ob { overflow: hidden; }
   .obhero { width: calc(100% + 60px); margin: -30px -30px 4px; max-width: none; aspect-ratio: 16 / 8; object-fit: cover; object-position: center 30%; display: block; }
@@ -121,3 +126,7 @@
     .wordmark b { font-size: 22px; }
   }
 }
+
+/* The confetti layer sits on the page body, outside the app shell. */
+.confetti { position: fixed; width: 0; height: 0; pointer-events: none; z-index: 9999; }
+.confetti i { position: absolute; left: 0; top: 0; display: block; }
