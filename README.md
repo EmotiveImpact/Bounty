@@ -63,4 +63,4 @@ A buy alert needs every check to pass on positive evidence: live data, an exact 
 
 ## Documents
 
-[Product requirements](docs/PRD.md) · [Architecture and module contracts](docs/ARCHITECTURE.md) · [Source register, credentials and import commands](docs/SOURCES.md) · [Integration verification register](docs/INTEGRATIONS.md) · [Hosting the pilot](docs/DEPLOY.md)
+[Product requirements](docs/PRD.md) · [Feature backlog](docs/FEATURES.md) · [Architecture and module contracts](docs/ARCHITECTURE.md) · [Source register, credentials and import commands](docs/SOURCES.md) · [Integration verification register](docs/INTEGRATIONS.md) · [Hosting the pilot](docs/DEPLOY.md)
