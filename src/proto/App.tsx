@@ -18,6 +18,7 @@ import {
 import { ItemTile, byMode } from "../Planner";
 import { savedExtras, type Deal } from "../Deals";
 import { Ico } from "./icons";
+import SignOff from "./SignOff";
 import "./proto.css";
 import "./proto-extra.css";
 
@@ -145,6 +146,7 @@ export default function ProtoApp({
     load("bounty-trip", {}),
   );
   const [tripOpen, setTripOpen] = useState(false);
+  const [signing, setSigning] = useState(false);
   const [going, setGoing] = useState<boolean>(() =>
     load("bounty-trip-going", false),
   );
@@ -1744,6 +1746,50 @@ export default function ProtoApp({
       </button>
     );
     if (!tripOpen) return tab;
+    if (signing)
+      return (
+        <>
+          <div
+            className="tripbox"
+            role="dialog"
+            aria-label="Sign off your trip"
+          >
+            <div className="thead">
+              <div>
+                <b>What did you get?</b>
+                <small>Nothing goes into Stock until you add it</small>
+              </div>
+              <button
+                type="button"
+                className="tx"
+                aria-label="Close"
+                onClick={() => setSigning(false)}
+              >
+                ×
+              </button>
+            </div>
+            <SignOff
+              ticked={items.filter((d) => got[d.sku])}
+              trip={trip}
+              onBack={() => setSigning(false)}
+              onDone={(added) => {
+                setSigning(false);
+                setTrip({});
+                setGot({});
+                setGoing(false);
+                setTripOpen(false);
+                go("stock");
+                say(
+                  added
+                    ? `Added ${added} ${added === 1 ? "item" : "items"} to Stock.`
+                    : "Trip finished. Nothing was added to Stock.",
+                );
+              }}
+            />
+          </div>
+          {tab}
+        </>
+      );
     const qty = (s: string, by: number) =>
       setTrip((t) => {
         const n = { ...t, [s]: (t[s] ?? 0) + by };
@@ -1899,18 +1945,9 @@ export default function ProtoApp({
                     <button
                       type="button"
                       className="bt"
-                      onClick={() => {
-                        setTrip({});
-                        setGot({});
-                        setGoing(false);
-                        setTripOpen(false);
-                        go("stock");
-                        say("Trip finished. Add what you bought in Stock.");
-                      }}
+                      onClick={() => setSigning(true)}
                     >
-                      {gotN === ids.length
-                        ? "Finish and go to Stock"
-                        : "Finish trip"}
+                      Finish trip
                     </button>
                   </>
                 ) : (
