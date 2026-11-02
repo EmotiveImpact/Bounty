@@ -101,7 +101,7 @@ export type Profile = {
   fareFree?: boolean; // true when public transport is free for this member (a bus pass)
 };
 export const initialProfile: Profile = {
-  area: "Leeds",
+  area: "London",
   budget: 100,
   target: 12,
   transport: "Walk",

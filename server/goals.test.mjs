@@ -47,7 +47,7 @@ const item = (over) => ({
   salesPerWeek: 10,
   competingListings: 0,
   shop: "Shop A",
-  area: "Leeds",
+  area: "London",
   miles: 1,
   buy: 1000,
   sales: [3000],

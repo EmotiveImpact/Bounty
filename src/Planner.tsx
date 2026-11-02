@@ -847,7 +847,7 @@ export default function Planner() {
       </aside>
 
       <p className="notice planner-sample">
-        <strong>Sample data.</strong> Illustrative Leeds offers with modelled sale prices. Stock,
+        <strong>Sample data.</strong> Illustrative London offers with modelled sale prices. Stock,
         prices and earnings are simulated, so nothing here is ever a buy alert.
       </p>
       {error && <p role="alert" className="notice warn">{error}</p>}

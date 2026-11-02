@@ -6,6 +6,7 @@
 // send alerts, acting as anyone) live on the Admin page.
 import React, { useCallback, useEffect, useState } from "react";
 import { api, money } from "../api";
+import type { Deal } from "../Deals";
 import {
   ACTING_KEY,
   AlertInbox,
@@ -107,6 +108,18 @@ export default function TipsScreen({ go }: { go: (v: "deals" | "planner") => voi
     setRefresh((r) => r + 1);
   }, [me]);
   useEffect(load, [load]);
+  // Sample tips are the same made-up items as the sample deals, so their
+  // example figure comes from there, labelled as an example on the card.
+  const [sampleKeep, setSampleKeep] = useState<Record<string, number>>({});
+  useEffect(() => {
+    api<{ deals: Deal[] }>("deals")
+      .then((d) => {
+        const m: Record<string, number> = {};
+        for (const x of d.deals) if (x.sample && x.unitProfit !== null) m[x.name] = x.unitProfit;
+        setSampleKeep(m);
+      })
+      .catch(() => undefined);
+  }, []);
 
   const member = me !== null ? (data?.members.find((m) => m.id === me) ?? null) : null;
   const list = tips ?? [];
@@ -158,7 +171,13 @@ export default function TipsScreen({ go }: { go: (v: "deals" | "planner") => voi
                 <span>
                   <small>You keep</small>
                   <b className={profit !== null && profit > 0 ? "profit" : undefined}>
-                    {profit !== null ? `${money(profit)} a unit` : b.sample ? "Sample" : "Not checked"}
+                    {profit !== null
+                      ? `${money(profit)} a unit`
+                      : b.sample && sampleKeep[b.title] !== undefined
+                        ? `${money(sampleKeep[b.title])} a unit (example)`
+                        : b.sample
+                          ? "Example only"
+                          : "Not checked"}
                   </b>
                 </span>
                 <span>

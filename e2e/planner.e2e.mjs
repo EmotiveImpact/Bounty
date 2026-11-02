@@ -41,7 +41,7 @@ test(
   async () => {
     // What the Planner's starting profile sends by public transport.
     const profile = {
-      area: "Leeds", budget: 10000, target: 1200, transport: "Public transport", carry: 5, quantity: 4,
+      area: "London", budget: 10000, target: 1200, transport: "Public transport", carry: 5, quantity: 4,
       fare: null, perMile: 45, extra: 0, storage: 10, feeRate: 0.13, feeFixed: 40, returnsRate: 0.05, rules: {},
     };
     const blank = await app.api("/api/plan", { method: "POST", body: profile });

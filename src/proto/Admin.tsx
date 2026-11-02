@@ -25,7 +25,8 @@ export default function Admin() {
         lead="Operator tools, kept away from members: tips desk, sources, evidence and audit sign-off."
       />
       <Notice tone="warn" title="Operators only.">
-        Members do not see this page. Anything changed here affects every member.
+        Members do not see this page. Anything changed here affects every member.{" "}
+        <a href="#Blocks">See the building blocks</a> the screens are made from.
       </Notice>
       <Tabs
         label="Admin tools"

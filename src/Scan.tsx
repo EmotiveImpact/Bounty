@@ -58,6 +58,8 @@ function saveTally(t: Taken[]) {
 
 export default function Scan() {
   const [lens, setLensState] = useState<Lens>(loadLens);
+  // Six sample items to try; the rest behind a button so the phone page stays short.
+  const [allSamples, setAllSamples] = useState(false);
   const setLens = (l: Lens) => {
     setLensState(l);
     saveLens(l);
@@ -175,11 +177,16 @@ export default function Scan() {
             <div className="sc-samples">
               <Label>Try a sample item</Label>
               <div className="sc-chips">
-                {samples.map((d) => (
+                {(allSamples ? samples : samples.slice(0, 6)).map((d) => (
                   <Button key={d.sku} size="sm" disabled={busy} onClick={() => check({ sku: d.sku })}>
                     {d.name}
                   </Button>
                 ))}
+                {samples.length > 6 && (
+                  <Button size="sm" variant="text" onClick={() => setAllSamples(!allSamples)}>
+                    {allSamples ? "Fewer" : `${samples.length - 6} more`}
+                  </Button>
+                )}
               </div>
             </div>
           )}

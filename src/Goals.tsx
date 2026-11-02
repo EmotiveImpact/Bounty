@@ -542,7 +542,7 @@ export function BasketSection({ version = 0 }: { version?: number }) {
         planner above, and your stricter thresholds from Profile and settings.
       </p>
       <p className="notice">
-        Sample data: illustrative Leeds offers with modelled sale totals. A basket is never a buy
+        Sample data: illustrative London offers with modelled sale totals. A basket is never a buy
         alert.
       </p>
       <button type="button" onClick={() => setRun((v) => v + 1)}>

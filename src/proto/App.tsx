@@ -262,8 +262,6 @@ export default function ProtoApp({
     }),
   );
   const [listening, setListening] = useState(false);
-  const [seenA, setSeenA] = useState(false);
-  const [seenC, setSeenC] = useState(false);
   const [profile, setProfileState] = useState(loadProfile);
   const [bounties, setBounties] = useState<LiveTip[]>([]);
 
@@ -605,7 +603,7 @@ export default function ProtoApp({
         <span className="grow" />
         <span className="pts">
           <span style={{ color: "var(--muted)" }}>Scout points · sample</span>
-          <b>460 · Trusted</b>£2 off at 500
+          <b>460 · Ruby</b>£2 off at 500
         </span>
       </span>
     </nav>
@@ -826,14 +824,12 @@ export default function ProtoApp({
               aria-label="Alerts"
               aria-expanded={pop === "alerts"}
               onClick={() => (
-                setPop(pop === "alerts" ? null : "alerts"),
-                setSeenA(true)
+                setPop(pop === "alerts" ? null : "alerts")
               )}
             >
               <Ico n="bell" />
-              {!seenA && top.length > 0 && (
-                <i className="cnt">{Math.min(3, top.length)}</i>
-              )}
+              {/* No count badge while alerts are only samples: a number
+                  here reads as real notifications. */}
             </button>
             {pop === "alerts" && (
               <div className="pop listpop">
@@ -876,12 +872,10 @@ export default function ProtoApp({
               aria-label="Tip chat"
               aria-expanded={pop === "chat"}
               onClick={() => (
-                setPop(pop === "chat" ? null : "chat"),
-                setSeenC(true)
+                setPop(pop === "chat" ? null : "chat")
               )}
             >
               <Ico n="chat" />
-              {!seenC && <i className="cnt">2</i>}
             </button>
             {pop === "chat" && (
               <div className="pop listpop">
@@ -889,7 +883,7 @@ export default function ProtoApp({
                   Tip chat <span className="badge sample-chip">Sample</span>
                 </b>
                 {CHATS.map(([n, l, m, w]) => (
-                  <button key={n} type="button" className="opt li">
+                  <div key={n} className="opt li">
                     <span className="avatar sm">
                       <span>{n[0]}</span>
                     </span>
@@ -899,7 +893,7 @@ export default function ProtoApp({
                       </small>
                       {m}
                     </span>
-                  </button>
+                  </div>
                 ))}
                 <small className="popnote">
                   Chat is coming. These messages are examples, not real members.
@@ -957,7 +951,7 @@ export default function ProtoApp({
                 <div className="pm-card">
                   <div className="pm-row">
                     <span>
-                      <span className="lvl trusted">Trusted</span>Scout points
+                      <span className="lvl trusted">Ruby</span>Scout points
                     </span>
                     <b>460</b>
                   </div>
@@ -1669,6 +1663,8 @@ export default function ProtoApp({
                   margin: "0 0 10px",
                   textTransform: "none",
                   fontSize: 18,
+                  display: "block",
+                  width: "100%",
                 }}
                 aria-label="Your name"
                 placeholder="Your name"
@@ -1788,9 +1784,6 @@ export default function ProtoApp({
           <BuyingRules />
         </div>
       </div>
-      <p className="sub" style={{ marginTop: 20, fontSize: 13 }}>
-        <a href="#Blocks">See the building blocks</a> the screens are made from.
-      </p>
     </>
   );
 
@@ -1862,6 +1855,8 @@ export default function ProtoApp({
         </span>
       </button>
     );
+    // Nothing on the trip and not out on it: keep the bar out of the way.
+    if (!tripOpen && !going && units === 0) return null;
     if (!tripOpen) return tab;
     if (signing)
       return (
@@ -2101,7 +2096,7 @@ export default function ProtoApp({
             </p>
             <input
               className="obin"
-              placeholder="e.g. LS1 4AP"
+              placeholder="e.g. SE1 7PB"
               value={postcode}
               autoComplete="postal-code"
               onChange={(e) => setPostcode(e.target.value)}
@@ -2323,14 +2318,14 @@ type LiveTip = {
 };
 
 const CHATS: [string, string, string, string][] = [
-  ["Priya K.", "Top scout", "Still 8 left on the end aisle", "4 min"],
+  ["Priya K.", "Diamond", "Still 8 left on the end aisle", "4 min"],
   [
     "Local flippers",
     "12 members",
     "Anyone checked the retail park today?",
     "18 min",
   ],
-  ["Dan W.", "Trusted", "Thanks for confirming my tip!", "1 hr"],
+  ["Dan W.", "Sapphire", "Thanks for confirming my tip!", "1 hr"],
 ];
 
 const LEGACY_TITLE: Partial<Record<View, string>> = {
@@ -2381,7 +2376,7 @@ function MegaMenu({ go }: { go: (v: View) => void }) {
         {it("crew", "The crew", "Top scouts and levels")}
         <div className="mmpts">
           <small>Scout points · sample</small>
-          <b>460 · Trusted</b>
+          <b>460 · Ruby</b>
           <span>£2 off at 500</span>
         </div>
       </div>

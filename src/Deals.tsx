@@ -269,7 +269,7 @@ export default function Deals(props: {
       </div>
       {all.some((d) => d.sample) && (
         <p className="notice deals-sample">
-          <strong>Sample data.</strong> Illustrative Leeds offers with modelled
+          <strong>Sample data.</strong> Illustrative London offers with modelled
           sales, so nothing here is a buy alert yet.
         </p>
       )}
