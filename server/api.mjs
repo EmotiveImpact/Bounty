@@ -3,6 +3,7 @@ import { database } from "./db.mjs";
 import { createApi } from "./app.mjs";
 import { accessConfig } from "./access.mjs";
 import { accounts, neonStore } from "./accounts.mjs";
+import { seedSampleTips } from "./sample-tips.mjs";
 
 const port = Number(process.env.PORT || 4174);
 let access;
@@ -14,7 +15,9 @@ try {
 }
 const { listenHost, publicHosts, password, databaseUrl, inviteCode } = access;
 const members = databaseUrl ? accounts(await neonStore(databaseUrl), { inviteCode }) : null;
-createServer(createApi(database(), { publicHosts, password, members })).listen(port, listenHost, () =>
+const db = database();
+seedSampleTips(db);
+createServer(createApi(db, { publicHosts, password, members })).listen(port, listenHost, () =>
   console.log(
     `Bounty API listening on ${listenHost}:${port}` +
       (publicHosts.length ? ` for ${publicHosts.join(", ")}` : "") +

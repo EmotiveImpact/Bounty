@@ -141,6 +141,9 @@ function fromHash(): { view: View; sku: string | null } {
 const CAT_LABEL: Record<string, string> = {
   clothing: "Clothing",
   general: "Home and general",
+  toys: "Toys",
+  beauty: "Beauty",
+  tech: "Tech",
 };
 const catLabel = (c: string) => CAT_LABEL[c] ?? c[0].toUpperCase() + c.slice(1);
 const VL: Record<string, string> = {
@@ -1152,7 +1155,7 @@ export default function ProtoApp({
               </button>
             </div>
             <div className="art2 tile">
-              <ItemTile sku={tip.barcode ?? "general"} category="general" />
+              <ItemTile sku={all.find((d) => d.name === tip.title)?.sku ?? tip.barcode ?? "general"} category="general" />
             </div>
           </section>
         )}

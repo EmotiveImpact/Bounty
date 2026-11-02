@@ -106,7 +106,11 @@ test("GET and POST /api/deals", async () => {
   try {
     const got = await api.call("GET", "/api/deals");
     assert.equal(got.status, 200);
-    assert.equal(got.body.deals[0].sku, "jacket");
+    // The route lists the five planner offers and the 30 extra samples,
+    // every one labelled sample.
+    assert.equal(got.body.deals.length, 35);
+    assert.ok(got.body.deals.every((d) => d.sample === true));
+    assert.ok(got.body.deals.some((d) => d.sku === "jacket"));
     const posted = await api.call("POST", "/api/deals", { transport: "Public transport", fare: 380 });
     assert.equal(posted.status, 200);
     assert.equal(posted.body.deals[0].travel.cost, 380);
