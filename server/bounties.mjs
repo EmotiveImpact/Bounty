@@ -849,6 +849,23 @@ export function memberView(db, member, { now }) {
 }
 
 /** Creates a local member profile. Alerts are off until the member opts in. */
+/**
+ * Gives the scout profile linked to an account the early-access position
+ * its plan buys (plans.mjs tipTier). Payments are not switched on, so the
+ * position lasts while the plan is chosen (no end date). A plan without
+ * early access, or no plan, clears it. Earned levels are untouched.
+ */
+export function applyPlanTier(db, email, tipTier) {
+  if (!email) return;
+  const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'members'").get();
+  if (!exists) return;
+  const paid = tipTier && PAID_TIER_IDS.includes(tipTier) ? tipTier : null;
+  db.prepare("UPDATE members SET paid_tier = ?, paid_until = NULL WHERE account_email = ?").run(
+    paid,
+    String(email).toLowerCase(),
+  );
+}
+
 /** The scout profile linked to a signed-in account, or null. */
 export function memberForAccount(db, email) {
   if (!email) return null;

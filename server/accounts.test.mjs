@@ -49,6 +49,15 @@ function memoryStore() {
     async deleteSession(hash) {
       sessions.delete(hash);
     },
+    plans: new Map(),
+    async plan(userId) {
+      return this.plans.get(userId) ?? null;
+    },
+    async setPlan(userId, plan, since) {
+      const row = plan ? { plan, since } : null;
+      this.plans.set(userId, row);
+      return row;
+    },
   };
 }
 
@@ -267,6 +276,47 @@ test("signed in, a scout profile is linked to the account and only that account 
     assert.equal((await call("GET", `/api/members/${id}/alerts`, undefined, ben)).status, 403);
     assert.equal((await call("PATCH", `/api/members/${id}`, { name: "Ana" }, boss)).status, 200, "an operator may act as anyone");
     assert.deepEqual((await call("GET", "/api/members/me")).body, { member: null }, "signed out: no profile");
+  } finally {
+    await api.close();
+  }
+});
+
+test("a plan sets the linked profile's tip timing and how many alert areas it may have", async () => {
+  const { routeModules } = await import("./app.mjs");
+  const { openDb } = await import("./db.mjs");
+  const store = memoryStore();
+  const members = accounts(store, { inviteCode: INVITE });
+  const api = await serve(openDb(":memory:"), routeModules, { members, password: null, operators: [] });
+  const call = async (method, path, body, cookie) => {
+    const res = await fetch(api.base + path, {
+      method,
+      headers: { ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...(cookie ? { Cookie: cookie } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await res.text();
+    return { status: res.status, body: text ? JSON.parse(text) : null, setCookie: res.headers.get("set-cookie") };
+  };
+  try {
+    const ana = sessionCookie(
+      (await call("POST", "/api/auth/signup", { email: "ana@example.co.uk", password: "0123456789", invite: INVITE })).setCookie,
+    );
+    assert.equal((await call("POST", "/api/plans/choose", { plan: "starter" }, ana)).status, 200);
+    const tooMany = await call("POST", "/api/members", { name: "Ana", alertLocalities: ["Camden", "Hackney"] }, ana);
+    assert.equal(tooMany.status, 400);
+    assert.match(tooMany.body.error, /Starter plan covers one area/);
+    const made = await call("POST", "/api/members", { name: "Ana", alertLocalities: ["Camden"], paidTier: "diamond" }, ana);
+    assert.equal(made.status, 201);
+    assert.equal(made.body.member.paid.tier, null, "a member cannot buy a tier by hand; Starter has no early access");
+    const id = made.body.member.id;
+    await call("POST", "/api/plans/choose", { plan: "plus" }, ana);
+    let me = (await call("GET", "/api/members/me", undefined, ana)).body.member;
+    assert.equal(me.paid.tier.id, "emerald", "Plus: tips 3 hours early");
+    assert.equal((await call("PATCH", `/api/members/${id}`, { alertLocalities: ["Camden", "Hackney", "Brixton"] }, ana)).status, 200);
+    assert.equal((await call("PATCH", `/api/members/${id}`, { alertLocalities: ["A", "B", "C", "D"] }, ana)).status, 400);
+    await call("POST", "/api/plans/choose", { plan: "fulltime" }, ana);
+    me = (await call("GET", "/api/members/me", undefined, ana)).body.member;
+    assert.equal(me.paid.tier.id, "diamond", "Full-time: the earliest tips");
+    assert.equal((await call("PATCH", `/api/members/${id}`, { alertLocalities: ["A", "B", "C", "D"] }, ana)).status, 200);
   } finally {
     await api.close();
   }

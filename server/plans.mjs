@@ -7,10 +7,12 @@
 // Money is integer pence. "opens" lists the screens and tools a plan adds;
 // the client hides a screen behind an upgrade card when the member's plan
 // does not open it. tipTier is the paid early-access position a plan gives
-// (MEMBERSHIP_TIERS in opportunity.mjs); it takes effect once sign-in is
-// linked to the scout profile. Scout levels earned from accurate tips are
-// separate and are never bought.
+// (MEMBERSHIP_TIERS in opportunity.mjs), given to the scout profile linked
+// to the account (applyPlanTier); areas is how many alert areas the plan
+// covers (null: any). Scout levels earned from accurate tips are separate
+// and are never bought.
 import { fail, HttpError } from "./http.mjs";
+import { applyPlanTier } from "./bounties.mjs";
 
 export const PAYMENTS_ON = false;
 export const INTRO_PENCE = 100;
@@ -145,6 +147,8 @@ export function routes(db, members = null, { now = () => new Date() } = {}) {
         if (!user) throw new HttpError(401, "Sign in to choose a plan");
         const before = await members.plan(user.id);
         const row = await members.setPlan(user.id, id, id && before?.plan ? before.since : since);
+        // The plan's tip timing reaches the linked scout profile now.
+        applyPlanTier(db, user.email, id ? planById(id).tipTier : null);
         return { current: describeChoice(row) };
       },
     ],

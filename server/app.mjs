@@ -192,6 +192,8 @@ export function createApi(
         body,
         user,
         operator: isOperator(user),
+        // The signed-in member's plan row { plan, since } or null.
+        plan: user && members?.plan ? () => members.plan(user.id) : async () => null,
       });
       if (isReply(value)) return send(value.status, value.body);
       return send(200, value);

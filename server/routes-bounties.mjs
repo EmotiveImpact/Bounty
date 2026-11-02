@@ -19,6 +19,7 @@
 //   clock()                         the server clock (ISO string)
 import { join } from "node:path";
 import { bool, fail, int, reply, text } from "./http.mjs";
+import { planById } from "./plans.mjs";
 import {
   BOUNTY_RULES,
   MEMBERSHIP,
@@ -43,6 +44,7 @@ import {
   createBounty,
   createMember,
   memberForAccount,
+  applyPlanTier,
   dispatchAlerts,
   listBounties,
   listMembers,
@@ -454,6 +456,24 @@ export function routes(db, options = {}) {
     return out;
   };
 
+  // Signed in, a member's own plan decides their paid early access and how
+  // many alert areas they may have; only an operator sets a paid tier by
+  // hand. Returns the body to save and the plan (or null).
+  async function planRules(body, user, operator, planRow) {
+    if (!user || operator) return { input: body, plan: null };
+    const plan = planById((await planRow())?.plan ?? null);
+    const input = { ...body };
+    delete input.paidTier;
+    delete input.paidUntil;
+    const areas = plan?.areas ?? null;
+    if (areas !== null && Array.isArray(input.alertLocalities) && new Set(input.alertLocalities.map((a) => String(a).trim().toLowerCase())).size > areas)
+      fail(
+        `Your ${plan.name} plan covers ${areas === 1 ? "one area" : `${areas} areas`}. ` +
+          (plan.id === "starter" ? "Plus covers 3 and Full-time any number." : "Full-time covers any number."),
+      );
+    return { input, plan };
+  }
+
   // Signed in with member accounts, a member may act only as the scout
   // profile linked to their own account; an operator may act as anyone.
   // Without accounts (this computer) user is null and nothing changes.
@@ -495,21 +515,25 @@ export function routes(db, options = {}) {
     [
       "POST",
       "/api/members",
-      ({ body, user }) => {
+      async ({ body, user, operator, plan: planRow }) => {
         const now = clock();
-        // Signed in, the new profile is linked to the account (one each).
-        const member = createMember(db, body0(body), { now, accountEmail: user?.email ?? null });
+        const { input, plan } = await planRules(body0(body), user, operator, planRow);
+        // Signed in, the new profile is linked to the account (one each) and
+        // gets the early access its plan buys.
+        const made = createMember(db, input, { now, accountEmail: user?.email ?? null });
+        if (user && !operator) applyPlanTier(db, user.email, plan?.tipTier ?? null);
+        const member = user && !operator ? requireMember(db, made.id) : made;
         return reply(201, { member: memberView(db, member, { now }), notice: TERMS.privacy });
       },
     ],
     [
       "PATCH",
       "/api/members/:id",
-      async ({ params, body, user, operator }) => {
+      async ({ params, body, user, operator, plan: planRow }) => {
         ownProfile(user, operator, params.id);
         const now = clock();
         const memberId = pathId(params.id, "Member");
-        const input = body0(body);
+        const { input } = await planRules(body0(body), user, operator, planRow);
         const before = requireMember(db, memberId);
         const member = updateMember(db, memberId, input, { now });
         // A new or changed seller name changes how many competing listings
