@@ -373,6 +373,7 @@ export default function TipsScreen({ go }: { go: (v: "deals" | "planner") => voi
                 tiers={data.tiers}
                 paidTierIds={data.paidTierIds}
                 member={null}
+                planDecides={accounts}
                 onSaved={(m) => {
                   setJoin(false);
                   choose(m.id);
