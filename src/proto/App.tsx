@@ -410,8 +410,14 @@ export default function ProtoApp({
   const note = sample ? (
     <div className="note">
       <span>
-        <b>Sample data.</b> Illustrative {areas.join(", ") || "sample"} offers
-        with modelled sales, so nothing here is a buy alert yet.
+        <b>
+          {all.every((d) => d.sample)
+            ? "These are made-up examples, not real deals."
+            : "Some of these are made-up examples."}
+        </b>{" "}
+        Cards marked example use invented shop prices, sale prices and shelf
+        counts to show how the screen works. Only the sums are real. Real deals
+        will appear here once real sold prices are connected.
       </span>
     </div>
   ) : null;
@@ -427,7 +433,7 @@ export default function ProtoApp({
       return {
         f: "old",
         text: d.sample
-          ? "Sample: never checked on the shelf"
+          ? "Example: made up, never checked on a shelf"
           : "Not checked on the shelf yet",
       };
     const h = (Date.now() - at) / 3.6e6;
@@ -1371,13 +1377,14 @@ export default function ProtoApp({
           <div className="pinfo">
             <span className={"vp " + d.verdict}>
               {VL[d.verdict]}
-              {d.sample ? " · sample" : ""}
+              {d.sample ? " · example, not a real deal" : ""}
             </span>
             <h1>{d.name}</h1>
             <span className="sub">
               {d.variant ? d.variant + " · " : ""}
-              {d.sales.length} completed{" "}
+              {d.sales.length} {d.sample ? "pretend" : "completed"}{" "}
               {d.sales.length === 1 ? "sale" : "sales"}
+              {d.sample ? ", not real eBay data" : ""}
               {m !== null ? ` · about ${m} sold a month` : ""}
               {d.competingListings !== null
                 ? ` · ${d.competingListings} listed for sale now`
@@ -1538,13 +1545,21 @@ export default function ProtoApp({
           </div>
           <div className="panel" ref={salesRef}>
             <h3>
-              Completed sales <small>sold, not asking prices</small>
+              {d.sample ? (
+                <>
+                  Pretend sale prices <small>made up for this example</small>
+                </>
+              ) : (
+                <>
+                  Completed sales <small>sold, not asking prices</small>
+                </>
+              )}
             </h3>
             <div className="sales">
               {d.sales.length ? (
                 [...d.sales].reverse().map((s, i) => (
                   <div key={i}>
-                    <span>Completed sale{d.sample ? " (modelled)" : ""}</span>
+                    <span>{d.sample ? "Pretend sale (made up)" : "Completed sale"}</span>
                     <b className="num">{money(s)}</b>
                   </div>
                 ))
