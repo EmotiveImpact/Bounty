@@ -25,6 +25,7 @@ import Blocks from "../ui/Blocks";
 import Scan from "../Scan";
 import TipsScreen from "./TipsScreen";
 import Admin from "./Admin";
+import PlansScreen, { PlanGate, PlanLine } from "./PlansScreen";
 import { PageHead } from "../ui/kit";
 import { GoalsSettings } from "../Goals";
 import SignOff from "./SignOff";
@@ -60,7 +61,8 @@ export type View =
   | "profile"
   | "watching"
   | "blocks"
-  | "admin";
+  | "admin"
+  | "plans";
 
 // The address for each screen. The older screens keep their old names, so
 // links inside them such as #Planner still work.
@@ -78,6 +80,7 @@ const HASH: Record<View, string> = {
   watching: "Saved",
   blocks: "Blocks",
   admin: "Admin",
+  plans: "Plans",
 };
 /* When a find is saved the heart pops and a few short lines flick out
    around it, like Pinterest. Skipped for people who ask for reduced motion. */
@@ -936,14 +939,7 @@ export default function ProtoApp({
                   <LensBtns lens={lens} setLens={setLens} />
                 </div>
                 <div className="pm-card">
-                  <div className="pm-row">
-                    <span>
-                      Plus plan{" "}
-                      <span className="badge sample-chip">Sample</span>
-                    </span>
-                    <b>£14.99 a month</b>
-                  </div>
-                  <small>Plans and prices are not set yet.</small>
+                  <PlanLine go={(v) => go(v)} />
                 </div>
                 <div className="pm-card">
                   <div className="pm-row">
@@ -969,6 +965,9 @@ export default function ProtoApp({
                   </button>
                   <button type="button" onClick={() => go("watching")}>
                     Saved finds
+                  </button>
+                  <button type="button" onClick={() => go("plans")}>
+                    Plans
                   </button>
                   <button type="button" onClick={() => go("admin")}>
                     Admin (operators)
@@ -1754,16 +1753,8 @@ export default function ProtoApp({
           </p>
         </div>
         <div className="panel">
-          <h3>
-            Your plan <span className="badge sample-chip">Sample</span>
-          </h3>
-          <div className="set">
-            <span>Plus</span>
-            <b>£14.99 a month</b>
-          </div>
-          <p className="sub" style={{ fontSize: 13 }}>
-            Plans and prices are still being decided. Nothing is charged.
-          </p>
+          <h3>Your plan</h3>
+          <PlanLine go={(v) => go(v)} wide />
         </div>
       </div>
       <div className="legacy" style={{ marginTop: 20 }}>
@@ -2174,19 +2165,35 @@ export default function ProtoApp({
   else if (view === "scan") body = <Scan />;
   else if (view === "tips") body = <TipsScreen go={(v) => go(v)} />;
   else if (view === "admin") body = <Admin />;
+  else if (view === "plans") body = <PlansScreen />;
   else if (view === "research")
     body = (
-      <div className="rs">
-        <PageHead
-          title="Research"
-          tint="butter"
-          lead="Check one find properly before you buy: the exact item, what it really sold for, your costs and fees, and a straight answer."
-        />
-        <div className="legacy">{legacy(view)}</div>
-      </div>
+      <PlanGate
+        feature="research"
+        title="Research"
+        tint="butter"
+        what="Check one find properly before you buy: the exact item, what it really sold for, your costs and fees, and a straight answer."
+        go={(v) => go(v)}
+      >
+        <div className="rs">
+          <PageHead
+            title="Research"
+            tint="butter"
+            lead="Check one find properly before you buy: the exact item, what it really sold for, your costs and fees, and a straight answer."
+          />
+          <div className="legacy">{legacy(view)}</div>
+        </div>
+      </PlanGate>
     );
   else if (view === "planner")
     body = (
+      <PlanGate
+        feature="trip"
+        title="My trip"
+        tint="pistachio"
+        what="Plan the route shop by shop, with fuel, time and cash, and see whether the trip is worth it before you set off."
+        go={(v) => go(v)}
+      >
       <TripPage
         deals={all}
         trip={trip}
@@ -2200,6 +2207,7 @@ export default function ProtoApp({
         go={(v) => go(v)}
         legacy={legacy(view)}
       />
+      </PlanGate>
     );
   else if (view === "stock")
     body = <StockScreen legacy={legacy(view)} go={(v) => go(v)} />;
@@ -2336,6 +2344,7 @@ function MegaMenu({ go }: { go: (v: View) => void }) {
         <h4>Account</h4>
         {it("profile", "Alerts", "What we tell you about")}
         {it("profile", "Profile and settings", "Area, travel, photo")}
+        {it("plans", "Plans", "Your membership")}
         <div className="mmpts">
           <small>Scout points · sample</small>
           <b>460 · Trusted</b>

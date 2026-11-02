@@ -32,7 +32,8 @@
   :scope[data-tab="money"] { --tab: var(--c-candy); }
   :scope[data-tab="planner"] { --tab: var(--c-pistachio); }
   :scope[data-tab="research"] { --tab: var(--c-butter); }
-  :scope[data-tab="watching"] { --tab: var(--c-lemon); }
+  :scope[data-tab="watching"],
+  :scope[data-tab="plans"] { --tab: var(--c-lemon); }
   :scope[data-tab="sources"],
   :scope[data-tab="blocks"],
   :scope[data-tab="profile"] { --tab: var(--c-lilac); }

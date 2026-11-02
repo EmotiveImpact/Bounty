@@ -21,6 +21,7 @@ import {
   Window,
   useToast,
 } from "../ui/kit";
+import { TaxExport } from "./TaxExport";
 import "./money.css";
 
 type Summary = {
@@ -85,7 +86,7 @@ function taxMonths() {
 type Props = {
   lens: Lens;
   lensButtons: React.ReactNode;
-  go: (view: "stock" | "profile" | "planner") => void;
+  go: (view: "stock" | "profile" | "planner" | "plans") => void;
 };
 
 export default function MoneyScreen(props: Props) {
@@ -333,6 +334,7 @@ function MoneyInner({ lens, lensButtons, go }: Props) {
         HMRC counts your total sales before fees, which is more than what was paid out, so treat this as a low
         guide. Not tax advice.
       </p>
+      <TaxExport go={go} />
     </Card>
   );
 

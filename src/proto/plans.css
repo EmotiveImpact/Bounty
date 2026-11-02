@@ -1,0 +1,99 @@
+/* Plans page and the upgrade card (PlansScreen.tsx). */
+.pl { display: grid; gap: 20px; font-family: var(--k-sans); color: var(--k-text); min-width: 0; }
+.pl-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: stretch; }
+.pl-card {
+  display: grid;
+  grid-template-rows: auto auto auto auto 1fr;
+  gap: 14px;
+  padding: 24px;
+  border-radius: 28px;
+  background: var(--k-surface);
+  border: 1px solid var(--k-line);
+  box-shadow: var(--k-shadow);
+  min-width: 0;
+}
+.pl-card.mine { border: 2px solid var(--k-ink); }
+.pl-top {
+  margin: -24px -24px 0;
+  padding: 22px 24px 20px;
+  border-radius: 27px 27px 0 0;
+  background: var(--k-tint);
+  display: grid;
+  gap: 6px;
+}
+.pl-card.mine .pl-top { border-radius: 26px 26px 0 0; }
+.pl-name { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.pl-name h2 { margin: 0; font-size: 34px; line-height: 1; color: var(--k-ink); }
+.pl-top p { margin: 0; font-size: 14px; line-height: 1.45; color: var(--k-ink); min-height: 2.9em; }
+.pl-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 11px;
+  border-radius: 999px;
+  background: var(--k-ink);
+  color: #fff;
+  font: 700 12px/1 var(--k-sans);
+  white-space: nowrap;
+}
+.pl-price { display: flex; align-items: baseline; gap: 8px; }
+.pl-price b { font-size: 44px; line-height: 1; color: var(--k-ink); font-weight: 500; }
+.pl-price span { color: var(--k-muted); font-size: 14px; }
+.pl-intro { margin: -6px 0 0; font-size: 13.5px; color: var(--k-muted); }
+.pl-card > .k-btn { width: 100%; }
+.pl-list { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 10px; align-content: start; }
+.pl-list li { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 10px; align-items: start; font-size: 14px; line-height: 1.4; }
+.pl-list li.pl-lead { display: block; font-weight: 700; color: var(--k-ink); }
+.pl-tick { width: 20px; height: 20px; color: var(--k-profit); flex: none; }
+.pl-no { color: var(--k-line-2); font-weight: 700; }
+
+.pl-scroll { overflow-x: auto; margin: 0 -4px; }
+.pl-table { width: 100%; min-width: 460px; border-collapse: collapse; font-size: 14px; }
+.pl-table th,
+.pl-table td { padding: 12px 10px; border-bottom: 1px solid var(--k-line); text-align: center; }
+.pl-table thead th { font: 700 14px/1.2 var(--k-sans); color: var(--k-ink); }
+.pl-table tbody th { text-align: left; font-weight: 500; color: var(--k-text); }
+.pl-table tbody tr:last-child > * { border-bottom: 0; }
+.pl-table td.pl-txt { font-size: 13px; color: var(--k-ink); }
+.pl-table .pl-tick { display: inline-block; vertical-align: middle; }
+
+.pl-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.pl-facts p { margin: 0; font-size: 14px; line-height: 1.55; color: var(--k-muted); }
+.pl-stop { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 14px; }
+
+.pl-gate { display: grid; gap: 18px; }
+.pl-gate-body { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 16px; align-items: start; }
+.pl-lock {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  background: var(--k-lemon);
+  color: var(--k-ink);
+}
+.pl-lock svg { width: 26px; height: 26px; }
+.pl-gate h2 { margin: 2px 0 6px; font-size: 26px; line-height: 1.1; color: var(--k-ink); }
+.pl-gate p { margin: 0; font-size: 14.5px; line-height: 1.55; color: var(--k-muted); max-width: 60ch; }
+.pl-gate-acts { display: flex; gap: 10px; }
+
+@media (max-width: 1100px) {
+  .pl-top p { min-height: 0; }
+  .pl-grid { grid-template-columns: 1fr; max-width: 560px; }
+  .pl-facts { grid-template-columns: 1fr; }
+}
+@media (max-width: 640px) {
+  .pl-card { padding: 20px; border-radius: 24px; }
+  .pl-top { margin: -20px -20px 0; padding: 18px 20px; border-radius: 23px 23px 0 0; }
+  .pl-name h2 { font-size: 30px; }
+  .pl-price b { font-size: 38px; }
+  .pl-gate-acts .k-btn { flex: 1 1 auto; }
+  .pl-scroll { margin: 0; }
+  .pl-table { min-width: 0; font-size: 13px; table-layout: fixed; }
+  .pl-table th, .pl-table td { padding: 10px 4px; }
+  .pl-table thead th { font-size: 12.5px; }
+  .pl-table thead td { width: 40%; }
+  .pl-table tbody th { padding-right: 8px; }
+  .pl-rest { display: none; }
+  .pl-table td.pl-txt { font-size: 12px; }
+}

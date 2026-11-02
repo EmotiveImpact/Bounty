@@ -12,6 +12,7 @@ import Ledger from "./Ledger";
 import Sources from "./Sources";
 import ProtoApp, { type View } from "./proto/App";
 import SignIn, { type Member } from "./SignIn";
+import { reloadPlans } from "./plans";
 import { SIGN_IN_EVENT } from "./api";
 
 // The trip planner, with the several-items basket plan under it. Money has
@@ -121,6 +122,7 @@ function Root() {
                     body: "{}",
                   }).catch(() => undefined);
                   setAuth({ ...auth, member: null });
+                  reloadPlans();
                 },
               }
             : undefined
@@ -130,7 +132,7 @@ function Root() {
         <SignIn
           inviteOpen={auth.inviteOpen}
           onClose={close}
-          onSignedIn={(member) => (setAuth({ ...auth, required: true, member }), setSigningIn(false))}
+          onSignedIn={(member) => (setAuth({ ...auth, required: true, member }), setSigningIn(false), reloadPlans())}
         />
       )}
     </>
