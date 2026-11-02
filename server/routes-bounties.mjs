@@ -42,6 +42,7 @@ import {
   openBountyIds,
   createBounty,
   createMember,
+  memberForAccount,
   dispatchAlerts,
   listBounties,
   listMembers,
@@ -453,6 +454,19 @@ export function routes(db, options = {}) {
     return out;
   };
 
+  // Signed in with member accounts, a member may act only as the scout
+  // profile linked to their own account; an operator may act as anyone.
+  // Without accounts (this computer) user is null and nothing changes.
+  function ownProfile(user, operator, memberId) {
+    if (!user || operator || memberId === undefined || memberId === null) return;
+    const member = Number.isInteger(Number(memberId))
+      ? db.prepare("SELECT account_email FROM members WHERE id = ?").get(Number(memberId))
+      : null;
+    if (!member) return; // the handler answers "not found"
+    if (member.account_email !== String(user.email).toLowerCase())
+      fail("That scout profile belongs to another account", 403);
+  }
+
   return [
     [
       "GET",
@@ -469,18 +483,30 @@ export function routes(db, options = {}) {
       },
     ],
     [
+      // The scout profile linked to the signed-in account, or null (always
+      // null signed out or without accounts).
+      "GET",
+      "/api/members/me",
+      ({ user }) => {
+        const member = memberForAccount(db, user?.email);
+        return { member: member ? memberView(db, member, { now: clock() }) : null };
+      },
+    ],
+    [
       "POST",
       "/api/members",
-      ({ body }) => {
+      ({ body, user }) => {
         const now = clock();
-        const member = createMember(db, body0(body), { now });
+        // Signed in, the new profile is linked to the account (one each).
+        const member = createMember(db, body0(body), { now, accountEmail: user?.email ?? null });
         return reply(201, { member: memberView(db, member, { now }), notice: TERMS.privacy });
       },
     ],
     [
       "PATCH",
       "/api/members/:id",
-      async ({ params, body }) => {
+      async ({ params, body, user, operator }) => {
+        ownProfile(user, operator, params.id);
         const now = clock();
         const memberId = pathId(params.id, "Member");
         const input = body0(body);
@@ -546,7 +572,8 @@ export function routes(db, options = {}) {
     [
       "GET",
       "/api/members/:id/alerts",
-      ({ params }) => {
+      ({ params, body, user, operator }) => {
+        ownProfile(user, operator, params.id);
         const memberId = pathId(params.id, "Member");
         const now = clock();
         return {
@@ -643,7 +670,8 @@ export function routes(db, options = {}) {
     [
       "POST",
       "/api/bounties/:id/claims",
-      async ({ params, body }) => {
+      async ({ params, body, user, operator }) => {
+        ownProfile(user, operator, body?.memberId);
         const now = clock();
         const input = body0(body);
         const bountyId = pathId(params.id, "Bounty");
@@ -700,7 +728,8 @@ export function routes(db, options = {}) {
     [
       "POST",
       "/api/bounties/:id/claim-check",
-      async ({ params, body }) => {
+      async ({ params, body, user, operator }) => {
+        ownProfile(user, operator, body?.memberId);
         // A member's own figures for a trip before they claim: the estimate
         // re-run at their units with their journey, thresholds, hourly
         // floor and cash date, beside the units already claimed on the
@@ -752,7 +781,8 @@ export function routes(db, options = {}) {
     [
       "POST",
       "/api/bounties/:id/eligibility",
-      ({ params, body }) => {
+      ({ params, body, user, operator }) => {
+        ownProfile(user, operator, body?.memberId);
         // A member's answer to a promotion question: "qualifies", "not",
         // "used" (already used a first-order offer at this retailer), or
         // "undo" (an answer given by mistake: the question is asked again).
@@ -782,7 +812,8 @@ export function routes(db, options = {}) {
     [
       "POST",
       "/api/claims/:id/release",
-      async ({ params, body }) => {
+      async ({ params, body, user, operator }) => {
+        ownProfile(user, operator, body?.memberId);
         const now = clock();
         const input = body0(body);
         const released = releaseClaim(db, { claimId: pathId(params.id, "Claim"), memberId: input.memberId, now });
@@ -795,7 +826,8 @@ export function routes(db, options = {}) {
     [
       "POST",
       "/api/claims/:id/cash",
-      async ({ params, body }) => {
+      async ({ params, body, user, operator }) => {
+        ownProfile(user, operator, body?.memberId);
         // "Check my figures" under a live claim (round 5b): the member who
         // holds it gives the cash they can spend on this trip (a claim made
         // before the cash was asked for stores none), and every claim on the
@@ -829,7 +861,8 @@ export function routes(db, options = {}) {
     [
       "POST",
       "/api/claims/:id/complete",
-      async ({ params, body }) => {
+      async ({ params, body, user, operator }) => {
+        ownProfile(user, operator, body?.memberId);
         const now = clock();
         const input = body0(body);
         const done = completeClaim(db, {
@@ -859,7 +892,8 @@ export function routes(db, options = {}) {
     [
       "POST",
       "/api/claims/:id/resale",
-      async ({ params, body }) => {
+      async ({ params, body, user, operator }) => {
+        ownProfile(user, operator, body?.memberId);
         // The member who bought units through a claim records how many they
         // sold or returned to the shop (round 5), so those units stop
         // counting against the resale demand for the item.
@@ -914,7 +948,8 @@ export function routes(db, options = {}) {
     [
       "POST",
       "/api/bounties/:id/reports",
-      async ({ params, body }) => {
+      async ({ params, body, user, operator }) => {
+        ownProfile(user, operator, body?.memberId);
         const now = clock();
         const input = body0(body);
         const bountyId = pathId(params.id, "Bounty");

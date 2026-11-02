@@ -234,3 +234,40 @@ test("every operator route names a real route", async () => {
   const real = new Set(routeModules.flatMap((m) => m.routes(memoryDb())).map(([method, pattern]) => `${method} ${pattern}`));
   for (const r of OPERATOR_ROUTES) assert.ok(real.has(r), r);
 });
+
+test("signed in, a scout profile is linked to the account and only that account acts as it", async () => {
+  const { routeModules } = await import("./app.mjs");
+  const { openDb } = await import("./db.mjs");
+  const store = memoryStore();
+  const members = accounts(store, { inviteCode: INVITE });
+  const api = await serve(openDb(":memory:"), routeModules, { members, password: null, operators: ["boss@example.co.uk"] });
+  const call = async (method, path, body, cookie) => {
+    const res = await fetch(api.base + path, {
+      method,
+      headers: { ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...(cookie ? { Cookie: cookie } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await res.text();
+    return { status: res.status, body: text ? JSON.parse(text) : null, setCookie: res.headers.get("set-cookie") };
+  };
+  const signUp = async (email) =>
+    sessionCookie((await call("POST", "/api/auth/signup", { email, password: "0123456789", invite: INVITE })).setCookie);
+  try {
+    const ana = await signUp("ana@example.co.uk");
+    const ben = await signUp("ben@example.co.uk");
+    const boss = await signUp("boss@example.co.uk");
+    assert.deepEqual((await call("GET", "/api/members/me", undefined, ana)).body, { member: null });
+    const made = await call("POST", "/api/members", { name: "Ana" }, ana);
+    assert.equal(made.status, 201);
+    const id = made.body.member.id;
+    assert.equal((await call("GET", "/api/members/me", undefined, ana)).body.member.id, id);
+    assert.equal((await call("POST", "/api/members", { name: "Ana again" }, ana)).body.member.id, id, "one profile per account");
+    assert.equal((await call("PATCH", `/api/members/${id}`, { name: "Ana K" }, ana)).status, 200);
+    assert.equal((await call("PATCH", `/api/members/${id}`, { name: "Not Ana" }, ben)).status, 403);
+    assert.equal((await call("GET", `/api/members/${id}/alerts`, undefined, ben)).status, 403);
+    assert.equal((await call("PATCH", `/api/members/${id}`, { name: "Ana" }, boss)).status, 200, "an operator may act as anyone");
+    assert.deepEqual((await call("GET", "/api/members/me")).body, { member: null }, "signed out: no profile");
+  } finally {
+    await api.close();
+  }
+});

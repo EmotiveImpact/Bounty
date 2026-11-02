@@ -5,7 +5,8 @@
 // window with the full tip. Operator tools (create a tip, verify reports,
 // send alerts, acting as anyone) live on the Admin page.
 import React, { useCallback, useEffect, useState } from "react";
-import { api, money } from "../api";
+import { api, money, SIGN_IN_EVENT } from "../api";
+import { usePlans } from "../plans";
 import type { Deal } from "../Deals";
 import {
   ACTING_KEY,
@@ -89,6 +90,25 @@ export default function TipsScreen({ go }: { go: (v: "deals" | "planner") => voi
   const [tips, setTips] = useState<Bounty[] | null>(null);
   const [error, setError] = useState("");
   const [me, setMe] = useState<number | null>(readActing);
+  // With member accounts (signedIn not null) your scout profile is the one
+  // linked to your sign-in: no choosing. Without accounts, on this computer,
+  // you pick who you are as before.
+  const signedIn = usePlans().info?.signedIn ?? null;
+  const accounts = signedIn !== null;
+  const [linked, setLinked] = useState<{ id: number; name: string } | null>(null);
+  useEffect(() => {
+    if (!signedIn) {
+      setLinked(null);
+      if (signedIn === false) setMe(null);
+      return;
+    }
+    api<{ member: { id: number; name: string } | null }>("members/me")
+      .then((d) => {
+        setLinked(d.member);
+        setMe(d.member ? d.member.id : null);
+      })
+      .catch(() => undefined);
+  }, [signedIn]);
   const [tab, setTab] = useState<"go" | "all">("all");
   const [open, setOpen] = useState<number | null>(null);
   const [join, setJoin] = useState(false);
@@ -121,7 +141,9 @@ export default function TipsScreen({ go }: { go: (v: "deals" | "planner") => voi
       .catch(() => undefined);
   }, []);
 
-  const member = me !== null ? (data?.members.find((m) => m.id === me) ?? null) : null;
+  // Signed in, only your own linked profile can be you.
+  const activeId = accounts ? (linked?.id ?? null) : me;
+  const member = activeId !== null ? (data?.members.find((m) => m.id === activeId) ?? null) : null;
   const list = tips ?? [];
   const live = list.filter((b) => b.status === "open");
   const ready = live.filter((b) => b.trip.go);
@@ -211,7 +233,21 @@ export default function TipsScreen({ go }: { go: (v: "deals" | "planner") => voi
         tint="sky"
         lead="Shelf finds from other scouts. Each tip has a set number of places, so it stays worth the trip."
         aside={
-          data && data.members.length > 0 ? (
+          accounts ? (
+            !signedIn ? (
+              <Button variant="main" onClick={() => window.dispatchEvent(new Event(SIGN_IN_EVENT))}>
+                Sign in to scout
+              </Button>
+            ) : linked ? (
+              <span className="tps-me">
+                <span>Scouting as</span> <b>{linked.name}</b>
+              </span>
+            ) : data ? (
+              <Button variant="main" onClick={() => setJoin(true)}>
+                Create your scout profile
+              </Button>
+            ) : null
+          ) : data && data.members.length > 0 ? (
             <label className="tps-me">
               <span>Claiming as</span>
               <Select value={me ?? ""} onChange={(e) => e.target.value && choose(Number(e.target.value))}>
@@ -242,7 +278,7 @@ export default function TipsScreen({ go }: { go: (v: "deals" | "planner") => voi
             <Figure label="Places left" value={String(placesLeft)} note="across live tips" />
             <Figure label="Go now" value={String(ready.length)} tone={ready.length ? "profit" : undefined} note="shelf checked, places open" />
           </Figures>
-          {!member && data && data.members.length > 0 && (
+          {!accounts && !member && data && data.members.length > 0 && (
             <Notice title="Choose your profile.">Pick who you are under Claiming as to claim a place or report a shelf.</Notice>
           )}
           <Tabs
@@ -340,6 +376,7 @@ export default function TipsScreen({ go }: { go: (v: "deals" | "planner") => voi
                 onSaved={(m) => {
                   setJoin(false);
                   choose(m.id);
+                  if (accounts) setLinked({ id: m.id, name: m.name });
                   load();
                 }}
               />

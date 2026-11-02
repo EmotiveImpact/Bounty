@@ -173,8 +173,9 @@ export function createApi(
       // routes marked { read: true } that only work something out, are open.
       // Saving or changing anything needs a signed-in member.
       const reading = method === "GET" || method === "HEAD" || found.route.options.read === true;
+      // The signed-in member, or null (always null without accounts).
+      const user = members ? await members.user(req) : null;
       if (members && (!reading || found.route.options.operator)) {
-        const user = await members.user(req);
         if (!user) return send(401, { signIn: true, error: "Sign in to save changes" });
         // Admin tools: operators only, reads included.
         if (found.route.options.operator && !isOperator(user))
@@ -189,6 +190,8 @@ export function createApi(
         url,
         params: found.params,
         body,
+        user,
+        operator: isOperator(user),
       });
       if (isReply(value)) return send(value.status, value.body);
       return send(200, value);
