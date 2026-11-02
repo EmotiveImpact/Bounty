@@ -120,10 +120,38 @@
   }
   .so-file {
     margin: 12px 0 4px;
+    justify-items: start;
   }
-  .so-file input {
-    font-size: 13px;
+  .so-filebtn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    height: 40px;
+    padding: 0 18px;
+    border: 1px solid var(--ink);
+    border-radius: 999px;
+    background: #fff;
     color: var(--ink);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .so-filebtn:hover {
+    background: var(--tile, #f3f3f5);
+  }
+  .so-filebtn:focus-within {
+    outline: 3px solid #a9bcff;
+    outline-offset: 2px;
+  }
+  .so-filebtn input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+  .so-filename {
+    color: var(--muted);
+    font-size: 12px;
   }
   .so-total {
     display: flex;
