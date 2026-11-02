@@ -33,11 +33,32 @@ type ScanResult =
   | { found: false; barcode: string | null; verdict: Verdict; reason: string };
 type Taken = { sku: string; name: string; units: number; unitProfit: number; unitCost: number; sample: boolean };
 
-// The camera reader built into some browsers (Chrome on Android). Others get
-// the typed barcode box only.
+// The camera reader. Chrome on Android has one built in; iPhones and other
+// browsers get the same reader from the free ZXing library (barcode-detector,
+// MIT), loaded only when the camera is first used. Its .wasm file is served
+// from this site, never a CDN.
 type Detector = { detect: (src: CanvasImageSource) => Promise<{ rawValue: string }[]> };
-const BarcodeDetectorCtor = (globalThis as unknown as { BarcodeDetector?: new (o?: unknown) => Detector })
-  .BarcodeDetector;
+type DetectorCtor = new (o?: unknown) => Detector;
+const NativeDetector = (globalThis as unknown as { BarcodeDetector?: DetectorCtor }).BarcodeDetector;
+const FORMATS = ["ean_13", "ean_8", "upc_a", "upc_e"];
+async function makeDetector(): Promise<Detector> {
+  if (NativeDetector) {
+    const supported: string[] | undefined = await (
+      NativeDetector as unknown as { getSupportedFormats?: () => Promise<string[]> }
+    ).getSupportedFormats?.().catch((): string[] => []);
+    if (!supported || FORMATS.some((f) => supported.includes(f))) return new NativeDetector({ formats: FORMATS });
+  }
+  const [{ BarcodeDetector, prepareZXingModule }, { default: wasmUrl }] = await Promise.all([
+    import("barcode-detector/ponyfill"),
+    import("zxing-wasm/reader/zxing_reader.wasm?url"),
+  ]);
+  prepareZXingModule({
+    overrides: { locateFile: (path: string, prefix: string) => (path.endsWith(".wasm") ? wasmUrl : prefix + path) },
+  });
+  return new BarcodeDetector({ formats: FORMATS as never }) as unknown as Detector;
+}
+// Any browser that can open the camera can scan.
+const canUseCamera = typeof navigator !== "undefined" && Boolean(navigator.mediaDevices?.getUserMedia);
 
 const TALLY_KEY = "bounty-scan-tally";
 function loadTally(): Taken[] {
@@ -147,7 +168,7 @@ export default function Scan() {
 
       <div className="sc-grid">
         <Card className="sc-form">
-          {BarcodeDetectorCtor && <Camera onCode={(c) => (setCode(c), check({ barcode: c }))} />}
+          {canUseCamera && <Camera onCode={(c) => (setCode(c), check({ barcode: c }))} />}
           <form
             className="k-form"
             noValidate
@@ -156,7 +177,7 @@ export default function Scan() {
               if (code.trim()) check({ barcode: code.trim() });
             }}
           >
-            <Field label="Barcode" htmlFor="scan-code" hint={BarcodeDetectorCtor ? undefined : "This browser cannot read barcodes with the camera yet, so type the digits. Camera scanning works in Chrome on Android."}>
+            <Field label="Barcode" htmlFor="scan-code" hint={canUseCamera ? undefined : "This browser cannot open the camera, so type the digits under the bars."}>
               <Input
                 id="scan-code"
                 inputMode="numeric"
@@ -361,7 +382,7 @@ function Tally({ tally, onClear }: { tally: Taken[]; onClear: () => void }) {
   );
 }
 
-/** The phone camera, read by the browser's own barcode reader. */
+/** The phone camera, read by the browser's barcode reader or the ZXing one. */
 function Camera({ onCode }: { onCode: (code: string) => void }) {
   const [on, setOn] = useState(false);
   const [error, setError] = useState("");
@@ -369,12 +390,12 @@ function Camera({ onCode }: { onCode: (code: string) => void }) {
   const report = useRef(onCode);
   report.current = onCode;
   useEffect(() => {
-    if (!on || !BarcodeDetectorCtor) return;
+    if (!on) return;
     let stream: MediaStream | null = null;
     let stop = false;
-    const detector = new BarcodeDetectorCtor({ formats: ["ean_13", "ean_8", "upc_a", "upc_e"] });
     (async () => {
       try {
+        const detector = await makeDetector();
         stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
         if (stop || !video.current) return;
         video.current.srcObject = stream;
