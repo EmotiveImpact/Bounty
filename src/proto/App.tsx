@@ -15,9 +15,21 @@ import {
   saveProfile,
   type Lens,
 } from "../api";
-import { ItemTile, byMode } from "../Planner";
+import { BuyingRules, ItemTile, byMode } from "../Planner";
+import { CrewArt } from "./CrewArt";
 import { savedExtras, type Deal } from "../Deals";
 import { Ico } from "./icons";
+import MoneyScreen from "./Money";
+import TripPage from "./TripPage";
+import StockScreen from "./StockScreen";
+import Blocks from "../ui/Blocks";
+import Scan from "../Scan";
+import TipsScreen from "./TipsScreen";
+import Admin from "./Admin";
+import PlansScreen, { PlanGate, PlanLine } from "./PlansScreen";
+import CrewScreen, { CrewBand } from "./CrewScreen";
+import { PageHead } from "../ui/kit";
+import { GoalsSettings } from "../Goals";
 import SignOff from "./SignOff";
 import "./proto.css";
 import "./proto-extra.css";
@@ -49,7 +61,11 @@ export type View =
   | "research"
   | "sources"
   | "profile"
-  | "watching";
+  | "watching"
+  | "blocks"
+  | "admin"
+  | "plans"
+  | "crew";
 
 // The address for each screen. The older screens keep their old names, so
 // links inside them such as #Planner still work.
@@ -65,6 +81,10 @@ const HASH: Record<View, string> = {
   sources: "Sources",
   profile: "Profile",
   watching: "Saved",
+  blocks: "Blocks",
+  admin: "Admin",
+  plans: "Plans",
+  crew: "Crew",
 };
 /* When a find is saved the heart pops and a few short lines flick out
    around it, like Pinterest. Skipped for people who ask for reduced motion. */
@@ -390,8 +410,14 @@ export default function ProtoApp({
   const note = sample ? (
     <div className="note">
       <span>
-        <b>Sample data.</b> Illustrative {areas.join(", ") || "sample"} offers
-        with modelled sales, so nothing here is a buy alert yet.
+        <b>
+          {all.every((d) => d.sample)
+            ? "These are made-up examples, not real deals."
+            : "Some of these are made-up examples."}
+        </b>{" "}
+        Cards marked example use invented shop prices, sale prices and shelf
+        counts to show how the screen works. Only the sums are real. Real deals
+        will appear here once real sold prices are connected.
       </span>
     </div>
   ) : null;
@@ -407,7 +433,7 @@ export default function ProtoApp({
       return {
         f: "old",
         text: d.sample
-          ? "Sample: never checked on the shelf"
+          ? "Example: made up, never checked on a shelf"
           : "Not checked on the shelf yet",
       };
     const h = (Date.now() - at) / 3.6e6;
@@ -564,13 +590,11 @@ export default function ProtoApp({
         {nav("planner", "Trip")}
         {nav("research", "Research")}
         {nav("watching", "Saved", "", "heart")}
-        {nav("sources", "Sources")}
       </span>
       <span className="more2">
         <span className="head">Tools</span>
-        {nav("planner", "Trip planner")}
+        {nav("planner", "My trip")}
         {nav("research", "Research")}
-        {nav("sources", "Sources")}
         <span className="head">You</span>
         {nav("watching", "Saved", "", "heart")}
         {nav("profile", "Alerts", "", "bell")}
@@ -925,14 +949,7 @@ export default function ProtoApp({
                   <LensBtns lens={lens} setLens={setLens} />
                 </div>
                 <div className="pm-card">
-                  <div className="pm-row">
-                    <span>
-                      Plus plan{" "}
-                      <span className="badge sample-chip">Sample</span>
-                    </span>
-                    <b>£14.99 a month</b>
-                  </div>
-                  <small>Plans and prices are not set yet.</small>
+                  <PlanLine go={(v) => go(v)} />
                 </div>
                 <div className="pm-card">
                   <div className="pm-row">
@@ -958,6 +975,12 @@ export default function ProtoApp({
                   </button>
                   <button type="button" onClick={() => go("watching")}>
                     Saved finds
+                  </button>
+                  <button type="button" onClick={() => go("plans")}>
+                    Plans
+                  </button>
+                  <button type="button" onClick={() => go("admin")}>
+                    Admin (operators)
                   </button>
                   {account && !account.email && (
                     <button type="button" onClick={account.signIn}>
@@ -1114,6 +1137,7 @@ export default function ProtoApp({
           items={rest}
           see="See all finds"
         />
+        <CrewBand go={(v) => go(v)} />
         {tip && (
           <section className="feature">
             <div>
@@ -1146,9 +1170,10 @@ export default function ProtoApp({
           see="See all gaps"
         />
         {deals && inView.length === 0 && (
-          <p className="sub">
-            No deals within {radius} miles. Try a bigger distance.
-          </p>
+          <div className="crew-note">
+            <CrewArt look="scout-shrug" />
+            <p className="sub">No deals within {radius} miles. Try a bigger distance.</p>
+          </div>
         )}
       </>
     );
@@ -1301,9 +1326,10 @@ export default function ProtoApp({
               </div>
             )}
             {deals && shown.length === 0 && (
-              <p className="sub">
-                Nothing matches. Clear a filter or the search.
-              </p>
+              <div className="crew-note">
+                <CrewArt look="scout-shrug" />
+                <p className="sub">Nothing matches. Clear a filter or the search.</p>
+              </div>
             )}
           </div>
         </div>
@@ -1351,13 +1377,14 @@ export default function ProtoApp({
           <div className="pinfo">
             <span className={"vp " + d.verdict}>
               {VL[d.verdict]}
-              {d.sample ? " · sample" : ""}
+              {d.sample ? " · example, not a real deal" : ""}
             </span>
             <h1>{d.name}</h1>
             <span className="sub">
               {d.variant ? d.variant + " · " : ""}
-              {d.sales.length} completed{" "}
+              {d.sales.length} {d.sample ? "pretend" : "completed"}{" "}
               {d.sales.length === 1 ? "sale" : "sales"}
+              {d.sample ? ", not real eBay data" : ""}
               {m !== null ? ` · about ${m} sold a month` : ""}
               {d.competingListings !== null
                 ? ` · ${d.competingListings} listed for sale now`
@@ -1518,13 +1545,21 @@ export default function ProtoApp({
           </div>
           <div className="panel" ref={salesRef}>
             <h3>
-              Completed sales <small>sold, not asking prices</small>
+              {d.sample ? (
+                <>
+                  Pretend sale prices <small>made up for this example</small>
+                </>
+              ) : (
+                <>
+                  Completed sales <small>sold, not asking prices</small>
+                </>
+              )}
             </h3>
             <div className="sales">
               {d.sales.length ? (
                 [...d.sales].reverse().map((s, i) => (
                   <div key={i}>
-                    <span>Completed sale{d.sample ? " (modelled)" : ""}</span>
+                    <span>{d.sample ? "Pretend sale (made up)" : "Completed sale"}</span>
                     <b className="num">{money(s)}</b>
                   </div>
                 ))
@@ -1740,18 +1775,19 @@ export default function ProtoApp({
           </p>
         </div>
         <div className="panel">
-          <h3>
-            Your plan <span className="badge sample-chip">Sample</span>
-          </h3>
-          <div className="set">
-            <span>Plus</span>
-            <b>£14.99 a month</b>
-          </div>
-          <p className="sub" style={{ fontSize: 13 }}>
-            Plans and prices are still being decided. Nothing is charged.
-          </p>
+          <h3>Your plan</h3>
+          <PlanLine go={(v) => go(v)} wide />
         </div>
       </div>
+      <div className="legacy" style={{ marginTop: 20 }}>
+        <div className="planner goals">
+          <GoalsSettings />
+          <BuyingRules />
+        </div>
+      </div>
+      <p className="sub" style={{ marginTop: 20, fontSize: 13 }}>
+        <a href="#Blocks">See the building blocks</a> the screens are made from.
+      </p>
     </>
   );
 
@@ -1773,7 +1809,10 @@ export default function ProtoApp({
             ))}
           </div>
         ) : (
-          <p className="sub">Nothing saved yet. Tap the heart on any find.</p>
+          <div className="crew-note">
+            <CrewArt look="insider-idea" />
+            <p className="sub">Nothing saved yet. Tap the heart on any find.</p>
+          </div>
         )}
       </>
     );
@@ -1847,7 +1886,7 @@ export default function ProtoApp({
               ticked={items.filter((d) => got[d.sku])}
               trip={trip}
               onBack={() => setSigning(false)}
-              onDone={(added) => {
+              onDone={(added, note = "") => {
                 setSigning(false);
                 setTrip({});
                 setGot({});
@@ -1856,7 +1895,7 @@ export default function ProtoApp({
                 go("stock");
                 say(
                   added
-                    ? `Added ${added} ${added === 1 ? "item" : "items"} to Stock.`
+                    ? `Added ${added} ${added === 1 ? "item" : "items"} to Stock.${note}`
                     : "Trip finished. Nothing was added to Stock.",
                 );
               }}
@@ -1878,23 +1917,6 @@ export default function ProtoApp({
         }
         return n;
       });
-    const share = async () => {
-      const text = stops
-        .map(
-          ([shopName, s]) =>
-            `${shopName}\n` +
-            s.items
-              .map((d) => `  ${trip[d.sku]} × ${d.name} at ${money(d.buy)}`)
-              .join("\n"),
-        )
-        .join("\n");
-      try {
-        await navigator.clipboard.writeText("My Bounty trip\n" + text);
-        say("Trip list copied. Paste it anywhere.");
-      } catch {
-        say("Could not copy the list on this device.");
-      }
-    };
     return (
       <>
         <div className="tripbox" role="dialog" aria-label="My trip">
@@ -1944,7 +1966,7 @@ export default function ProtoApp({
               <div className="tlist">
                 {stops.map(([shopName, s], i) => (
                   <React.Fragment key={shopName}>
-                    <div className="stop">
+                    <div className="tstop">
                       <span className="sn">{i + 1}</span>
                       <b>{shopName}</b>
                       <small>{s.mi !== null ? `${s.mi} mi` : ""}</small>
@@ -2027,8 +2049,12 @@ export default function ProtoApp({
                   </>
                 ) : (
                   <>
-                    <button type="button" className="bt ghost" onClick={share}>
-                      Copy list
+                    <button
+                      type="button"
+                      className="bt ghost"
+                      onClick={() => (setTripOpen(false), go("planner"))}
+                    >
+                      Full plan
                     </button>
                     <button
                       type="button"
@@ -2057,7 +2083,11 @@ export default function ProtoApp({
   const onboarding = onboard ? (
     <div className="obscrim">
       <div className="ob" role="dialog" aria-label="Set up Bounty">
-        <img className="obhero" src="/campaign.jpg" alt="Six Bounty members in bold outfits with coupons, a phone, a calculator, shopping bags and a parcel" />
+        <img
+          className="ob-crew"
+          src="/crew/crew-group.jpg"
+          alt="The Bounty crew together: the Boss, the Scout, the Hauler, the Insider, the Fixer and the Negotiator"
+        />
         {obStep === 1 ? (
           <>
             <small>1 of 2</small>
@@ -2160,6 +2190,65 @@ export default function ProtoApp({
     ) : null;
   else if (view === "profile") body = vProfile();
   else if (view === "watching") body = vWatching();
+  else if (view === "blocks") body = <Blocks />;
+  else if (view === "scan") body = <Scan />;
+  else if (view === "tips") body = <TipsScreen go={(v) => go(v)} />;
+  else if (view === "admin") body = <Admin />;
+  else if (view === "plans") body = <PlansScreen />;
+  else if (view === "crew") body = <CrewScreen go={(v) => go(v)} />;
+  else if (view === "research")
+    body = (
+      <PlanGate
+        feature="research"
+        title="Research"
+        tint="butter"
+        what="Check one find properly before you buy: the exact item, what it really sold for, your costs and fees, and a straight answer."
+        go={(v) => go(v)}
+      >
+        <div className="rs">
+          <PageHead
+            title="Research"
+            tint="butter"
+            lead="Check one find properly before you buy: the exact item, what it really sold for, your costs and fees, and a straight answer."
+          />
+          <div className="legacy">{legacy(view)}</div>
+        </div>
+      </PlanGate>
+    );
+  else if (view === "planner")
+    body = (
+      <PlanGate
+        feature="trip"
+        title="My trip"
+        tint="pistachio"
+        what="Plan the route shop by shop, with fuel, time and cash, and see whether the trip is worth it before you set off."
+        go={(v) => go(v)}
+      >
+      <TripPage
+        deals={all}
+        trip={trip}
+        setTrip={setTrip}
+        profile={profile}
+        going={going}
+        onStart={() => (setGoing(true), setTripOpen(true))}
+        onFinish={() => (setTripOpen(true), setSigning(true))}
+        openDeal={(s) => go("item", s)}
+        say={say}
+        go={(v) => go(v)}
+        legacy={legacy(view)}
+      />
+      </PlanGate>
+    );
+  else if (view === "stock")
+    body = <StockScreen legacy={legacy(view)} go={(v) => go(v)} />;
+  else if (view === "money")
+    body = (
+      <MoneyScreen
+        lens={lens}
+        lensButtons={<LensBtns lens={lens} setLens={setLens} />}
+        go={(v) => go(v)}
+      />
+    );
   else
     body = (
       <>
@@ -2244,20 +2333,12 @@ const CHATS: [string, string, string, string][] = [
 const LEGACY_TITLE: Partial<Record<View, string>> = {
   scan: "Scan",
   tips: "Live tips",
-  stock: "Stock and sales",
-  money: "Money",
-  planner: "Trip planner",
   research: "Research",
   sources: "Sources",
 };
 const LEGACY_LEAD: Partial<Record<View, string>> = {
   scan: "Scan or type a barcode and add the sticker price for a straight answer: buy, think or leave.",
   tips: "Shelf tips with a set number of places, so each one stays worth the trip.",
-  stock: "Everything you bought, from the shelf to the payout.",
-  money:
-    "Only money actually paid out counts. Goals, cash dates and what it is all for.",
-  planner:
-    "Optional. Add your travel, cash and carrying limit to see which trips fit you.",
   research: "Match an offer to exact sold evidence before you buy.",
   sources:
     "Where prices come from, when they were checked and what is still sample.",
@@ -2286,14 +2367,15 @@ function MegaMenu({ go }: { go: (v: View) => void }) {
       </div>
       <div className="mmc">
         <h4>Tools</h4>
-        {it("planner", "Trip planner", "Plan a route of shops")}
+        {it("planner", "My trip", "Plan it and check it is worth it")}
         {it("research", "Research", "Look up any product")}
-        {it("sources", "Sources", "Where prices come from")}
       </div>
       <div className="mmc">
         <h4>Account</h4>
         {it("profile", "Alerts", "What we tell you about")}
         {it("profile", "Profile and settings", "Area, travel, photo")}
+        {it("plans", "Plans", "Your membership")}
+        {it("crew", "The crew", "Top scouts and levels")}
         <div className="mmpts">
           <small>Scout points · sample</small>
           <b>460 · Trusted</b>

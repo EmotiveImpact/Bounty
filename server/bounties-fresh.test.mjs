@@ -112,9 +112,13 @@ function fakeEstimate(over = {}) {
 }
 
 const JOURNEY = { cost: 300, minutes: 30 };
+// Round 5: a member's trip profile (a car, so the units fit) and the cash
+// they can spend on a trip; a claim without them is refused.
+const CASH = 100000;
+const FIT = { transport: "Car", carryKg: 25, storageUnits: 50 };
 const ownCheck = (units, journey = JOURNEY) => fakeEstimate({ units, journeyCost: journey.cost, journeyMinutes: journey.minutes });
 const claim = (db, args) =>
-  rawClaim(db, { journey: args.journey ?? JOURNEY, check: ownCheck(args.units, args.journey ?? JOURNEY), ...args });
+  rawClaim(db, { journey: args.journey ?? JOURNEY, check: ownCheck(args.units, args.journey ?? JOURNEY), cashAvailable: CASH, ...args });
 
 const bountyInput = (over = {}) => ({
   title: "Travel kettle",
@@ -133,7 +137,7 @@ const liveBounty = (db, over = {}, estimate = fakeEstimate(), { request = REQUES
   createBounty(db, bountyInput(over), { estimate, request, lookup, now });
 
 const member = (db, name, over = {}) =>
-  createMember(db, { name, alertsOptIn: true, alertLocalities: ["Camden"], ...over }, { now: T0 });
+  createMember(db, { name, alertsOptIn: true, alertLocalities: ["Camden"], ...FIT, ...over }, { now: T0 });
 const diamond = (db, name, over = {}) => member(db, name, { paidTier: "diamond", paidUntil: "2026-12-31", ...over });
 
 const check = (db, over = {}, now = at(10)) =>
@@ -290,7 +294,7 @@ test("a re-check uses each claim's stored hourly floor, and the cap uses the 2-w
   assert.equal(b.cap, 3);
   assert.ok(JSON.parse(b.cap_basis).notes.includes("Sell window limited to 2 weeks, the window the buy-alert checks use, not the 12 entered"));
   const ivy = diamond(db, "Ivy");
-  rawClaim(db, { bountyId: b.id, memberId: ivy.id, units: 1, journey: JOURNEY, check: ownCheck(1), terms: { hourlyFloor: 2000 }, now: at(1) });
+  rawClaim(db, { cashAvailable: CASH, bountyId: b.id, memberId: ivy.id, units: 1, journey: JOURNEY, check: ownCheck(1), terms: { hourlyFloor: 2000 }, now: at(1) });
   const floors = [];
   const estimate = following((req) => {
     floors.push(req.hourlyFloor ?? null);

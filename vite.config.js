@@ -21,4 +21,14 @@ export default {
     },
   },
   preview: { host: "127.0.0.1" },
+  build: {
+    rollupOptions: {
+      // Radix marks its files "use client" for React Server Components,
+      // which this app does not use; the notice is noise here.
+      onwarn(warning, warn) {
+        if (warning.code === "MODULE_LEVEL_DIRECTIVE") return;
+        warn(warning);
+      },
+    },
+  },
 };

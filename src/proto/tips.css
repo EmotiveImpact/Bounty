@@ -1,0 +1,22 @@
+/* Tips layout (proto/TipsScreen.tsx). Pieces come from src/ui/kit.css. */
+.tps { display: grid; gap: 22px; font-family: var(--k-sans); }
+.tps-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: 16px; align-items: start; }
+.tps-card { gap: 14px; }
+.tps-top { display: grid; gap: 8px; }
+.tps-title { border: 0; background: none; padding: 0; text-align: left; cursor: pointer; font: 600 18px/1.25 var(--k-sans); color: var(--k-ink); }
+.tps-title:hover { text-decoration: underline; text-underline-offset: 3px; }
+.tps-where { font: 400 13px/1.4 var(--k-sans); color: var(--k-muted); }
+.tps-keep { display: flex; gap: 24px; flex-wrap: wrap; }
+.tps-keep span { display: grid; gap: 2px; }
+.tps-keep small { font: 500 12px/1.2 var(--k-sans); color: var(--k-muted); }
+.tps-keep b { font: 600 19px/1.2 var(--k-sans); color: var(--k-ink); font-variant-numeric: tabular-nums; }
+.tps-keep b.profit { color: var(--k-profit); }
+.tps-shelf { margin: 0; font: 400 13px/1.4 var(--k-sans); color: var(--k-muted); }
+.tps-acts { display: flex; gap: 10px; flex-wrap: wrap; }
+.tps-acts .k-btn { flex: 1 1 auto; }
+.tps-me { display: grid; gap: 6px; font: 600 13px/1 var(--k-sans); color: var(--k-ink); min-width: 220px; }
+.tps-me .k-input { background-color: rgba(255, 255, 255, 0.85); }
+.tps-terms { margin: 0; padding-left: 18px; display: grid; gap: 8px; font: 400 14px/1.5 var(--k-sans); color: var(--k-text); }
+.tps-small { margin: 0; font: 400 12.5px/1.5 var(--k-sans); color: var(--k-muted); }
+.tps-full { font-family: var(--k-sans); }
+.tps-full .bounty-card, .tps-full article { box-shadow: none; border: 0; padding: 0; margin: 0; }
