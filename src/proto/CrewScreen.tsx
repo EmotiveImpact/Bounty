@@ -71,7 +71,8 @@ export const CREW: CrewMember[] = [
   },
 ];
 
-const photo = (id: string) => `/crew/${id}.jpg`;
+// The standing photo for the line-up; the action pose elsewhere.
+const photo = (id: string, pose = false) => `/crew/${id}${pose ? "-pose" : ""}.jpg`;
 
 /** One character a day, the same for everyone on that London date. */
 export function crewOfTheDay(date = new Date()): CrewMember {
@@ -90,7 +91,7 @@ export function CrewBand({ go }: { go: (v: "crew") => void }) {
         <h2 className="k-display">Every kind of flipper. One crew.</h2>
         <p>Students, side hustlers and full-timers, all hunting the same shelves. Share a find, earn points, climb the levels.</p>
         <div className="cr-today">
-          <img src={photo(today.id)} alt="" loading="lazy" />
+          <img src={photo(today.id, true)} alt="" loading="lazy" />
           <div>
             <b>{today.name}’s tip for today</b>
             <span>{today.tip}</span>
@@ -173,7 +174,7 @@ export default function CrewScreen({ go }: { go: Go }) {
         {CREW.map((c) => (
           <article key={c.id} className="cr-card" style={{ ["--k-tint" as string]: `var(--k-${c.tint})` }}>
             <div className="cr-photo">
-              <img src={photo(c.id)} alt={`${c.name}, one of the Bounty crew`} loading="lazy" />
+              <img src={photo(c.id, true)} alt={`${c.name}, one of the Bounty crew`} loading="lazy" />
             </div>
             <div className="cr-body">
               <h2 className="k-display">{c.name}</h2>
