@@ -18,6 +18,8 @@ import {
 import { ItemTile, byMode } from "../Planner";
 import { savedExtras, type Deal } from "../Deals";
 import { Ico } from "./icons";
+import MoneyScreen from "./Money";
+import { GoalsSettings } from "../Goals";
 import SignOff from "./SignOff";
 import "./proto.css";
 import "./proto-extra.css";
@@ -1752,6 +1754,11 @@ export default function ProtoApp({
           </p>
         </div>
       </div>
+      <div className="legacy" style={{ marginTop: 20 }}>
+        <div className="planner goals">
+          <GoalsSettings />
+        </div>
+      </div>
     </>
   );
 
@@ -2160,6 +2167,14 @@ export default function ProtoApp({
     ) : null;
   else if (view === "profile") body = vProfile();
   else if (view === "watching") body = vWatching();
+  else if (view === "money")
+    body = (
+      <MoneyScreen
+        lens={lens}
+        lensButtons={<LensBtns lens={lens} setLens={setLens} />}
+        go={(v) => go(v)}
+      />
+    );
   else
     body = (
       <>
@@ -2245,7 +2260,6 @@ const LEGACY_TITLE: Partial<Record<View, string>> = {
   scan: "Scan",
   tips: "Live tips",
   stock: "Stock and sales",
-  money: "Money",
   planner: "Trip planner",
   research: "Research",
   sources: "Sources",
@@ -2254,8 +2268,6 @@ const LEGACY_LEAD: Partial<Record<View, string>> = {
   scan: "Scan or type a barcode and add the sticker price for a straight answer: buy, think or leave.",
   tips: "Shelf tips with a set number of places, so each one stays worth the trip.",
   stock: "Everything you bought, from the shelf to the payout.",
-  money:
-    "Only money actually paid out counts. Goals, cash dates and what it is all for.",
   planner:
     "Optional. Add your travel, cash and carrying limit to see which trips fit you.",
   research: "Match an offer to exact sold evidence before you buy.",

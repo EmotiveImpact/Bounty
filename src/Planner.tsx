@@ -268,8 +268,8 @@ export function cashSentence(cash: CashTiming, cashNeededBy: string | null, payo
 export function sellingSentence(t: { daysToSell: number | null; daysToSellOneUnit: number; units: number }) {
   if (t.daysToSell === null) return "";
   if (t.daysToSell > t.daysToSellOneUnit)
-    return `At the item's sales rate the last of ${plural(t.units, "unit")} is expected to sell after ${plural(t.daysToSell, "day")}, longer than the ${plural(t.daysToSellOneUnit, "day")} your Goals assume for one unit.`;
-  return `It uses your Goals assumption of ${plural(t.daysToSellOneUnit, "day")} to sell, your dispatch days, delivery and payout delay, not sold evidence for this item.`;
+    return `At the item's sales rate the last of ${plural(t.units, "unit")} is expected to sell after ${plural(t.daysToSell, "day")}, longer than the ${plural(t.daysToSellOneUnit, "day")} your settings assume for one unit.`;
+  return `It uses your settings assumption of ${plural(t.daysToSellOneUnit, "day")} to sell, your dispatch days, delivery and payout delay, not sold evidence for this item.`;
 }
 
 // The member's stricter thresholds are shared with Research through api.ts
@@ -1285,7 +1285,7 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile })
         Active hours are your working time. Time until payment is when the cash comes back:{" "}
         {t.timing
           ? `${payoutSentence(t.timing.payout)} ${sellingSentence(t.timing)}`
-          : "set your selling rhythm in Goals to see it."}
+          : "set your selling rhythm in Profile and settings to see it."}
         {t.timing?.cashNeededBy
           ? " " + cashSentence(t.timing.cash, t.timing.cashNeededBy, t.timing.payout.date)
           : ""}
@@ -1528,30 +1528,22 @@ function DriveSummary({ drive }: { drive: Drive }) {
 }
 
 function BasketsLink() {
-  const [asked, setAsked] = useState(false);
   return (
     <article className="planner-card">
       <small>Several items, one trip</small>
       <h2>One shopping trip, one cash limit</h2>
       <p>
         Each trip above buys one item. To buy several items on one trip, sharing one journey and one
-        cash limit for the whole basket, use the basket plan in Goals.
+        cash limit for the whole basket, use the basket plan at the bottom of this page.
       </p>
       <button
         type="button"
-        onClick={() => {
-          location.hash = "#Goals";
-          window.dispatchEvent(new HashChangeEvent("hashchange"));
-          setAsked(true);
-        }}
+        onClick={() =>
+          document.getElementById("basket-plan")?.scrollIntoView({ behavior: "smooth", block: "start" })
+        }
       >
-        Open the basket plan in Goals
+        Go to the basket plan
       </button>
-      <p className="muted">
-        {asked
-          ? "If the page has not switched, choose Goals in the menu."
-          : "You can also choose Goals in the menu."}
-      </p>
     </article>
   );
 }
@@ -1649,7 +1641,7 @@ function StricterThresholds({
       )}
       {notice && <p role="status">{notice}</p>}
       <p className="muted">
-        Saved in this browser only. They apply to the planner trips, the baskets in Goals and the
+        Saved in this browser only. They apply to the planner trips, the baskets below and the
         Research desk.
       </p>
     </article>

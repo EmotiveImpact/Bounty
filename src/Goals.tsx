@@ -243,17 +243,21 @@ function goalsBody(d: Draft): { body?: Omit<Goals, "updated">; problem?: string 
   };
 }
 
-export default function Goals() {
+/** The monthly goal, storage and posting-day settings. Shown on the Profile
+ * screen; the old Goals screen embeds it above its baskets. */
+export function GoalsSettings({
+  onLoaded,
+  onSaved,
+  savedNote = "Saved. Money and trip timing now use these.",
+}: {
+  onLoaded?: (g: Goals) => void;
+  onSaved?: (g: Goals) => void;
+  savedNote?: string;
+}) {
   const [goals, setGoals] = useState<Goals | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [goalsNotice, setGoalsNotice] = useState("");
   const [saving, setSaving] = useState(false);
-  const [baskets, setBaskets] = useState<BasketResponse | null>(null);
-  const [basketError, setBasketError] = useState("");
-  const [month, setMonth] = useState(thisMonth);
-  const [summary, setSummary] = useState<Summary | null>(null);
-  const [summaryError, setSummaryError] = useState("");
-  const [version, setVersion] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -262,50 +266,13 @@ export default function Goals() {
         if (!active) return;
         setGoals(g);
         setDraft(toDraft(g));
+        onLoaded?.(g);
       })
       .catch((e) => active && setGoalsNotice("Could not load your goals: " + (e as Error).message));
     return () => {
       active = false;
     };
   }, []);
-
-  useEffect(() => {
-    let active = true;
-    const profile = loadProfile();
-    const problem = profileProblem(profile);
-    if (problem) {
-      setBaskets(null);
-      setBasketError("Your Planner profile needs fixing first: " + problem);
-      return;
-    }
-    api<BasketResponse>("baskets", { profile: planProfile(profile, loadMemberRules()) })
-      .then((r) => {
-        if (!active) return;
-        setBaskets(r);
-        setBasketError("");
-      })
-      .catch((e) => {
-        if (!active) return;
-        setBaskets(null);
-        setBasketError((e as Error).message);
-      });
-    return () => {
-      active = false;
-    };
-  }, [version]);
-
-  useEffect(() => {
-    let active = true;
-    setSummary(null);
-    setSummaryError("");
-    if (!/^\d{4}-\d{2}$/.test(month)) return;
-    api<Summary>("ledger/summary?month=" + encodeURIComponent(month))
-      .then((s) => active && setSummary(s))
-      .catch((e) => active && setSummaryError((e as Error).message));
-    return () => {
-      active = false;
-    };
-  }, [month, version]);
 
   async function save(ev: React.FormEvent) {
     ev.preventDefault();
@@ -320,8 +287,8 @@ export default function Goals() {
       const saved = await api<Goals>("goals", body, "PUT");
       setGoals(saved);
       setDraft(toDraft(saved));
-      setGoalsNotice("Goals saved. The baskets below now use them.");
-      setVersion((v) => v + 1);
+      setGoalsNotice(savedNote);
+      onSaved?.(saved);
     } catch (e) {
       setGoalsNotice("Could not save your goals. " + (e as Error).message);
     } finally {
@@ -330,7 +297,6 @@ export default function Goals() {
   }
 
   return (
-    <div className="planner goals">
       <section>
         <small>Your goals</small>
         <h2>Monthly goal and selling rhythm</h2>
@@ -453,26 +419,42 @@ export default function Goals() {
         )}
       </section>
 
+  );
+}
+
+export default function Goals() {
+  const [goals, setGoals] = useState<Goals | null>(null);
+  const [month, setMonth] = useState(thisMonth);
+  const [summary, setSummary] = useState<Summary | null>(null);
+  const [summaryError, setSummaryError] = useState("");
+  const [version, setVersion] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    setSummary(null);
+    setSummaryError("");
+    if (!/^\d{4}-\d{2}$/.test(month)) return;
+    api<Summary>("ledger/summary?month=" + encodeURIComponent(month))
+      .then((s) => active && setSummary(s))
+      .catch((e) => active && setSummaryError((e as Error).message));
+    return () => {
+      active = false;
+    };
+  }, [month, version]);
+
+  return (
+    <div className="planner goals">
+      <GoalsSettings
+        savedNote="Goals saved. The baskets below now use them."
+        onLoaded={setGoals}
+        onSaved={(g) => {
+          setGoals(g);
+          setVersion((v) => v + 1);
+        }}
+      />
       <NamedGoals version={version} />
 
-      <section>
-        <small>Basket plan</small>
-        <h2>One shopping trip, one cash limit</h2>
-        <p>
-          Everything in a basket is bought on one shopping trip: one shared journey and one cash
-          limit for the whole basket. Your cash, carry limit, maximum units, transport and stricter
-          thresholds come from the Planner tab.
-        </p>
-        <p className="notice">
-          Sample data: illustrative Leeds offers with modelled sale totals. A basket is never a buy
-          alert.
-        </p>
-        <button type="button" onClick={() => setVersion((v) => v + 1)}>
-          Recalculate
-        </button>
-        {basketError && <p role="alert">{basketError}</p>}
-        {baskets && <BasketPlan plan={baskets} />}
-      </section>
+      <BasketSection version={version} />
 
       <section>
         <small>This month</small>
@@ -493,6 +475,60 @@ export default function Goals() {
         )}
       </section>
     </div>
+  );
+}
+
+/** Several items on one shopping trip, under one cash limit. Shown on the
+ * Trip planner; uses the goals timing and the Planner profile. */
+export function BasketSection({ version = 0 }: { version?: number }) {
+  const [baskets, setBaskets] = useState<BasketResponse | null>(null);
+  const [basketError, setBasketError] = useState("");
+  const [run, setRun] = useState(0);
+
+  useEffect(() => {
+    let active = true;
+    const profile = loadProfile();
+    const problem = profileProblem(profile);
+    if (problem) {
+      setBaskets(null);
+      setBasketError("Your Planner profile needs fixing first: " + problem);
+      return;
+    }
+    api<BasketResponse>("baskets", { profile: planProfile(profile, loadMemberRules()) })
+      .then((r) => {
+        if (!active) return;
+        setBaskets(r);
+        setBasketError("");
+      })
+      .catch((e) => {
+        if (!active) return;
+        setBaskets(null);
+        setBasketError((e as Error).message);
+      });
+    return () => {
+      active = false;
+    };
+  }, [version, run]);
+
+  return (
+    <section id="basket-plan">
+      <small>Basket plan</small>
+      <h2>One shopping trip, one cash limit</h2>
+      <p>
+        Everything in a basket is bought on one shopping trip: one shared journey and one cash
+        limit for the whole basket. Your cash, carry limit, maximum units, transport and stricter
+        thresholds come from your planner settings above.
+      </p>
+      <p className="notice">
+        Sample data: illustrative Leeds offers with modelled sale totals. A basket is never a buy
+        alert.
+      </p>
+      <button type="button" onClick={() => setRun((v) => v + 1)}>
+        Recalculate
+      </button>
+      {basketError && <p role="alert">{basketError}</p>}
+      {baskets && <BasketPlan plan={baskets} />}
+    </section>
   );
 }
 
