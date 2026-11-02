@@ -24,7 +24,7 @@
 }
 
 /* Welcome card: the crew together. */
-.ob-crew { display: block; width: calc(100% + 60px); max-width: none; margin: -30px -30px 4px; aspect-ratio: 16 / 9; object-fit: cover; object-position: 50% 40%; background: #fff; border-bottom: 1px solid var(--k-line, #eee); }
+.ob-crew { display: block; width: calc(100% + 60px); max-width: none; margin: -30px -30px 4px; aspect-ratio: 3 / 2; object-fit: cover; object-position: 50% 50%; background: #fff; border-bottom: 1px solid var(--k-line, #eee); }
 
 /* A short note with a character, where a screen or list has nothing yet. */
 .crew-note { display: flex; align-items: center; gap: 16px; padding: 8px 0; }
