@@ -163,7 +163,13 @@ export function saveProfile(profile: Profile, { edited = [] }: { edited?: readon
   } catch {
     /* storage unavailable: the profile lasts for this visit only */
   }
+  // Lets views on the same page that read the saved profile (the basket plan
+  // under the planner) update without a reload.
+  window.dispatchEvent(new Event(PROFILE_EVENT));
 }
+
+/** Fired after the Planner saves the profile. */
+export const PROFILE_EVENT = "bounty:profile";
 
 function savedMark(): unknown {
   try {

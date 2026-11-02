@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { api, dateTime, hours, loadMemberRules, loadProfile, money, percent, toPence } from "./api";
+import { api, dateTime, hours, loadMemberRules, loadProfile, money, percent, PROFILE_EVENT, toPence } from "./api";
 import {
   AccessBadges,
   AccessNeed,
@@ -21,7 +21,6 @@ import {
   payoutSentence,
   planProfile,
   plural,
-  pounds,
   profileProblem,
 } from "./Planner";
 import "./Planner.css";
@@ -153,40 +152,6 @@ type BasketResponse = {
   timing: BasketTiming; // for one unit; each basket carries its own
   rules: { ignored: { key: string; label: string }[] };
 };
-// The ledger summary (server/ledger.mjs summary). Potential proceeds count
-// only live-evidence predictions; potentialProceedsLeftOut says how many
-// open trips were left out, sample trips among them.
-type Summary = {
-  month: string;
-  realisedEarnings: number;
-  householdSavings: number;
-  householdSavingsGross?: number;
-  householdTripCosts?: number;
-  pendingPayouts: number;
-  potentialProceeds: number;
-  potentialProceedsLeftOut?: { sample?: number; basisUnknown?: number; nothingBought?: number };
-  cashTiedUp?: number;
-  unsoldUnits?: number;
-  realisedMinutes?: number;
-  realisedHourly?: number | null;
-};
-type Target = {
-  id: number;
-  name: string;
-  amount: number;
-  deadline: string | null;
-  start: string;
-  payouts: number;
-  costs: number;
-  received: number;
-  shared: number;
-  counted: number;
-  remaining: number;
-  status: "reached" | "in progress" | "missed";
-  daysLeft: number | null;
-};
-type Targets = { targets: Target[]; basis: string };
-
 // Monday first, as a UK week is usually shown. Values are JavaScript weekday
 // numbers (0 is Sunday).
 const WEEKDAYS: [number, string][] = [
@@ -220,20 +185,6 @@ const londonToday = () =>
     day: "2-digit",
   }).format(new Date());
 
-function thisMonth() {
-  const d = new Date();
-  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
-}
-
-/** "October 2026" for "2026-10", as people write a month. */
-const monthFormat = new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
-function monthText(month: string) {
-  const m = /^(\d{4})-(\d{2})$/.exec(month);
-  const ms = m ? Date.UTC(Number(m[1]), Number(m[2]) - 1, 15) : NaN;
-  return Number.isFinite(ms) ? monthFormat.format(new Date(ms)) : "the month chosen";
-}
-
-/** The draft as the API expects it, or a plain-language problem. */
 function goalsBody(d: Draft): { body?: Omit<Goals, "updated">; problem?: string } {
   const whole = (v: string, label: string, max: number) => {
     const n = Number(v);
@@ -444,68 +395,24 @@ export function GoalsSettings({
   );
 }
 
-export default function Goals() {
-  const [goals, setGoals] = useState<Goals | null>(null);
-  const [month, setMonth] = useState(thisMonth);
-  const [summary, setSummary] = useState<Summary | null>(null);
-  const [summaryError, setSummaryError] = useState("");
-  const [version, setVersion] = useState(0);
-
-  useEffect(() => {
-    let active = true;
-    setSummary(null);
-    setSummaryError("");
-    if (!/^\d{4}-\d{2}$/.test(month)) return;
-    api<Summary>("ledger/summary?month=" + encodeURIComponent(month))
-      .then((s) => active && setSummary(s))
-      .catch((e) => active && setSummaryError((e as Error).message));
-    return () => {
-      active = false;
-    };
-  }, [month, version]);
-
-  return (
-    <div className="planner goals">
-      <GoalsSettings
-        savedNote="Goals saved. The baskets below now use them."
-        onLoaded={setGoals}
-        onSaved={(g) => {
-          setGoals(g);
-          setVersion((v) => v + 1);
-        }}
-      />
-      <NamedGoals version={version} />
-
-      <BasketSection version={version} />
-
-      <section>
-        <small>This month</small>
-        <h2>Progress this month</h2>
-        <label className="planner-month">
-          Month
-          <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} />
-        </label>
-        {summaryError ? (
-          <p className="notice">
-            The ledger summary is not available yet ({summaryError}). Progress will appear here once
-            the ledger records trips.
-          </p>
-        ) : !summary ? (
-          <p className="muted">Loading the ledger summary.</p>
-        ) : (
-          <Progress summary={summary} goals={goals} />
-        )}
-      </section>
-    </div>
-  );
-}
-
-/** Several items on one shopping trip, under one cash limit. Shown on the
- * Trip planner; uses the goals timing and the Planner profile. */
 export function BasketSection({ version = 0 }: { version?: number }) {
   const [baskets, setBaskets] = useState<BasketResponse | null>(null);
   const [basketError, setBasketError] = useState("");
   const [run, setRun] = useState(0);
+
+  // The planner above saves the profile as you type: plan again once typing pauses.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const changed = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => setRun((n) => n + 1), 400);
+    };
+    window.addEventListener(PROFILE_EVENT, changed);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener(PROFILE_EVENT, changed);
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -918,229 +825,5 @@ function BasketCard({ basket: b, rank }: { basket: Basket; rank?: number }) {
         </ul>
       )}
     </article>
-  );
-}
-
-function Progress({ summary: s, goals }: { summary: Summary; goals: Goals | null }) {
-  const savings = goals?.targetType === "savings";
-  const target = goals?.monthlyTarget ?? 0;
-  // Only realised figures count: payouts less costs for income, recorded
-  // savings for a household goal. Pending payouts and potential proceeds never do.
-  const realised = savings ? s.householdSavings : s.realisedEarnings;
-  const share = target > 0 ? Math.max(0, realised) / target : 0;
-  const leftOut = s.potentialProceedsLeftOut;
-  const leftOutText = [
-    leftOut?.sample ? plural(leftOut.sample, "sample trip") + " (illustrative figures)" : "",
-    leftOut?.basisUnknown ? plural(leftOut.basisUnknown, "open trip") + " with no record of live evidence" : "",
-    leftOut?.nothingBought ? plural(leftOut.nothingBought, "open trip") + " with nothing bought yet" : "",
-  ]
-    .filter(Boolean)
-    .join(", ");
-  return (
-    <>
-      {target > 0 ? (
-        <>
-          <progress className="planner-progress" max={target} value={Math.min(target, Math.max(0, realised))} />
-          <p>
-            {money(realised)} of {money(target)} {savings ? "household savings" : "realised earnings"}{" "}
-            in {monthText(s.month)} ({percent(share)} of your target).
-          </p>
-        </>
-      ) : (
-        <p>Set a monthly target above to track progress.</p>
-      )}
-      <dl className="planner-figures">
-        <dt>Realised earnings</dt>
-        <dd>{money(s.realisedEarnings)}</dd>
-        <dt>Household savings after trip costs (not earnings)</dt>
-        <dd>{money(s.householdSavings)}</dd>
-        {typeof s.householdSavingsGross === "number" && (
-          <>
-            <dt>Household savings before trip costs</dt>
-            <dd>{money(s.householdSavingsGross)}</dd>
-            <dt>Household trip costs</dt>
-            <dd>{money(s.householdTripCosts ?? 0)}</dd>
-          </>
-        )}
-        <dt>Pending payouts (sold, not yet paid: not counted)</dt>
-        <dd>{money(s.pendingPayouts)}</dd>
-        <dt>
-          Potential proceeds from live-evidence trips (estimate: not counted)
-          {leftOutText && <span className="muted planner-cell-note">Left out: {leftOutText}.</span>}
-        </dt>
-        <dd>{money(s.potentialProceeds)}</dd>
-        {typeof s.cashTiedUp === "number" && (
-          <>
-            <dt>Cash tied up in open trips</dt>
-            <dd>{money(s.cashTiedUp)}</dd>
-          </>
-        )}
-      </dl>
-      <p className="muted">
-        Only realised figures count towards progress:{" "}
-        {savings ? "household savings you recorded, less household trip costs" : "payouts received less recorded costs"}. Pending
-        payouts and potential proceeds are shown separately and are not counted until paid. Sample
-        trips never count in potential proceeds.
-        {savings ? "" : " Household savings are never counted as earnings."}
-      </p>
-    </>
-  );
-}
-
-const STATUS_TEXT: Record<Target["status"], string> = {
-  reached: "Reached",
-  "in progress": "In progress",
-  missed: "Deadline passed",
-};
-
-/** Named goals: what the money is for, counting only cash received by the deadline. */
-function NamedGoals({ version }: { version: number }) {
-  const [data, setData] = useState<Targets | null>(null);
-  const [error, setError] = useState("");
-  const [draft, setDraft] = useState({ name: "", amount: "", deadline: "", start: "" });
-  const [notice, setNotice] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    api<Targets>("goals/targets")
-      .then((r) => {
-        if (!active) return;
-        setData(r);
-        setError("");
-      })
-      .catch((e) => active && setError((e as Error).message));
-    return () => {
-      active = false;
-    };
-  }, [version]);
-
-  async function add(ev: React.FormEvent) {
-    ev.preventDefault();
-    const amount = Number(draft.amount);
-    if (!draft.name.trim()) return setNotice("Say what the money is for.");
-    if (draft.amount.trim() === "" || !Number.isFinite(amount) || amount <= 0 || amount > 100000)
-      return setNotice("Amount must be between £0.01 and £100,000.");
-    const today = londonToday();
-    if (draft.deadline && draft.deadline < today) return setNotice("The deadline must be today or later.");
-    if (draft.start && draft.start > today)
-      return setNotice("The date to count cash from cannot be in the future.");
-    setBusy(true);
-    try {
-      const r = await api<Targets & { id: number }>("goals/targets", {
-        name: draft.name.trim(),
-        amount: toPence(amount),
-        deadline: draft.deadline || null,
-        start: draft.start || null,
-      });
-      setData(r);
-      setDraft({ name: "", amount: "", deadline: "", start: "" });
-      setNotice("Goal added.");
-    } catch (e) {
-      setNotice("Could not add the goal. " + (e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function remove(t: Target) {
-    setBusy(true);
-    try {
-      setData(await api<Targets>("goals/targets/" + t.id, {}, "DELETE"));
-      setNotice(`Removed "${t.name}".`);
-    } catch (e) {
-      setNotice("Could not remove the goal. " + (e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <section>
-      <small>What the money is for</small>
-      <h2>Named goals and deadlines</h2>
-      <p>
-        Name what the money is for, such as a hobby, fuel or a bill like car insurance. A goal with a
-        deadline counts only cash received by that date: payouts less what you spent, never sales
-        waiting to be paid or estimates. Fuel for a collection run is already a cost of that trip, so
-        it is not counted twice.
-      </p>
-      {error && <p role="alert">Could not load your named goals: {error}</p>}
-      {data && data.targets.length === 0 && <p className="muted">No named goals yet.</p>}
-      {data?.targets.map((t) => (
-        <article key={t.id} className="planner-target">
-          <p className="planner-badges">
-            <span className={"badge " + (t.status === "reached" ? "ok" : t.status === "missed" ? "warn" : "")}>
-              {STATUS_TEXT[t.status]}
-            </span>
-          </p>
-          <h3>{t.name}</h3>
-          <progress className="planner-progress" max={t.amount} value={Math.min(t.amount, t.counted)} />
-          <p>
-            {money(t.counted)} of {money(t.amount)} received
-            {t.deadline
-              ? t.daysLeft !== null && t.daysLeft >= 0
-                ? ` by ${dateTime(t.deadline)} (${plural(t.daysLeft, "day")} left)`
-                : ` by ${dateTime(t.deadline)}`
-              : " so far (no deadline)"}
-            . Still needed: {money(t.remaining)}.
-          </p>
-          <p className="muted">
-            Counting from {dateTime(t.start)}: payouts {money(t.payouts)}, less costs {money(t.costs)}.
-            {t.shared > 0 ? ` ${money(t.shared)} of that already counts towards an earlier goal.` : ""}
-          </p>
-          <button type="button" onClick={() => remove(t)} disabled={busy}>
-            Remove
-          </button>
-        </article>
-      ))}
-      <form onSubmit={add} className="planner-target-form" noValidate>
-        <div className="grid2">
-          <label>
-            What the money is for
-            <input
-              value={draft.name}
-              maxLength={80}
-              placeholder="Car insurance"
-              onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-            />
-          </label>
-          <label>
-            Amount (£)
-            <input
-              type="number"
-              min={0}
-              step="any"
-              inputMode="decimal"
-              value={draft.amount}
-              onChange={(e) => setDraft({ ...draft, amount: e.target.value })}
-            />
-          </label>
-          <label>
-            Deadline
-            <input
-              type="date"
-              min={londonToday()}
-              value={draft.deadline}
-              onChange={(e) => setDraft({ ...draft, deadline: e.target.value })}
-            />
-            <span className="muted">Leave empty if there is no date.</span>
-          </label>
-          <label>
-            Count cash received from
-            <input
-              type="date"
-              max={londonToday()}
-              value={draft.start}
-              onChange={(e) => setDraft({ ...draft, start: e.target.value })}
-            />
-            <span className="muted">Leave empty to count from today.</span>
-          </label>
-        </div>
-        <button disabled={busy}>Add goal</button>
-        {notice && <p role="status">{notice}</p>}
-      </form>
-      {data && <p className="muted">{data.basis}</p>}
-    </section>
   );
 }

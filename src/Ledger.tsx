@@ -154,59 +154,6 @@ type Detail = {
   proofs: Proof[];
   reconciliation: Reconciliation;
 };
-type Summary = {
-  month: string;
-  realisedEarnings: number;
-  // Net of household trip costs; the gross figure and costs are its parts.
-  householdSavings: number;
-  householdSavingsGross: number;
-  householdTripCosts: number;
-  pendingPayouts: number;
-  potentialProceeds: number;
-  potentialProceedsLeftOut: {
-    sample: number;
-    basisUnknown: number;
-    nothingBought: number;
-  };
-  cashTiedUp: number;
-  unsoldUnits: number;
-  realisedMinutes: number;
-  // Earnings per hour on the trips completed this month, each with all its
-  // payouts, costs and work time whatever their month; null when no trip
-  // with work time was completed this month.
-  realisedHourly: number | null;
-  hourly?: {
-    trips: number;
-    minutes: number;
-    earnings: number;
-    // Completed this month with money but no work time.
-    leftOutTrips: number;
-    leftOutEarnings: number;
-    // Trips with entries this month that are still open, or that were
-    // completed in a later month (and count there).
-    stillOpen?: number;
-    completedLater?: number;
-  };
-  // Completed this month after selling stock with no purchase recorded, so
-  // what the stock cost is not known: trips and earnings are those left out
-  // (open: how many of them are still open; openNoWork: how many of those
-  // have no work time either), countedTrips and countedEarnings those
-  // counted because their recorded result lowers the figure.
-  hourlyNoPurchase?: {
-    trips: number;
-    earnings: number;
-    open?: number;
-    openNoWork?: number;
-    countedTrips?: number;
-    countedEarnings?: number;
-  };
-  payouts: number;
-  verifiedPayouts: number;
-  verifiedEarnings: number;
-  verifiedTrips: number;
-  unverifiedTrips: number;
-  openTrips: number;
-};
 type Metrics = {
   closedTrips: number;
   verifiedTrips: number;
@@ -277,7 +224,8 @@ const PROOF_TYPES = ["image/jpeg", "image/png", "application/pdf"];
 const today = () => new Date().toLocaleDateString("en-CA");
 // The ledger refuses dates before this (EARLIEST_DATE in server/ledger.mjs).
 const EARLIEST_DATE = "2000-01-01";
-const thisMonth = () => today().slice(0, 7);
+const monthName = (month: string) =>
+  new Date(month + "-01T12:00:00Z").toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
 const longDate = (date: string) =>
   new Date(date + "T12:00:00Z").toLocaleDateString("en-GB", {
     day: "numeric",
@@ -311,9 +259,9 @@ const ukDay = (iso: string | null) =>
 const minutesText = (m: number | null) =>
   m === null ? "none recorded" : hours(m);
 
-/** The full records. bare leaves out the month summary and the tax note,
-    which the Stock and Money screens already show. */
-export default function Ledger({ bare = false }: { bare?: boolean }) {
+/** The full records. The month summary and the tax note live on the Stock
+    and Money screens, so they are not repeated here. */
+export default function Ledger() {
   const [trips, setTrips] = useState<TripRow[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [version, setVersion] = useState(0);
@@ -336,7 +284,6 @@ export default function Ledger({ bare = false }: { bare?: boolean }) {
 
   return (
     <section className="ledger">
-      {!bare && <SummaryPanel version={version} />}
       <div className="ledger-layout">
         <article className="ledger-list">
           <h2>Trips</h2>
@@ -362,314 +309,7 @@ export default function Ledger({ bare = false }: { bare?: boolean }) {
         </article>
       </div>
       <MetricsPanel version={version} />
-      {!bare && <TaxNote />}
     </section>
-  );
-}
-
-function Stat({
-  label,
-  value,
-  note,
-  tone,
-}: {
-  label: string;
-  value: string;
-  note: string;
-  tone?: "estimate" | "pending";
-}) {
-  return (
-    <div className={"ledger-stat" + (tone ? " " + tone : "")}>
-      <span className="ledger-stat-label">{label}</span>
-      <span className="ledger-stat-value">{value}</span>
-      <span className="muted">{note}</span>
-    </div>
-  );
-}
-
-function HourlyStat({ data }: { data: Summary }) {
-  return (
-    <Stat
-      label={hourlyLabel(data)}
-      value={data.realisedHourly === null ? BLANK : money(data.realisedHourly)}
-      note={hourlyNote(data)}
-    />
-  );
-}
-
-function SummaryPanel({ version }: { version: number }) {
-  const [month, setMonth] = useState(thisMonth);
-  const [data, setData] = useState<Summary | null>(null);
-  const [error, setError] = useState("");
-  useEffect(() => {
-    if (!/^\d{4}-\d{2}$/.test(month)) return;
-    let active = true;
-    api<Summary>("ledger/summary?month=" + encodeURIComponent(month))
-      .then((s) => {
-        if (!active) return;
-        setData(s);
-        setError("");
-      })
-      .catch((e: Error) => active && setError(e.message));
-    return () => {
-      active = false;
-    };
-  }, [month, version]);
-
-  return (
-    <article className="ledger-summary">
-      <div className="ledger-heading">
-        <h2>Month summary</h2>
-        <label>
-          Month
-          <input
-            type="month"
-            value={month}
-            max={thisMonth()}
-            onChange={(e) => setMonth(e.target.value)}
-          />
-        </label>
-      </div>
-      {error && <p role="alert">{error}</p>}
-      {data && (
-        <>
-          <h3 className="ledger-group">This month</h3>
-          <div className="ledger-stats ledger-stats-main">
-            <Stat
-              label="Realised earnings"
-              value={signed(data.realisedEarnings)}
-              note={
-                "Payouts received minus money spent, dated this month. " +
-                (data.payouts > 0
-                  ? money(data.verifiedPayouts) +
-                    " of " +
-                    money(data.payouts) +
-                    " in payouts is verified."
-                  : "No payouts this month.")
-              }
-            />
-            <Stat
-              label="Household savings"
-              value={signed(data.householdSavings)}
-              note={
-                "Saved against usual prices on things for your home, less those trips' costs such as travel and parking" +
-                (data.householdTripCosts > 0
-                  ? ": " +
-                    money(data.householdSavingsGross) +
-                    " saved, " +
-                    money(data.householdTripCosts) +
-                    " costs."
-                  : ".") +
-                " Not earnings."
-              }
-            />
-            <HourlyStat data={data} />
-          </div>
-          <h3 className="ledger-group">Open trips today</h3>
-          <div className="ledger-stats">
-            <Stat
-              label="Pending payouts"
-              value={money(data.pendingPayouts)}
-              tone="pending"
-              note="Sales on open trips that no payout covers yet. Not realised until the marketplace pays them out."
-            />
-            <Stat
-              label="Potential proceeds"
-              value={money(data.potentialProceeds)}
-              tone="estimate"
-              note={
-                "Estimate only, never counted as earned: live-evidence predictions for stock bought on open trips with no payout yet, less sales recorded." +
-                leftOutText(data.potentialProceedsLeftOut)
-              }
-            />
-            <Stat
-              label="Cash tied up"
-              value={money(data.cashTiedUp)}
-              note="Money spent on open trips that payouts have not yet recovered."
-            />
-            <Stat
-              label="Unsold units"
-              value={data.unsoldUnits.toLocaleString("en-GB")}
-              note="Bought on open trips and not yet sold. You carry the risk if they do not sell."
-            />
-          </div>
-          {data.verifiedTrips + data.unverifiedTrips > 0 && (
-            <p className="muted">
-              {`This month: ${data.verifiedTrips} verified and ${data.unverifiedTrips} unverified resale trips. Verified earnings: ${signed(data.verifiedEarnings)}.`}
-            </p>
-          )}
-          <details className="ledger-basis">
-            <summary>How these figures are worked out</summary>
-            <p className="muted">
-              Basis: cash in the month. Realised earnings are payouts dated this
-              month minus receipts, expenses and refunds dated this month, so
-              stock bought in one month and paid out in the next shows as a cost
-              first and income later. Only payouts count as earned. Pending
-              payouts, potential proceeds, cash tied up and unsold units
-              describe open trips as they stand today, whatever the month.
-              Potential proceeds count a prediction only when it came from live
-              evidence and stock has been bought, scaled to the units bought.
-              Household savings are net of those trips&apos; own costs.
-            </p>
-            <p className="muted">
-              Earnings per hour are not cash in the month: they cover the trips
-              completed this month (closed, or open with everything bought sold
-              and paid out), each with all its payouts, costs and work time,
-              whatever month they fell in. A trip bought in one month and paid
-              out in the next shows one figure, in the month it was completed.
-              Trips still open are left out until they are completed, and so are
-              trips that sold stock with no purchase recorded, because what the
-              stock cost is not known, except where counting one at its recorded
-              result lowers the figure (its real result can only be lower).
-            </p>
-          </details>
-        </>
-      )}
-    </article>
-  );
-}
-
-/** "November 2026" for "2026-11". */
-const monthName = (month: string) =>
-  new Date(month + "-01T12:00:00Z").toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
-
-/** Says which trips the month's earnings per hour cover. */
-function hourlyLabel(data: Summary) {
-  const n = data.hourly?.trips ?? 0;
-  return "Earnings per hour on " + (n > 0 ? "the " + plural(n, "trip") : "trips") + " completed in " + monthName(data.month);
-}
-
-/**
- * What the month's hourly figure covers: whole trips completed this month,
- * and which trips with entries this month were left out and why.
- */
-function hourlyNote(data: Summary) {
-  const h = data.hourly;
-  if (!h) return data.realisedHourly === null ? "No trip with work time was completed this month." : "";
-  const month = monthName(data.month);
-  const parts = [
-    h.trips > 0
-      ? signed(h.earnings) + " over " + hours(h.minutes) + ", counting all of " +
-        (h.trips === 1 ? "the trip's" : "those trips'") +
-        " payouts, costs and work time, whatever month they fell in."
-      : "Not known: no trip with work time was completed in " + month + ".",
-  ];
-  const open = h.stillOpen ?? 0;
-  if (open > 0)
-    parts.push(
-      "Left out: " + plural(open, "trip") + " with entries this month " + (open === 1 ? "is" : "are") +
-        " still open, and will count once closed or once everything bought is sold and paid out.",
-    );
-  const later = h.completedLater ?? 0;
-  if (later > 0)
-    parts.push(
-      plural(later, "trip") + " with entries this month " + (later === 1 ? "was" : "were") +
-        " completed in a later month and " + (later === 1 ? "counts" : "count") + " there.",
-    );
-  if (h.leftOutTrips > 0)
-    parts.push(
-      (h.leftOutEarnings < 0 ? "A net loss of " + money(-h.leftOutEarnings) : money(h.leftOutEarnings)) +
-        " from " + plural(h.leftOutTrips, "completed trip") + " without work time is not included.",
-    );
-  const np = data.hourlyNoPurchase;
-  const counted = np?.countedTrips ?? 0;
-  if (np && counted > 0)
-    parts.push(
-      "This includes " + plural(counted, "trip") + " that sold stock with no purchase recorded (" +
-        signed(np.countedEarnings ?? 0) + "), counted at " + (counted === 1 ? "its" : "their") +
-        " recorded result because that lowers the figure: what the stock cost is not known, so " +
-        (counted === 1 ? "its" : "their") + " real result can only be lower.",
-    );
-  if (np && np.trips > 0) {
-    const open = np.open ?? 0;
-    parts.push(
-      (np.earnings < 0 ? "A net loss of " + money(-np.earnings) : money(np.earnings)) +
-        " from " + plural(np.trips, "completed trip") + " that sold stock with no purchase recorded is not included, because what the stock cost is not known. " +
-        (open > 0
-          ? openNoPurchaseAdvice(open, np.openNoWork ?? 0)
-          : "A closed trip takes no new entries, so " + (np.trips === 1 ? "its purchase" : "their purchases") + " can no longer be added."),
-    );
-  }
-  return parts.join(" ");
-}
-
-/**
- * What would let the open trips left out for stock with no purchase recorded
- * count: the purchase of the units they sold beyond those bought (an open
- * trip completes only once stock was bought, so these have a receipt that
- * covers part of what they sold) or a correction of the units or refunds
- * recorded, and their work time where they have none, since trips without
- * work time stay out whatever they bought.
- */
-function openNoPurchaseAdvice(open: number, noWork: number) {
-  const one = open === 1;
-  const work =
-    noWork === 0
-      ? ""
-      : noWork === open
-        ? ", and record " + (one ? "its" : "their") + " work time"
-        : ", and record the work time on the " + noWork + " with none";
-  return (
-    "On " + (one ? "the one still open" : "the " + open + " still open") + ", record the purchase of the units " +
-    (one ? "it" : "each") + " sold beyond those it bought, or correct " + (one ? "its" : "their") +
-    " units or refunds" + work + ", to count " + (one ? "it" : "them") + "."
-  );
-}
-
-/** Names the open trips left out of potential proceeds, if any. */
-function leftOutText(left: Summary["potentialProceedsLeftOut"] | undefined) {
-  if (!left) return "";
-  const parts = [
-    left.sample && plural(left.sample, "trip") + " with a sample prediction",
-    left.basisUnknown &&
-      plural(left.basisUnknown, "trip") + " whose evidence is unknown",
-    left.nothingBought &&
-      plural(left.nothingBought, "trip") + " with nothing bought yet",
-  ].filter(Boolean);
-  return parts.length ? " Left out: " + parts.join(", ") + "." : "";
-}
-
-function TaxNote() {
-  return (
-    <article className="ledger-tax">
-      <h2>Tax</h2>
-      <p>
-        Income from resale may need to be reported to HMRC. HMRC says you are
-        probably trading if you buy goods intending to sell them for a profit,
-        and that if your total trading income for the tax year (6 April to 5
-        April) is more than the £1,000 trading allowance you need to tell it.
-        The allowance is measured on income before costs, not on the profit
-        shown here. Online marketplaces also report some sellers&apos; details
-        and income to HMRC each year.
-      </p>
-      <p className="muted">
-        Bounty does not give tax advice. Check GOV.UK:{" "}
-        <a
-          href="https://www.gov.uk/guidance/tax-free-allowances-on-property-and-trading-income"
-          target="_blank"
-          rel="noreferrer"
-        >
-          tax-free allowances on property and trading income
-        </a>
-        ,{" "}
-        <a
-          href="https://www.gov.uk/guidance/check-if-you-need-to-tell-hmrc-about-your-income-from-online-platforms"
-          target="_blank"
-          rel="noreferrer"
-        >
-          check if you need to tell HMRC about income from online platforms
-        </a>{" "}
-        and{" "}
-        <a
-          href="https://www.gov.uk/guidance/selling-goods-or-services-on-a-digital-platform"
-          target="_blank"
-          rel="noreferrer"
-        >
-          selling goods or services on a digital platform
-        </a>
-        .
-      </p>
-    </article>
   );
 }
 

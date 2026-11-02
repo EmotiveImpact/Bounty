@@ -2262,18 +2262,7 @@ export default function ProtoApp({
         go={(v) => go(v)}
       />
     );
-  else
-    body = (
-      <>
-        <div className="titlebar">
-          <div>
-            <h1>{LEGACY_TITLE[view]}</h1>
-            <p>{LEGACY_LEAD[view]}</p>
-          </div>
-        </div>
-        <div className="legacy">{legacy(view)}</div>
-      </>
-    );
+
 
   return (
     <div ref={rootRef} className="bx side-yt" data-tab={view}>
@@ -2342,20 +2331,6 @@ const CHATS: [string, string, string, string][] = [
   ],
   ["Dan W.", "Sapphire", "Thanks for confirming my tip!", "1 hr"],
 ];
-
-const LEGACY_TITLE: Partial<Record<View, string>> = {
-  scan: "Scan",
-  tips: "Live tips",
-  research: "Research",
-  sources: "Sources",
-};
-const LEGACY_LEAD: Partial<Record<View, string>> = {
-  scan: "Scan or type a barcode and add the sticker price for a straight answer: buy, think or leave.",
-  tips: "Shelf tips with a set number of places, so each one stays worth the trip.",
-  research: "Match an offer to exact sold evidence before you buy.",
-  sources:
-    "Where prices come from, when they were checked and what is still sample.",
-};
 
 function MegaMenu({ go }: { go: (v: View) => void }) {
   const it = (k: View, l: string, sub: string) => (

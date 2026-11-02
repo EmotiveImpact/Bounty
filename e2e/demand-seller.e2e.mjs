@@ -135,7 +135,7 @@ test(
     const second = ok(await item.bounty("Mini Bluetooth speaker"), 201);
     assert.match(second.message, /the distribution cap is 0/);
 
-    await atWidths(browser, app.url + "/#Bounties", async (page, width) => {
+    await atWidths(browser, app.url + "/#Admin", async (page, width) => {
       const card = page.locator("article.bounty:not(.closed)", { hasText: "Mini Bluetooth speaker" });
       const cap = card.locator("dt", { hasText: "Distribution cap" }).locator("xpath=following-sibling::dd[1]");
       if (width === 390) {
@@ -219,7 +219,7 @@ test(
       ok(await post(`/api/bounties/${bounty.id}/recheck`, {}));
     };
 
-    await atWidths(browser, app.url + "/#Bounties", async (page, width) => {
+    await atWidths(browser, app.url + "/#Admin", async (page, width) => {
       await asOldClaim();
       await page.reload();
       await page.getByLabel("Acting as").selectOption({ label: "Cat" });
@@ -275,7 +275,7 @@ test(
       ok(await post(`/api/bounties/${bounty.id}/recheck`, {}));
     };
 
-    await atWidths(browser, app.url + "/#Bounties", async (page, width) => {
+    await atWidths(browser, app.url + "/#Admin", async (page, width) => {
       await asOld();
       await page.reload();
       await page.getByLabel("Acting as").selectOption({ label: "Fay" });
@@ -320,7 +320,8 @@ test(
       const errors = [];
       page.on("console", (m) => m.type() === "error" && !expected.test(m.text()) && errors.push(m.text()));
       page.on("pageerror", (e) => errors.push(String(e)));
-      await page.goto(app.url + "/#Bounties");
+      await page.addInitScript(() => localStorage.setItem("bounty-onboarded", "true"));
+      await page.goto(app.url + "/#Admin");
       await page.getByLabel("Acting as").selectOption({ label: "Hana" });
       await page.locator("summary", { hasText: "Edit profile, alerts and paid tier" }).click();
       const field = page.getByLabel("Your marketplace seller name, optional (for example your eBay user name)");
