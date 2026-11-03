@@ -592,4 +592,14 @@ export const moreOffers = Object.freeze([
 ]);
 
 /** The five planner offers and the 30 extras, for Deals and Scan. */
-export const allSampleOffers = Object.freeze([...plannerOffers, ...moreOffers]);
+// Where each sample price "came from", so the cards can show the three
+// sources real prices will have. Chains that charge the same online as in
+// store read as a website price; shops with no online prices (or clearance
+// that never goes online) read as a shelf find by a scout. Made up, like
+// the rest of the sample.
+const SHELF_ONLY_SHOPS = new Set(["TK Maxx", "B&M", "Home Bargains", "Aldi", "Lidl", "Primark"]);
+export const allSampleOffers = Object.freeze(
+  [...plannerOffers, ...moreOffers].map((o) =>
+    o.priceSource ? o : { ...o, priceSource: SHELF_ONLY_SHOPS.has(o.shop) ? "shelf" : "online" },
+  ),
+);

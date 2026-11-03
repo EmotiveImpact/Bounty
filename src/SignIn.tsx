@@ -8,15 +8,17 @@ import { CrewArt } from "./proto/CrewArt";
 export type Member = { email: string; name: string | null };
 
 export default function SignIn({
+  startMode = "in",
   inviteOpen,
   onSignedIn,
   onClose,
 }: {
+  startMode?: "in" | "up";
   inviteOpen: boolean;
   onSignedIn: (member: Member) => void;
   onClose: () => void;
 }) {
-  const [mode, setMode] = useState<"in" | "up">("in");
+  const [mode, setMode] = useState<"in" | "up">(startMode);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");

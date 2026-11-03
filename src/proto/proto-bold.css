@@ -123,6 +123,11 @@
   @media (max-width: 760px) {
     .dband { grid-template-columns: 1fr; }
   }
+  /* Below a wide laptop the headline sits above the four cards, so the
+     cards get the full width instead of being squashed beside it. */
+  @media (max-width: 1280px) {
+    .dband { grid-template-columns: 1fr; gap: 22px; }
+  }
   @media (max-width: 640px) {
     .titlebar { padding: 24px 20px 22px; border-radius: 24px; }
     .titlebar h1 { font-size: 44px; }
@@ -138,3 +143,159 @@
    outside the app shell. Each ray grows from its bottom edge, outwards. */
 .rays { position: fixed; width: 0; height: 0; pointer-events: none; z-index: 9999; }
 .rays i { position: absolute; left: -1px; top: -7px; width: 2px; height: 7px; border-radius: 2px; background: #ff7cc0; transform-origin: 50% 100%; }
+
+/* Where the Deals prices come from, under the headline. */
+@scope (.bx) to (.legacy) {
+  .dtext p.dsrc {
+    font-size: 13px;
+    margin-top: -6px;
+    opacity: 0.85;
+  }
+}
+
+/* Where a deal's price came from: quiet text with a coloured dot, so the
+   tip badge on the photo stays the one loud thing on a card. */
+@scope (.bx) to (.legacy) {
+  .srctag {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+    font-size: 12.5px;
+    font-weight: 600;
+    line-height: 1.3;
+    color: #111;
+  }
+  .srctag i {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex: none;
+  }
+  .srctag > span { min-width: 0; }
+  .srctag small { font-weight: 400; color: var(--muted, #666); font-size: inherit; }
+  .srctag.online i { background: #0b8a43; }
+  .srctag.shelf i { background: #3d6bff; }
+  .dc .srctag {
+    padding: 0 4px;
+    font-size: 11.5px;
+  }
+}
+
+/* A live tip on a deal card: a small pill on the photo that opens Tips,
+   about the size of the discount badge so it never takes over the card. */
+@scope (.bx) to (.legacy) {
+  .tipline {
+    position: absolute;
+    left: 8px;
+    bottom: 8px;
+    z-index: 2;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 9px 3px 7px;
+    border-radius: 999px;
+    background: var(--c-sky);
+    color: #111;
+    font-size: 11.5px;
+    font-weight: 700;
+    line-height: 1.3;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .tipline svg,
+  .pc .img .tipline svg,
+  .dimg .tipline svg {
+    width: 12px;
+    height: 12px;
+    flex: none;
+  }
+  .tipline:hover,
+  .tipline:focus-visible {
+    background: #111;
+    color: #fff;
+  }
+  .dc .tipline {
+    left: 6px;
+    bottom: 6px;
+    font-size: 11px;
+    padding: 2px 8px 2px 6px;
+  }
+}
+
+/* Product page: photo and details side by side only where there is real
+   room. Below that they stack, with the photo at a proper size, capped and
+   centred, never stretched. The three price boxes always share one row. */
+@scope (.bx) to (.legacy) {
+  .bigprice {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .bp {
+    min-width: 0;
+  }
+  @media (max-width: 1100px) and (min-width: 901px) {
+    .prod {
+      grid-template-columns: minmax(280px, 2fr) 3fr;
+      gap: 24px;
+    }
+    .gallery .big {
+      height: 340px;
+    }
+  }
+  @media (max-width: 900px) {
+    .prod {
+      grid-template-columns: 1fr;
+    }
+    .gallery {
+      width: 100%;
+      max-width: 440px;
+      justify-self: center;
+    }
+    .gallery .big {
+      height: 340px;
+    }
+  }
+  @media (max-width: 480px) {
+    .bigprice {
+      grid-template-columns: 1fr 1fr;
+    }
+    .bp.keepbox {
+      grid-column: 1 / -1;
+    }
+    .gallery .big {
+      height: 300px;
+    }
+  }
+}
+
+/* Tablet and small laptop widths: the search drops to its own row, as it
+   does on a phone, so the top bar never runs off the right edge. The four
+   top deals scroll sideways, as on a phone, so each card keeps room for
+   its photo without the photo blowing up. */
+@scope (.bx) to (.legacy) {
+  @media (max-width: 1000px) and (min-width: 641px) {
+    .topin {
+      flex-wrap: wrap;
+      row-gap: 10px;
+    }
+    .top .search {
+      order: 3;
+      flex: 1 1 100%;
+    }
+    .top .tools {
+      margin-left: auto;
+    }
+  }
+  @media (max-width: 860px) and (min-width: 641px) {
+    .dcards {
+      grid-template-columns: repeat(4, minmax(210px, 36%));
+      overflow-x: auto;
+      scroll-snap-type: x mandatory;
+      padding-bottom: 4px;
+    }
+    .dc {
+      scroll-snap-align: start;
+    }
+  }
+}

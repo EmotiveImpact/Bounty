@@ -216,6 +216,35 @@ export default function TipsScreen({ go }: { go: (v: "deals" | "planner") => voi
           Tips could not be loaded ({error}).
         </Notice>
       )}
+      <Card className="tps-how">
+        <Label>How tips work</Label>
+        <ol className="tps-steps">
+          <li>
+            <b>A scout spots it.</b> Someone in a shop finds a deal that isn't online, like a clearance shelf, and
+            posts it as a tip.
+          </li>
+          <li>
+            <b>Others check it.</b> People nearby confirm it's still there or say it's gone. Accurate reports, even
+            "it's gone", earn scout points.
+          </li>
+          <li>
+            <b>A few people go.</b> Each tip has a set number of places so it stays worth the trip. Claim one, buy
+            the stock and resell it. You own the stock and the risk.
+          </li>
+        </ol>
+        {data?.terms && (
+          <details className="tps-print">
+            <summary>The small print</summary>
+            <ul className="tps-terms">
+              <li>{data.terms.buyAndResell}</li>
+              <li>{data.terms.reputation}</li>
+              <li>{data.terms.paid}</li>
+              <li>{data.terms.promotion}</li>
+            </ul>
+          </details>
+        )}
+      </Card>
+
       {tips && (
         <>
           <Figures>
@@ -264,21 +293,6 @@ export default function TipsScreen({ go }: { go: (v: "deals" | "planner") => voi
             </div>
           </div>
         </MoreBelow>
-      )}
-
-      {data?.terms && (
-        <Card>
-          <Label>How tips work</Label>
-          <ul className="tps-terms">
-            <li>
-              <b>{data.terms.buyAndResell}</b>
-            </li>
-            <li>{data.terms.reputation}</li>
-            <li>{data.terms.paid}</li>
-            <li>{data.terms.promotion}</li>
-          </ul>
-          <p className="tps-small">{data.terms.privacy}</p>
-        </Card>
       )}
 
       {current && (
