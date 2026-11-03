@@ -426,8 +426,8 @@ export default function ProtoApp({
   ) : null;
   // How fresh the price is: last checked, or your own shelf report.
   const SOURCE = {
-    online: "Website price, same in store",
-    shelf: "Shelf price from a scout",
+    online: "Website price",
+    shelf: "Scout's shelf price",
   } as const;
   const seen = (d: Deal) => {
     const mine = (reports[d.sku] ?? [])
@@ -451,15 +451,22 @@ export default function ProtoApp({
       text: byYou ? `You saw it on the shelf ${ago(at)}` : `Last checked ${ago(at)}`,
     };
   };
-  // Where the price came from, with a coloured dot: green for a shop
-  // website price (same in store), blue for a shelf price from a scout.
-  const SourceTag = ({ d }: { d: Deal }) =>
-    d.priceSource ? (
-      <span className={"srctag " + d.priceSource}>
+  // One short line on a card: where the price came from (green dot for a
+  // shop website price, blue for a scout's shelf price) and how fresh it is.
+  // Without a source it falls back to the freshness line alone.
+  const PriceLine = ({ d }: { d: Deal }) => {
+    if (!d.priceSource) return <SeenTag d={d} />;
+    const z = seen(d);
+    const when = d.sample && z.f === "old" && !(reports[d.sku] ?? []).length ? "example" : z.text.replace(/^Last checked /, "");
+    return (
+      <span className={"srctag " + d.priceSource} title={z.text}>
         <i />
-        {SOURCE[d.priceSource]}
+        <span>
+          {SOURCE[d.priceSource]} · <small>{when}</small>
+        </span>
       </span>
-    ) : null;
+    );
+  };
   const SeenTag = ({ d }: { d: Deal }) => {
     const z = seen(d);
     return (
@@ -584,8 +591,7 @@ export default function ProtoApp({
             {d.shop}
             {d.miles !== null ? ` · ${d.miles} mi` : ""}
           </span>
-          <SourceTag d={d} />
-          <SeenTag d={d} />
+          <PriceLine d={d} />
         </span>
       </button>
     );
@@ -1173,8 +1179,7 @@ export default function ProtoApp({
                     {d.shop}
                     {d.miles !== null ? ` · ${d.miles} mi` : ""}
                   </span>
-                  <SourceTag d={d} />
-                  <SeenTag d={d} />
+                  <PriceLine d={d} />
                 </button>
               ))}
             </div>
