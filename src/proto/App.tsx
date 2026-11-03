@@ -424,9 +424,7 @@ export default function ProtoApp({
       </span>
     </div>
   ) : null;
-  // Where the price came from and how fresh it is, in one line: a shop
-  // website price (same in store), a shelf find by a scout, or your own
-  // scan or shelf report.
+  // How fresh the price is: last checked, or your own shelf report.
   const SOURCE = {
     online: "Website price, same in store",
     shelf: "Shelf price from a scout",
@@ -439,23 +437,29 @@ export default function ProtoApp({
       .map((x) => (x ? Date.parse(x) : NaN))
       .filter((x) => Number.isFinite(x)) as number[];
     const at = Math.max(...mine, ...checked, -Infinity);
-    const source = d.priceSource ? SOURCE[d.priceSource] : null;
     if (!Number.isFinite(at))
       return {
         f: "old",
         text: d.sample
-          ? `Example: ${(source ?? "made up, never checked on a shelf").toLowerCase()}`
-          : (source ?? "Not checked on the shelf yet"),
+          ? "Example: made up, never checked"
+          : "Not checked yet",
       };
     const h = (Date.now() - at) / 3.6e6;
     const byYou = mine.includes(at);
     return {
       f: h < 6 ? "fresh" : h < 24 ? "mid" : "old",
-      text: byYou
-        ? `You saw it on the shelf ${ago(at)}`
-        : `${source ?? "Last checked"}, ${ago(at)}`,
+      text: byYou ? `You saw it on the shelf ${ago(at)}` : `Last checked ${ago(at)}`,
     };
   };
+  // Where the price came from, as a coloured label: green for a shop
+  // website price (same in store), blue for a shelf price from a scout.
+  const SourceTag = ({ d }: { d: Deal }) =>
+    d.priceSource ? (
+      <span className={"srctag " + d.priceSource}>
+        <Ico n={d.priceSource === "online" ? "out" : "tips"} />
+        {SOURCE[d.priceSource]}
+      </span>
+    ) : null;
   const SeenTag = ({ d }: { d: Deal }) => {
     const z = seen(d);
     return (
@@ -543,6 +547,7 @@ export default function ProtoApp({
             {d.shop}
             {d.miles !== null ? ` · ${d.miles} mi` : ""}
           </span>
+          <SourceTag d={d} />
           <SeenTag d={d} />
         </span>
       </button>
@@ -1130,6 +1135,7 @@ export default function ProtoApp({
                     {d.shop}
                     {d.miles !== null ? ` · ${d.miles} mi` : ""}
                   </span>
+                  <SourceTag d={d} />
                   <SeenTag d={d} />
                 </button>
               ))}
