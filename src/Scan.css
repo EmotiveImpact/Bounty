@@ -255,3 +255,4 @@
   .sc-grid { grid-template-columns: 1fr; }
   .sc-form .k-btn.main, .sc-acts .k-btn.main { width: 100%; }
 }
+.sc-share { margin: 10px 0 0; padding: 10px 12px; border-radius: 12px; background: #cfe4ff; color: #111; font: 400 13.5px/1.45 var(--k-sans); }

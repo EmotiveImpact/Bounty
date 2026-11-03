@@ -190,6 +190,9 @@ export function dealFor(offer, options = {}, rules = OPPORTUNITY_RULES) {
       : null,
     // When the price and the shelf stock were last checked; null when never.
     priceChecked: offer.priceChecked ?? null,
+    // Where the shop price came from: "online" (the shop's website, same
+    // price in store), "shelf" (a scout saw it in the shop) or null.
+    priceSource: offer.priceSource === "online" || offer.priceSource === "shelf" ? offer.priceSource : null,
     stockChecked: offer.stockChecked ?? null,
     storageNeeds: offer.storageNeeds ?? null,
     meetsThresholds: unitProfit !== null && notes.length === 0,

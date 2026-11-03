@@ -424,6 +424,13 @@ export default function ProtoApp({
       </span>
     </div>
   ) : null;
+  // Where the price came from and how fresh it is, in one line: a shop
+  // website price (same in store), a shelf find by a scout, or your own
+  // scan or shelf report.
+  const SOURCE = {
+    online: "Website price, same in store",
+    shelf: "Shelf price from a scout",
+  } as const;
   const seen = (d: Deal) => {
     const mine = (reports[d.sku] ?? [])
       .filter((r) => r.kind === "saw")
@@ -432,18 +439,21 @@ export default function ProtoApp({
       .map((x) => (x ? Date.parse(x) : NaN))
       .filter((x) => Number.isFinite(x)) as number[];
     const at = Math.max(...mine, ...checked, -Infinity);
+    const source = d.priceSource ? SOURCE[d.priceSource] : null;
     if (!Number.isFinite(at))
       return {
         f: "old",
         text: d.sample
-          ? "Example: made up, never checked on a shelf"
-          : "Not checked on the shelf yet",
+          ? `Example: ${(source ?? "made up, never checked on a shelf").toLowerCase()}`
+          : (source ?? "Not checked on the shelf yet"),
       };
     const h = (Date.now() - at) / 3.6e6;
     const byYou = mine.includes(at);
     return {
       f: h < 6 ? "fresh" : h < 24 ? "mid" : "old",
-      text: `Last seen ${ago(at)}${byYou ? " by you" : ""}`,
+      text: byYou
+        ? `You saw it on the shelf ${ago(at)}`
+        : `${source ?? "Last checked"}, ${ago(at)}`,
     };
   };
   const SeenTag = ({ d }: { d: Deal }) => {
@@ -1071,6 +1081,10 @@ export default function ProtoApp({
               <p>
                 Cheaper on the shelf near you than they sell for. Every rule
                 met, sorted by what you keep.
+              </p>
+              <p className="dsrc">
+                Prices come from shop websites (the same price in store) and
+                from shelf finds by scouts near you. Each card says which.
               </p>
               <div className="dstats">
                 <span>

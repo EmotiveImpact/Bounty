@@ -52,6 +52,7 @@ export type Deal = {
   competingListings: number | null;
   salesPerWeek: number | null;
   priceChecked: string | null;
+  priceSource?: "online" | "shelf" | null;
   stockChecked: string | null;
   storageNeeds: string | null;
   meetsThresholds: boolean;

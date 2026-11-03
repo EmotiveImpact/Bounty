@@ -138,3 +138,12 @@
    outside the app shell. Each ray grows from its bottom edge, outwards. */
 .rays { position: fixed; width: 0; height: 0; pointer-events: none; z-index: 9999; }
 .rays i { position: absolute; left: -1px; top: -7px; width: 2px; height: 7px; border-radius: 2px; background: #ff7cc0; transform-origin: 50% 100%; }
+
+/* Where the Deals prices come from, under the headline. */
+@scope (.bx) to (.legacy) {
+  .dtext p.dsrc {
+    font-size: 13px;
+    margin-top: -6px;
+    opacity: 0.85;
+  }
+}

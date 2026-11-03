@@ -20,3 +20,12 @@
 .tps-small { margin: 0; font: 400 12.5px/1.5 var(--k-sans); color: var(--k-muted); }
 .tps-full { font-family: var(--k-sans); }
 .tps-full .bounty-card, .tps-full article { box-shadow: none; border: 0; padding: 0; margin: 0; }
+.tps-steps { margin: 0; padding-left: 20px; display: grid; gap: 10px; font: 400 14.5px/1.5 var(--k-sans); color: var(--k-text); }
+.tps-steps b { font-weight: 700; }
+.tps-print { margin-top: 12px; }
+.tps-print summary { cursor: pointer; font: 600 13px/1.4 var(--k-sans); color: var(--k-muted); margin-bottom: 8px; }
+@media (min-width: 761px) {
+  .tps-how .tps-steps { grid-template-columns: repeat(3, 1fr); gap: 20px; padding-left: 0; list-style: none; counter-reset: step; }
+  .tps-how .tps-steps li { counter-increment: step; }
+  .tps-how .tps-steps li::before { content: counter(step); display: inline-grid; place-items: center; width: 24px; height: 24px; margin-right: 8px; border-radius: 50%; background: #cfe4ff; color: #111; font: 700 13px/1 var(--k-sans); }
+}
