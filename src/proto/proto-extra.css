@@ -65,33 +65,43 @@
   }
 }
 
-/* Sign in button in the top bar, shown while signed out. */
+/* Sign in and Sign up in the top bar, shown only while signed out. Once
+   signed in they go and the avatar menu takes their place. */
 @scope (.bx) to (.legacy) {
+  .authbtns {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
   .signin-top {
     height: 36px;
     padding: 0 14px;
     background: var(--brand);
     white-space: nowrap;
   }
+  .signin-top.ghost {
+    background: transparent;
+    color: var(--ink);
+    border: 1.5px solid var(--ink);
+  }
 }
 @media (max-width: 600px) {
   @scope (.bx) to (.legacy) {
+    .authbtns {
+      gap: 6px;
+    }
     .signin-top {
       height: 32px;
       padding: 0 9px;
       font-size: 13px;
     }
-    /* Room for Sign in beside the logo on a phone. */
-    .tools.picons:has(.signin-top) .avatarbtn > :not(.avatar) {
-      display: none;
-    }
   }
 }
 /* On the smallest phones, signed-out visitors (who have no alerts yet) see
-   Sign in where the alerts bell would be. */
-@media (max-width: 385px) {
+   Sign in and Sign up where the alerts bell would be. */
+@media (max-width: 420px) {
   @scope (.bx) to (.legacy) {
-    .tools.picons:has(.signin-top) > .popwrap {
+    .tools.picons:has(.authbtns) > .popwrap {
       display: none;
     }
   }
