@@ -15,7 +15,7 @@ import { colours, space } from "@/ui/theme";
 export default function AddStock() {
   const params = useLocalSearchParams<{ item?: string; price?: string; shop?: string }>();
   const insets = useSafeAreaInsets();
-  const { user } = useAuth();
+  const { refresh } = useAuth();
   const [item, setItem] = useState(params.item ?? "");
   const [shop, setShop] = useState(params.shop ?? "");
   const [units, setUnits] = useState("1");
@@ -49,7 +49,8 @@ export default function AddStock() {
       });
       router.back();
     } catch (e) {
-      if (e instanceof SignInNeeded) return router.push("/sign-in");
+      // Signed out somewhere else: checking again takes the app back to sign-in.
+      if (e instanceof SignInNeeded) return refresh();
       setError((e as Error).message);
     } finally {
       setBusy(false);
@@ -66,7 +67,6 @@ export default function AddStock() {
       <ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled">
         <Title size={30}>Add a purchase</Title>
         <Txt style={{ color: colours.inkSoft }}>It goes into Stock as a new trip, so you can see what is left to sell.</Txt>
-        {!user ? <Notice>You need to sign in to save this. Your details stay here while you do.</Notice> : null}
         <Field label="What you bought" value={item} onChangeText={setItem} placeholder="For example Wireless headphones" maxLength={120} />
         <Field label="Shop" value={shop} onChangeText={setShop} placeholder="For example Tesco" maxLength={60} />
         <View style={{ flexDirection: "row", gap: space.m }}>
@@ -79,7 +79,7 @@ export default function AddStock() {
         </View>
         {each !== null && count > 0 ? <Small>That is {money(each * count)} in all.</Small> : null}
         {error ? <Notice tone="warn">{error}</Notice> : null}
-        {user ? <Button label="Save to Stock" busy={busy} onPress={save} /> : <Button label="Sign in to save" onPress={() => router.push("/sign-in")} />}
+        <Button label="Save to Stock" busy={busy} onPress={save} />
       </ScrollView>
     </KeyboardAvoidingView>
   );

@@ -1,5 +1,4 @@
 import { Image } from "expo-image";
-import { router } from "expo-router";
 import type { ReactNode } from "react";
 import {
   ActivityIndicator,
@@ -19,6 +18,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAuth } from "@/lib/auth";
 import { Icon } from "./icons";
+import { useMenu } from "./side-menu";
 import { colours, fonts, radius, space } from "./theme";
 
 // The app's building blocks, matching the website's kit (src/ui/kit.tsx):
@@ -58,34 +58,27 @@ export function Wordmark() {
 // ---------- the top bar ----------
 
 /**
- * Logo on the left. Signed out: Sign in and Sign up. Signed in: only the
- * member's round picture with a down arrow, which opens their account.
+ * The menu button and logo on the left; the member's round picture with a
+ * down arrow on the right. Both open the side menu with the extras.
  */
 export function TopBar() {
-  const { user, checking } = useAuth();
-  const initial = (user?.name || user?.email || "?").trim().charAt(0).toUpperCase();
+  const { user } = useAuth();
+  const menu = useMenu();
+  const initial = (user?.name || user?.email || "B").trim().charAt(0).toUpperCase();
   return (
     <View style={s.topbar}>
-      <Wordmark />
-      {checking ? null : user ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Your account"
-          onPress={() => router.push("/account")}
-          style={s.avatarBtn}
-          hitSlop={8}
-        >
-          <View style={s.avatar}>
-            <Text style={s.avatarText}>{initial}</Text>
-          </View>
-          <Icon name="down" size={16} />
+      <View style={s.row}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Menu" onPress={menu.open} hitSlop={8} style={s.menuBtn}>
+          <Icon name="menu" size={24} />
         </Pressable>
-      ) : (
-        <View style={s.row}>
-          <Button small kind="ghost" label="Sign in" onPress={() => router.push("/sign-in")} />
-          <Button small label="Sign up" onPress={() => router.push({ pathname: "/sign-in", params: { mode: "up" } })} />
+        <Wordmark />
+      </View>
+      <Pressable accessibilityRole="button" accessibilityLabel="Your account" onPress={menu.open} style={s.avatarBtn} hitSlop={8}>
+        <View style={s.avatar}>
+          <Text style={s.avatarText}>{initial}</Text>
         </View>
-      )}
+        <Icon name="down" size={16} />
+      </Pressable>
     </View>
   );
 }
@@ -257,6 +250,7 @@ export function Notice({ children, tone = "info" }: { children: ReactNode; tone?
 
 const CREW = {
   "crew-group": require("@/assets/crew/crew-group.jpg"),
+  "boss-thumbs": require("@/assets/crew/boss-thumbs.jpg"),
   "negotiator-deal": require("@/assets/crew/negotiator-deal.jpg"),
   "scout-lookout": require("@/assets/crew/scout-lookout.jpg"),
   "insider-shush": require("@/assets/crew/insider-shush.jpg"),
@@ -341,6 +335,7 @@ export const s = StyleSheet.create({
     justifyContent: "space-between",
     backgroundColor: colours.canvas,
   },
+  menuBtn: { width: 36, height: 36, alignItems: "center", justifyContent: "center", marginLeft: -6 },
   avatarBtn: { flexDirection: "row", alignItems: "center", gap: 4 },
   avatar: { width: 34, height: 34, borderRadius: 17, backgroundColor: colours.lilac, alignItems: "center", justifyContent: "center" },
   avatarText: { fontFamily: fonts.textBold, fontSize: 15, color: colours.ink },

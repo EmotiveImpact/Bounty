@@ -8,7 +8,7 @@ import { colours, fonts, tabTint, type TabName } from "@/ui/theme";
 // you are on sits in its own bright tint.
 
 const TABS: { name: string; tab: TabName; label: string }[] = [
-  { name: "index", tab: "deals", label: "Deals" },
+  { name: "deals", tab: "deals", label: "Deals" },
   { name: "tips", tab: "tips", label: "Tips" },
   { name: "scan", tab: "scan", label: "Scan" },
   { name: "stock", tab: "stock", label: "Stock" },

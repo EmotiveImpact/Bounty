@@ -11,6 +11,8 @@ type Auth = {
   /** Still asking the server who is signed in. */
   checking: boolean;
   user: Member | null;
+  /** A member is signed in, or the server has no accounts (a local test server). */
+  signedIn: boolean;
   /** Sign-up is open when the server has an invite code set. */
   inviteOpen: boolean;
   signIn: (email: string, password: string) => Promise<void>;
@@ -50,6 +52,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     () => ({
       checking,
       user: me.user,
+      signedIn: !!me.user || me.required === false,
       inviteOpen: me.inviteOpen === true,
       refresh,
       async signIn(email, password) {

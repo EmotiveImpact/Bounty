@@ -16,9 +16,13 @@ text, one bright tint per tab, crew characters on white):
   from a deal or from a scan.
 - **Money**: what you kept this month, what is on its way, cash in stock.
 
-Sign in and sign up use the website's accounts and its 30-day session cookie,
-which iOS and Android keep for the app. Sample figures always carry a
-"Sample" label.
+The app opens on a welcome screen with the crew and two buttons, Create an
+account and Sign in; the tabs open only once you are signed in. Sign in and
+sign up use the website's accounts and its 30-day session cookie, which iOS
+and Android keep for the app. The menu button (top left) and your round
+picture (top right) open a side menu with the extras (My trip, Research,
+Saved finds, The crew, Plans, Settings), which open the website's pages for
+now, and Sign out. Sample figures always carry a "Sample" label.
 
 ## Try it on your phone
 
@@ -46,9 +50,11 @@ npx expo lint
 
 ## Code map
 
-- `src/app/` screens (Expo Router: every file is a screen). `(tabs)/` holds
-  the five tabs; `deal/[sku].tsx`, `sign-in.tsx`, `account.tsx` and
-  `add-stock.tsx` open on top.
+- `src/app/` screens (Expo Router: every file is a screen). `index.tsx`
+  sends you to `welcome.tsx` or Deals; `_layout.tsx` keeps the tabs behind
+  sign-in. `(tabs)/` holds the five tabs; `deal/[sku].tsx` and
+  `add-stock.tsx` open on top; `sign-in.tsx` does sign in and sign up.
+- `src/ui/side-menu.tsx` the side menu.
 - `src/ui/` building blocks (`kit.tsx`), colours and fonts (`theme.ts`),
   icons and deal parts. Build new screens from these.
 - `src/lib/` server calls, sign-in, formatting and the data shapes.
