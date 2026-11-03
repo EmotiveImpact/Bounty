@@ -148,27 +148,91 @@
   }
 }
 
-/* Where a deal's price came from: a coloured label on the card. */
+/* Where a deal's price came from: quiet text with a coloured dot, so the
+   tip badge on the photo stays the one loud thing on a card. */
 @scope (.bx) to (.legacy) {
   .srctag {
-    display: inline-flex;
+    display: flex;
     align-items: center;
-    gap: 5px;
-    align-self: flex-start;
-    margin: 6px 0 2px;
-    padding: 3px 9px 3px 7px;
-    border-radius: 999px;
-    font-size: 12px;
-    font-weight: 700;
+    gap: 6px;
+    margin-top: 4px;
+    font-size: 12.5px;
+    font-weight: 600;
     line-height: 1.3;
     color: #111;
   }
-  .srctag.online { background: var(--c-lime); }
-  .srctag.shelf { background: var(--c-sky); }
-  .srctag svg { width: 13px; height: 13px; flex: none; }
-  .dc .srctag {
-    margin: 4px 4px 2px;
-    font-size: 11px;
-    padding: 2px 8px 2px 6px;
+  .srctag i {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex: none;
   }
+  .srctag.online i { background: #0b8a43; }
+  .srctag.shelf i { background: #3d6bff; }
+  .dc .srctag {
+    padding: 0 4px;
+    font-size: 11.5px;
+  }
+}
+
+/* A live tip on a deal card: a badge on the photo that opens Tips. */
+@scope (.bx) to (.legacy) {
+  .tipline {
+    position: absolute;
+    left: 10px;
+    bottom: 10px;
+    z-index: 2;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    max-width: calc(100% - 64px);
+    padding: 6px 11px 6px 8px;
+    border-radius: 12px;
+    background: var(--c-sky);
+    border: 2px solid #111;
+    color: #111;
+    line-height: 1.15;
+    cursor: pointer;
+    box-shadow: 0 2px 0 #111;
+  }
+  .tipline svg,
+  .pc .img .tipline svg,
+  .dimg .tipline svg {
+    width: 16px;
+    height: 16px;
+    flex: none;
+  }
+  .tipline > span {
+    display: grid;
+    min-width: 0;
+  }
+  .tipline b {
+    font-weight: 800;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  .tipline small {
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .tipline:hover,
+  .tipline:focus-visible {
+    background: #111;
+    color: #fff;
+  }
+  .dc .tipline {
+    left: 8px;
+    bottom: 8px;
+    left: 6px;
+    bottom: 6px;
+    padding: 3px 7px 3px 5px;
+    gap: 4px;
+    border-radius: 10px;
+    max-width: calc(100% - 44px);
+  }
+  .dc .tipline b { font-size: 12px; }
+  .dc .tipline svg { width: 13px; height: 13px; }
+  .dc .tipline small { font-size: 10px; }
 }

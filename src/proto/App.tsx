@@ -451,12 +451,12 @@ export default function ProtoApp({
       text: byYou ? `You saw it on the shelf ${ago(at)}` : `Last checked ${ago(at)}`,
     };
   };
-  // Where the price came from, as a coloured label: green for a shop
+  // Where the price came from, with a coloured dot: green for a shop
   // website price (same in store), blue for a shelf price from a scout.
   const SourceTag = ({ d }: { d: Deal }) =>
     d.priceSource ? (
       <span className={"srctag " + d.priceSource}>
-        <Ico n={d.priceSource === "online" ? "out" : "tips"} />
+        <i />
         {SOURCE[d.priceSource]}
       </span>
     ) : null;
@@ -466,6 +466,42 @@ export default function ProtoApp({
       <span className={"seen " + z.f}>
         <i />
         {z.text}
+      </span>
+    );
+  };
+  // A live tip for this deal: same item at the same shop, matched by
+  // name. Shown as a badge on the card's photo that opens Tips.
+  const norm = (x: string | null | undefined) => (x ?? "").trim().toLowerCase();
+  const tipFor = (d: Deal) =>
+    bounties.find(
+      (b) =>
+        (!b.retailer || norm(b.retailer) === norm(d.shop)) &&
+        norm(b.title) === norm(d.name),
+    ) ?? null;
+  const TipLine = ({ d }: { d: Deal }) => {
+    const t = tipFor(d);
+    if (!t) return null;
+    const open = (e: React.SyntheticEvent) => {
+      e.stopPropagation();
+      go("tips");
+    };
+    return (
+      <span
+        className="tipline"
+        role="button"
+        aria-label={`Scout tip${t.sample ? " (sample)" : ""}: ${t.remaining} ${t.remaining === 1 ? "place" : "places"} left. Open Tips`}
+        tabIndex={0}
+        onClick={open}
+        onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), open(e))}
+      >
+        <Ico n="tips" />
+        <span>
+          <b>Scout tip</b>
+          <small>
+            {t.sample ? "Sample · " : ""}
+            {t.remaining} left
+          </small>
+        </span>
       </span>
     );
   };
@@ -511,6 +547,7 @@ export default function ProtoApp({
       <button type="button" className="pc" onClick={() => go("item", d.sku)}>
         <span className="img tile">
           <ItemTile sku={d.sku} category={d.category} />
+          <TipLine d={d} />
           <AddBtn d={d} />
         </span>
         {tag}
@@ -1123,6 +1160,7 @@ export default function ProtoApp({
                     {d.underSale !== null && (
                       <span className="badge">−{d.underSale}%</span>
                     )}
+                    <TipLine d={d} />
                     <AddBtn d={d} />
                   </span>
                   <span className="dn">{d.name}</span>
