@@ -455,6 +455,37 @@ export default function ProtoApp({
       </span>
     );
   };
+  // A live tip for this deal: same item at the same shop, matched by
+  // name. Shown as one small line on the card that opens Tips.
+  const norm = (x: string | null | undefined) => (x ?? "").trim().toLowerCase();
+  const tipFor = (d: Deal) =>
+    bounties.find(
+      (b) =>
+        (!b.retailer || norm(b.retailer) === norm(d.shop)) &&
+        norm(b.title) === norm(d.name),
+    ) ?? null;
+  const TipLine = ({ d }: { d: Deal }) => {
+    const t = tipFor(d);
+    if (!t) return null;
+    const open = (e: React.SyntheticEvent) => {
+      e.stopPropagation();
+      go("tips");
+    };
+    return (
+      <span
+        className="tipline"
+        role="button"
+        tabIndex={0}
+        onClick={open}
+        onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), open(e))}
+      >
+        <Ico n="tips" />
+        <span>
+          <b>{t.sample ? "Sample tip" : "Scout tip"}</b> · {t.remaining} {t.remaining === 1 ? "place" : "places"} left
+        </span>
+      </span>
+    );
+  };
   const pic = (d: Deal, cls: string) => (
     <span className={cls + " ph tile"}>
       <ItemTile sku={d.sku} category={d.category} />
@@ -533,6 +564,7 @@ export default function ProtoApp({
             {d.shop}
             {d.miles !== null ? ` · ${d.miles} mi` : ""}
           </span>
+          <TipLine d={d} />
           <SeenTag d={d} />
         </span>
       </button>
@@ -1116,6 +1148,7 @@ export default function ProtoApp({
                     {d.shop}
                     {d.miles !== null ? ` · ${d.miles} mi` : ""}
                   </span>
+                  <TipLine d={d} />
                   <SeenTag d={d} />
                 </button>
               ))}
