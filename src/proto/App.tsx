@@ -202,7 +202,7 @@ export default function ProtoApp({
   legacy: (view: View) => React.ReactNode;
   // Member sign-in on a hosted pilot; absent on your own computer, where
   // there are no accounts. email is null while signed out.
-  account?: { email: string | null; signIn: () => void; signOut: () => void };
+  account?: { email: string | null; signIn: () => void; signUp: () => void; signOut: () => void };
 }) {
   const first = fromHash();
   const [view, setView] = useState<View>(first.view);
@@ -915,11 +915,18 @@ export default function ProtoApp({
               </div>
             )}
           </span>
-          {account && !account.email && (
-            <button type="button" className="bt signin-top" onClick={account.signIn}>
-              Sign in
-            </button>
-          )}
+          {/* Signed out: Sign in and Sign up only. Signed in (or no accounts
+              on this copy): the avatar and its account menu only. */}
+          {account && !account.email ? (
+            <span className="authbtns">
+              <button type="button" className="bt ghost signin-top" onClick={account.signIn}>
+                Sign in
+              </button>
+              <button type="button" className="bt signin-top signup-top" onClick={account.signUp}>
+                Sign up
+              </button>
+            </span>
+          ) : (
           <div className="profwrap">
             <button
               type="button"
@@ -985,11 +992,6 @@ export default function ProtoApp({
                   <button type="button" onClick={() => go("admin")}>
                     Admin (operators)
                   </button>
-                  {account && !account.email && (
-                    <button type="button" onClick={account.signIn}>
-                      Sign in
-                    </button>
-                  )}
                   {account?.email && (
                     <button type="button" onClick={account.signOut}>
                       Sign out ({account.email})
@@ -999,6 +1001,7 @@ export default function ProtoApp({
               </div>
             )}
           </div>
+          )}
         </div>
       </div>
     </header>
