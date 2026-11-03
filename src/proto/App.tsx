@@ -503,11 +503,7 @@ export default function ProtoApp({
       >
         <Ico n="tips" />
         <span>
-          <b>Scout tip</b>
-          <small>
-            {t.sample ? "Sample · " : ""}
-            {t.remaining} left
-          </small>
+          Tip · {t.remaining} left
         </span>
       </span>
     );

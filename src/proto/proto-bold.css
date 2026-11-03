@@ -182,47 +182,33 @@
   }
 }
 
-/* A live tip on a deal card: a badge on the photo that opens Tips. */
+/* A live tip on a deal card: a small pill on the photo that opens Tips,
+   about the size of the discount badge so it never takes over the card. */
 @scope (.bx) to (.legacy) {
   .tipline {
     position: absolute;
-    left: 10px;
-    bottom: 10px;
+    left: 8px;
+    bottom: 8px;
     z-index: 2;
     display: inline-flex;
     align-items: center;
-    gap: 7px;
-    max-width: calc(100% - 64px);
-    padding: 6px 11px 6px 8px;
-    border-radius: 12px;
+    gap: 4px;
+    padding: 3px 9px 3px 7px;
+    border-radius: 999px;
     background: var(--c-sky);
-    border: 2px solid #111;
     color: #111;
-    line-height: 1.15;
+    font-size: 11.5px;
+    font-weight: 700;
+    line-height: 1.3;
+    white-space: nowrap;
     cursor: pointer;
-    box-shadow: 0 2px 0 #111;
   }
   .tipline svg,
   .pc .img .tipline svg,
   .dimg .tipline svg {
-    width: 16px;
-    height: 16px;
+    width: 12px;
+    height: 12px;
     flex: none;
-  }
-  .tipline > span {
-    display: grid;
-    min-width: 0;
-  }
-  .tipline b {
-    font-weight: 800;
-    font-size: 13px;
-    white-space: nowrap;
-  }
-  .tipline small {
-    font-size: 11px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
   .tipline:hover,
   .tipline:focus-visible {
@@ -230,41 +216,52 @@
     color: #fff;
   }
   .dc .tipline {
-    left: 8px;
-    bottom: 8px;
     left: 6px;
     bottom: 6px;
-    padding: 3px 7px 3px 5px;
-    gap: 4px;
-    border-radius: 10px;
-    max-width: calc(100% - 44px);
+    font-size: 11px;
+    padding: 2px 8px 2px 6px;
   }
-  .dc .tipline b { font-size: 12px; }
-  .dc .tipline svg { width: 13px; height: 13px; }
-  .dc .tipline small { font-size: 10px; }
 }
 
-/* Product page: photo and details side by side down to phone width, so a
-   laptop or tablet never shows one huge stretched photo. Only a real phone
-   stacks them, and even then the photo has a sensible maximum size. */
+/* Product page: photo and details side by side only where there is real
+   room. Below that they stack, with the photo at a proper size, capped and
+   centred, never stretched. The three price boxes always share one row. */
 @scope (.bx) to (.legacy) {
-  @media (max-width: 1100px) and (min-width: 641px) {
+  .bigprice {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .bp {
+    min-width: 0;
+  }
+  @media (max-width: 1100px) and (min-width: 901px) {
     .prod {
-      grid-template-columns: minmax(240px, 2fr) 3fr;
-      gap: 22px;
+      grid-template-columns: minmax(280px, 2fr) 3fr;
+      gap: 24px;
     }
     .gallery .big {
-      height: 320px;
+      height: 340px;
     }
   }
-  @media (max-width: 640px) {
+  @media (max-width: 900px) {
     .prod {
       grid-template-columns: 1fr;
     }
     .gallery {
       width: 100%;
-      max-width: 460px;
+      max-width: 440px;
       justify-self: center;
+    }
+    .gallery .big {
+      height: 340px;
+    }
+  }
+  @media (max-width: 480px) {
+    .bigprice {
+      grid-template-columns: 1fr 1fr;
+    }
+    .bp.keepbox {
+      grid-column: 1 / -1;
     }
     .gallery .big {
       height: 300px;
