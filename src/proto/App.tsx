@@ -456,7 +456,7 @@ export default function ProtoApp({
     );
   };
   // A live tip for this deal: same item at the same shop, matched by
-  // name. Shown as one small line on the card that opens Tips.
+  // name. Shown as a badge on the card's photo that opens Tips.
   const norm = (x: string | null | undefined) => (x ?? "").trim().toLowerCase();
   const tipFor = (d: Deal) =>
     bounties.find(
@@ -475,13 +475,18 @@ export default function ProtoApp({
       <span
         className="tipline"
         role="button"
+        aria-label={`Scout tip${t.sample ? " (sample)" : ""}: ${t.remaining} ${t.remaining === 1 ? "place" : "places"} left. Open Tips`}
         tabIndex={0}
         onClick={open}
         onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), open(e))}
       >
         <Ico n="tips" />
         <span>
-          <b>{t.sample ? "Sample tip" : "Scout tip"}</b> · {t.remaining} {t.remaining === 1 ? "place" : "places"} left
+          <b>Scout tip</b>
+          <small>
+            {t.sample ? "Sample · " : ""}
+            {t.remaining} left
+          </small>
         </span>
       </span>
     );
@@ -528,6 +533,7 @@ export default function ProtoApp({
       <button type="button" className="pc" onClick={() => go("item", d.sku)}>
         <span className="img tile">
           <ItemTile sku={d.sku} category={d.category} />
+          <TipLine d={d} />
           <AddBtn d={d} />
         </span>
         {tag}
@@ -564,7 +570,6 @@ export default function ProtoApp({
             {d.shop}
             {d.miles !== null ? ` · ${d.miles} mi` : ""}
           </span>
-          <TipLine d={d} />
           <SeenTag d={d} />
         </span>
       </button>
@@ -1136,6 +1141,7 @@ export default function ProtoApp({
                     {d.underSale !== null && (
                       <span className="badge">−{d.underSale}%</span>
                     )}
+                    <TipLine d={d} />
                     <AddBtn d={d} />
                   </span>
                   <span className="dn">{d.name}</span>
@@ -1148,7 +1154,6 @@ export default function ProtoApp({
                     {d.shop}
                     {d.miles !== null ? ` · ${d.miles} mi` : ""}
                   </span>
-                  <TipLine d={d} />
                   <SeenTag d={d} />
                 </button>
               ))}
