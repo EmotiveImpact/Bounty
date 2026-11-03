@@ -873,6 +873,9 @@ export default function ProtoApp({
           </span>
         </form>
         <div className="tools picons">
+          {/* Alerts and tip chat belong to an account, so signed-out
+              visitors see only Sign in and Sign up. */}
+          {!(account && !account.email) && (<>
           <span className="popwrap">
             <button
               type="button"
@@ -969,6 +972,7 @@ export default function ProtoApp({
               </div>
             )}
           </span>
+          </>)}
           {/* Signed out: Sign in and Sign up only. Signed in (or no accounts
               on this copy): the avatar and its account menu only. */}
           {account && !account.email ? (
