@@ -215,7 +215,7 @@ export default function ProtoApp({
   legacy: (view: View) => React.ReactNode;
   // Member sign-in on a hosted pilot; absent on your own computer, where
   // there are no accounts. email is null while signed out.
-  account?: { email: string | null; signIn: () => void; signOut: () => void };
+  account?: { email: string | null; signIn: () => void; signUp: () => void; signOut: () => void };
 }) {
   const first = fromHash();
   const [view, setView] = useState<View>(first.view);
@@ -440,6 +440,11 @@ export default function ProtoApp({
       </span>
     </div>
   ) : null;
+  // How fresh the price is: last checked, or your own shelf report.
+  const SOURCE = {
+    online: "Website price",
+    shelf: "Scout's shelf price",
+  } as const;
   const seen = (d: Deal) => {
     const mine = (reports[d.sku] ?? [])
       .filter((r) => r.kind === "saw")
@@ -452,15 +457,31 @@ export default function ProtoApp({
       return {
         f: "old",
         text: d.sample
-          ? "Example: made up, never checked on a shelf"
-          : "Not checked on the shelf yet",
+          ? "Example: made up, never checked"
+          : "Not checked yet",
       };
     const h = (Date.now() - at) / 3.6e6;
     const byYou = mine.includes(at);
     return {
       f: h < 6 ? "fresh" : h < 24 ? "mid" : "old",
-      text: `Last seen ${ago(at)}${byYou ? " by you" : ""}`,
+      text: byYou ? `You saw it on the shelf ${ago(at)}` : `Last checked ${ago(at)}`,
     };
+  };
+  // One short line on a card: where the price came from (green dot for a
+  // shop website price, blue for a scout's shelf price) and how fresh it is.
+  // Without a source it falls back to the freshness line alone.
+  const PriceLine = ({ d }: { d: Deal }) => {
+    if (!d.priceSource) return <SeenTag d={d} />;
+    const z = seen(d);
+    const when = d.sample && z.f === "old" && !(reports[d.sku] ?? []).length ? "example" : z.text.replace(/^Last checked /, "");
+    return (
+      <span className={"srctag " + d.priceSource} title={z.text}>
+        <i />
+        <span>
+          {SOURCE[d.priceSource]} · <small>{when}</small>
+        </span>
+      </span>
+    );
   };
   const SeenTag = ({ d }: { d: Deal }) => {
     const z = seen(d);
@@ -468,6 +489,38 @@ export default function ProtoApp({
       <span className={"seen " + z.f}>
         <i />
         {z.text}
+      </span>
+    );
+  };
+  // A live tip for this deal: same item at the same shop, matched by
+  // name. Shown as a badge on the card's photo that opens Tips.
+  const norm = (x: string | null | undefined) => (x ?? "").trim().toLowerCase();
+  const tipFor = (d: Deal) =>
+    bounties.find(
+      (b) =>
+        (!b.retailer || norm(b.retailer) === norm(d.shop)) &&
+        norm(b.title) === norm(d.name),
+    ) ?? null;
+  const TipLine = ({ d }: { d: Deal }) => {
+    const t = tipFor(d);
+    if (!t) return null;
+    const open = (e: React.SyntheticEvent) => {
+      e.stopPropagation();
+      go("tips");
+    };
+    return (
+      <span
+        className="tipline"
+        role="button"
+        aria-label={`Scout tip${t.sample ? " (sample)" : ""}: ${t.remaining} ${t.remaining === 1 ? "place" : "places"} left. Open Tips`}
+        tabIndex={0}
+        onClick={open}
+        onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), open(e))}
+      >
+        <Ico n="tips" />
+        <span>
+          Tip · {t.remaining} left
+        </span>
       </span>
     );
   };
@@ -513,6 +566,7 @@ export default function ProtoApp({
       <button type="button" className="pc" onClick={() => go("item", d.sku)}>
         <span className="img tile">
           <ItemTile sku={d.sku} category={d.category} />
+          <TipLine d={d} />
           <AddBtn d={d} />
         </span>
         {tag}
@@ -549,7 +603,7 @@ export default function ProtoApp({
             {d.shop}
             {d.miles !== null ? ` · ${d.miles} mi` : ""}
           </span>
-          <SeenTag d={d} />
+          <PriceLine d={d} />
         </span>
       </button>
     );
@@ -931,11 +985,18 @@ export default function ProtoApp({
               </div>
             )}
           </span>
-          {account && !account.email && (
-            <button type="button" className="bt signin-top" onClick={account.signIn}>
-              Sign in
-            </button>
-          )}
+          {/* Signed out: Sign in and Sign up only. Signed in (or no accounts
+              on this copy): the avatar and its account menu only. */}
+          {account && !account.email ? (
+            <span className="authbtns">
+              <button type="button" className="bt ghost signin-top" onClick={account.signIn}>
+                Sign in
+              </button>
+              <button type="button" className="bt signin-top signup-top" onClick={account.signUp}>
+                Sign up
+              </button>
+            </span>
+          ) : (
           <div className="profwrap">
             <button
               type="button"
@@ -1001,11 +1062,6 @@ export default function ProtoApp({
                   <button type="button" onClick={() => go("admin")}>
                     Admin (operators)
                   </button>
-                  {account && !account.email && (
-                    <button type="button" onClick={account.signIn}>
-                      Sign in
-                    </button>
-                  )}
                   {account?.email && (
                     <button type="button" onClick={account.signOut}>
                       Sign out ({account.email})
@@ -1015,6 +1071,7 @@ export default function ProtoApp({
               </div>
             )}
           </div>
+          )}
         </div>
       </div>
     </header>
@@ -1088,6 +1145,10 @@ export default function ProtoApp({
                 Cheaper on the shelf near you than they sell for. Every rule
                 met, sorted by what you keep.
               </p>
+              <p className="dsrc">
+                Prices come from shop websites (the same price in store) and
+                from shelf finds by scouts near you. Each card says which.
+              </p>
               <div className="dstats">
                 <span>
                   <b>{best.length}</b> {best.length === 1 ? "buy" : "buys"}
@@ -1120,6 +1181,7 @@ export default function ProtoApp({
                     {d.underSale !== null && (
                       <span className="badge">−{d.underSale}%</span>
                     )}
+                    <TipLine d={d} />
                     <AddBtn d={d} />
                   </span>
                   <span className="dn">{d.name}</span>
@@ -1132,7 +1194,7 @@ export default function ProtoApp({
                     {d.shop}
                     {d.miles !== null ? ` · ${d.miles} mi` : ""}
                   </span>
-                  <SeenTag d={d} />
+                  <PriceLine d={d} />
                 </button>
               ))}
             </div>

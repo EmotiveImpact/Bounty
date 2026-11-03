@@ -261,6 +261,10 @@ function Answer({
         </p>
       )}
       {d.sample && <p className="sc-p">Sample item: these figures are illustrations, not a real deal.</p>}
+      <p className="sc-share">
+        <b>Coming soon:</b> sticker prices you scan will be shared with scouts near you and earn you scout
+        points. Nothing is shared yet.
+      </p>
       {lens === "pro" && canTake ? (
         <div className="sc-take">
           <span>

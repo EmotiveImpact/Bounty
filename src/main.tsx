@@ -92,7 +92,7 @@ type Auth = { required: boolean; inviteOpen: boolean; member: Member | null };
 
 function Root() {
   const [auth, setAuth] = React.useState<Auth>({ required: false, inviteOpen: false, member: null });
-  const [signingIn, setSigningIn] = React.useState(false);
+  const [signingIn, setSigningIn] = React.useState<false | "in" | "up">(false);
   React.useEffect(() => {
     fetch("/api/auth/me")
       .then((res) => (res.ok ? res.json() : null))
@@ -101,7 +101,7 @@ function Root() {
           setAuth({ required: true, inviteOpen: Boolean(data.inviteOpen), member: data.user ?? null });
       })
       .catch(() => undefined);
-    const open = () => setSigningIn(true);
+    const open = () => setSigningIn("in");
     window.addEventListener(SIGN_IN_EVENT, open);
     return () => window.removeEventListener(SIGN_IN_EVENT, open);
   }, []);
@@ -114,7 +114,8 @@ function Root() {
           auth.required
             ? {
                 email: auth.member?.email ?? null,
-                signIn: () => setSigningIn(true),
+                signIn: () => setSigningIn("in"),
+                signUp: () => setSigningIn("up"),
                 signOut: async () => {
                   await fetch("/api/auth/signout", {
                     method: "POST",
@@ -130,6 +131,7 @@ function Root() {
       />
       {signingIn && (
         <SignIn
+          startMode={signingIn}
           inviteOpen={auth.inviteOpen}
           onClose={close}
           onSignedIn={(member) => (setAuth({ ...auth, required: true, member }), setSigningIn(false), reloadPlans())}
