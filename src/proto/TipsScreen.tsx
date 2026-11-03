@@ -36,6 +36,7 @@ import {
   type ChipTone,
 } from "../ui/kit";
 import { CrewArt } from "./CrewArt";
+import { Talk } from "./Talk";
 import "./tips.css";
 import "./legacy-kit.css";
 
@@ -321,6 +322,7 @@ export default function TipsScreen({ go }: { go: (v: "deals" | "planner") => voi
               />
             </div>
           </div>
+          <Talk kind="tip" shop={current.retailer ?? "the shop"} area={current.locality} />
         </Window>
       )}
 
