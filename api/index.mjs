@@ -1,14 +1,14 @@
 // Vercel Function for the free demo: every /api/... request reaches the same
-// API as on your own computer. See server/demo.mjs for what the demo keeps
+// API as on your own computer. See apps/server/demo.mjs for what the demo keeps
 // and for how long, and docs/DEPLOY.md for set-up.
 process.env.BOUNTY_DATA_DIR ||= "/tmp/bounty-data";
 
-const { createApi } = await import("../server/app.mjs");
-const { database } = await import("../server/db.mjs");
-const { accessConfig } = await import("../server/access.mjs");
-const { freshPrices } = await import("../server/demo.mjs");
-const { seedSampleTips } = await import("../server/sample-tips.mjs");
-const { accounts, neonStore } = await import("../server/accounts.mjs");
+const { createApi } = await import("../apps/server/app.mjs");
+const { database } = await import("../apps/server/db.mjs");
+const { accessConfig } = await import("../apps/server/access.mjs");
+const { freshPrices } = await import("../apps/server/demo.mjs");
+const { seedSampleTips } = await import("../apps/server/sample-tips.mjs");
+const { accounts, neonStore } = await import("../apps/server/accounts.mjs");
 
 let handler;
 try {

@@ -5,7 +5,7 @@
 //   npm start
 import { spawn } from "node:child_process";
 
-const children = ["server/api.mjs", "server/loop.mjs"].map((script) =>
+const children = ["apps/server/api.mjs", "apps/server/loop.mjs"].map((script) =>
   spawn(process.execPath, [script], { stdio: "inherit" }),
 );
 let stopping = false;

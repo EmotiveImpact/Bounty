@@ -9,8 +9,8 @@ ENV NODE_ENV=production \
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
-COPY server ./server
+COPY apps/server ./apps/server
 # The tests are not needed at run time. The fixtures stay: imports compare
 # files against them so sample data is never taken as live evidence.
-RUN rm -f server/*.test.mjs server/test-support.mjs
-CMD ["node", "server/start.mjs"]
+RUN rm -f apps/server/*.test.mjs apps/server/test-support.mjs
+CMD ["node", "apps/server/start.mjs"]
