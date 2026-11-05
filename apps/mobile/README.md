@@ -20,7 +20,9 @@ The app opens on a welcome screen with the crew and two buttons, Create an
 account and Sign in; the tabs open only once you are signed in. Sign in and
 sign up use the website's accounts and its 30-day session cookie, which iOS
 and Android keep for the app. The menu button (top left) and your round
-picture (top right) open a side menu with the extras (My trip, Research,
+picture (top right) open the side menu, which works like X or Uber: the
+whole app slides right to reveal it. Swipe in from the left edge of a tab to
+open it; swipe the page back or tap it to close. It holds the extras (My trip, Research,
 Saved finds, The crew, Plans, Settings), which open the website's pages for
 now, and Sign out. Sample figures always carry a "Sample" label.
 

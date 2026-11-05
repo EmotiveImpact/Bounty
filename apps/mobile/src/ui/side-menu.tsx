@@ -1,6 +1,7 @@
 import * as WebBrowser from "expo-web-browser";
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
-import { Animated, Easing, Modal, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { usePathname } from "expo-router";
+import { Animated, PanResponder, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { API_URL } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -30,30 +31,108 @@ export function useMenu() {
   return menu;
 }
 
-export function MenuProvider({ children }: { children: ReactNode }) {
-  const [visible, setVisible] = useState(false);
-  const [slide] = useState(() => new Animated.Value(0));
-  const open = useCallback(() => {
-    setVisible(true);
-    Animated.timing(slide, { toValue: 1, duration: 220, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
-  }, [slide]);
-  const close = useCallback(() => {
-    Animated.timing(slide, { toValue: 0, duration: 180, easing: Easing.in(Easing.cubic), useNativeDriver: true }).start(() => setVisible(false));
-  }, [slide]);
+// Like X and Uber: the menu sits underneath, and opening it pushes the
+// whole app to the right, leaving a dimmed strip of the page you were on.
+// Swipe in from the left edge to open it; swipe back or tap the strip to
+// close it.
+
+const SPRING = { damping: 24, stiffness: 240, mass: 0.9, useNativeDriver: true } as const;
+const TAB_PATHS = ["/deals", "/tips", "/scan", "/stock", "/money"];
+const clamp = (n: number) => Math.min(1, Math.max(0, n));
+
+export function MenuProvider({ enabled, children }: { enabled: boolean; children: ReactNode }) {
+  const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
+  const pathname = usePathname();
+  const panel = Math.min(320, Math.round(width * 0.82));
+  const [progress] = useState(() => new Animated.Value(0));
+  const [isOpen, setOpen] = useState(false);
+
+  const settle = useCallback(
+    (to: 0 | 1) => {
+      setOpen(to === 1);
+      Animated.spring(progress, { toValue: to, ...SPRING }).start();
+    },
+    [progress],
+  );
+  const open = useCallback(() => settle(1), [settle]);
+  const close = useCallback(() => settle(0), [settle]);
+
+  // Swipe in from the left edge of a tab to open.
+  const edge = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, g) => g.dx > 6 && Math.abs(g.dx) > Math.abs(g.dy),
+        onPanResponderMove: (_, g) => progress.setValue(clamp(g.dx / panel)),
+        onPanResponderRelease: (_, g) => settle(g.vx > 0.3 || g.dx > panel / 3 ? 1 : 0),
+        onPanResponderTerminate: () => settle(0),
+      }),
+    [panel, progress, settle],
+  );
+  // Swipe the pushed-aside page back to close.
+  const back = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, g) => g.dx < -6 && Math.abs(g.dx) > Math.abs(g.dy),
+        onPanResponderMove: (_, g) => progress.setValue(clamp(1 + g.dx / panel)),
+        onPanResponderRelease: (_, g) => settle(g.vx < -0.3 || g.dx < -panel / 3 ? 0 : 1),
+        onPanResponderTerminate: () => settle(1),
+      }),
+    [panel, progress, settle],
+  );
+
   const value = useMemo(() => ({ open }), [open]);
+  const onTab = TAB_PATHS.includes(pathname);
+
   return (
     <MenuContext.Provider value={value}>
-      {children}
-      <SideMenu visible={visible} slide={slide} onClose={close} />
+      <View style={styles.root}>
+        {enabled ? (
+          <Animated.View
+            importantForAccessibility={isOpen ? "auto" : "no-hide-descendants"}
+            accessibilityElementsHidden={!isOpen}
+            style={[
+              styles.panel,
+              { width: panel, paddingTop: insets.top + space.m, paddingBottom: insets.bottom + space.m },
+              {
+                opacity: progress.interpolate({ inputRange: [0, 0.4, 1], outputRange: [0, 0.6, 1] }),
+                transform: [{ translateX: progress.interpolate({ inputRange: [0, 1], outputRange: [-panel * 0.25, 0] }) }],
+              },
+            ]}
+          >
+            <MenuList onClose={close} />
+          </Animated.View>
+        ) : null}
+
+        <Animated.View
+          style={[
+            styles.app,
+            isOpen && styles.appLifted,
+            { transform: [{ translateX: progress.interpolate({ inputRange: [0, 1], outputRange: [0, panel] }) }] },
+          ]}
+        >
+          {children}
+          {isOpen ? (
+            <Animated.View
+              style={[StyleSheet.absoluteFill, styles.shade, { opacity: progress }]}
+              {...back.panHandlers}
+            >
+              <Pressable accessibilityRole="button" accessibilityLabel="Close menu" style={StyleSheet.absoluteFill} onPress={close} />
+            </Animated.View>
+          ) : null}
+        </Animated.View>
+
+        {enabled && onTab && !isOpen ? (
+          // Starts below the top bar so the menu button stays tappable.
+          <View style={[styles.edge, { top: insets.top + 56 }]} {...edge.panHandlers} />
+        ) : null}
+      </View>
     </MenuContext.Provider>
   );
 }
 
-function SideMenu({ visible, slide, onClose }: { visible: boolean; slide: Animated.Value; onClose: () => void }) {
-  const insets = useSafeAreaInsets();
-  const { width } = useWindowDimensions();
+function MenuList({ onClose }: { onClose: () => void }) {
   const { user, signOut } = useAuth();
-  const panel = Math.min(340, Math.round(width * 0.86));
   const [leaving, setLeaving] = useState(false);
 
   const go = async (page: string) => {
@@ -63,8 +142,8 @@ function SideMenu({ visible, slide, onClose }: { visible: boolean; slide: Animat
   const out = async () => {
     setLeaving(true);
     try {
-      await signOut();
       onClose();
+      await signOut();
     } finally {
       setLeaving(false);
     }
@@ -72,18 +151,7 @@ function SideMenu({ visible, slide, onClose }: { visible: boolean; slide: Animat
   const initial = (user?.name || user?.email || "B").trim().charAt(0).toUpperCase();
 
   return (
-    <Modal visible={visible} transparent animationType="none" onRequestClose={onClose} statusBarTranslucent>
-      <Animated.View style={[StyleSheet.absoluteFill, styles.shade, { opacity: slide }]}>
-        <Pressable accessibilityLabel="Close menu" style={StyleSheet.absoluteFill} onPress={onClose} />
-      </Animated.View>
-      <Animated.View
-        accessibilityViewIsModal
-        style={[
-          styles.panel,
-          { width: panel, paddingTop: insets.top + space.m, paddingBottom: insets.bottom + space.m },
-          { transform: [{ translateX: slide.interpolate({ inputRange: [0, 1], outputRange: [-panel, 0] }) }] },
-        ]}
-      >
+    <>
         <View style={styles.head}>
           <View style={styles.avatar}>
             <Text style={styles.avatarText}>{initial}</Text>
@@ -124,14 +192,25 @@ function SideMenu({ visible, slide, onClose }: { visible: boolean; slide: Animat
           </View>
           <Text style={[styles.label, { flex: 1 }]}>{leaving ? "Signing out…" : "Sign out"}</Text>
         </Pressable>
-      </Animated.View>
-    </Modal>
+    </>
   );
 }
 
 const styles = StyleSheet.create({
-  shade: { backgroundColor: "rgba(17,17,17,0.35)" },
-  panel: { position: "absolute", top: 0, bottom: 0, left: 0, backgroundColor: colours.canvas, paddingHorizontal: space.m, borderTopRightRadius: radius.l, borderBottomRightRadius: radius.l },
+  root: { flex: 1, backgroundColor: colours.panel },
+  app: { flex: 1, backgroundColor: colours.canvas, overflow: "hidden" },
+  appLifted: {
+    borderTopLeftRadius: radius.l,
+    borderBottomLeftRadius: radius.l,
+    shadowColor: "#000",
+    shadowOpacity: 0.18,
+    shadowRadius: 18,
+    shadowOffset: { width: -4, height: 0 },
+    elevation: 12,
+  },
+  shade: { backgroundColor: "rgba(17,17,17,0.12)" },
+  edge: { position: "absolute", left: 0, bottom: 0, width: 16 },
+  panel: { position: "absolute", top: 0, bottom: 0, left: 0, paddingHorizontal: space.m },
   head: { flexDirection: "row", alignItems: "center", gap: space.m, padding: space.s, paddingBottom: space.l, borderBottomWidth: 1, borderBottomColor: colours.line },
   avatar: { width: 46, height: 46, borderRadius: 23, backgroundColor: colours.lilac, alignItems: "center", justifyContent: "center" },
   avatarText: { fontFamily: fonts.display, fontSize: 22, color: colours.ink },

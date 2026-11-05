@@ -42,7 +42,7 @@ function Screens() {
   if (checking) return null;
 
   return (
-    <MenuProvider>
+    <MenuProvider enabled={signedIn}>
       <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colours.canvas } }}>
         <Stack.Screen name="index" />
         <Stack.Protected guard={signedIn}>
