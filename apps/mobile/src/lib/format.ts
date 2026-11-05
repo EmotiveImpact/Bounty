@@ -1,6 +1,6 @@
 // Money, dates and barcodes for people, the same way the website shows them.
-// These copy the website's helpers (src/api.ts); once the repo is a
-// monorepo they move to packages/shared so both apps use one copy.
+// These copy the website's helpers (apps/web/src/api.ts); next they
+// move to packages/shared so both apps use one copy.
 
 const gbp = new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });
 

@@ -21,7 +21,7 @@ import { Icon } from "./icons";
 import { useMenu } from "./side-menu";
 import { colours, fonts, radius, space } from "./theme";
 
-// The app's building blocks, matching the website's kit (src/ui/kit.tsx):
+// The app's building blocks, matching the website's kit (apps/web/src/ui/kit.tsx):
 // build every screen from these so the look stays one look.
 
 // ---------- text ----------

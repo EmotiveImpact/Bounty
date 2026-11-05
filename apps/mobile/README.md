@@ -64,7 +64,7 @@ npx expo lint
   of Cal Sans v2 at GEOM 50, opsz 45, OFL licence alongside).
 
 `src/lib/format.ts` and `src/lib/types.ts` copy the website's helpers. When
-the repo becomes a monorepo they move to `packages/shared`.
+we start using `packages/shared` they move there.
 
 ## Not in this version
 

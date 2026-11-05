@@ -54,9 +54,9 @@ const STIRCHLEY_OP = { id: 900004, store: "Home Bargains", place: "B29 6HH", cit
 const ROMFORD_OP = { id: 900005, store: "Home Bargains", place: "RM1 3ER", city: "Romford", osm_id: "node/503" };
 
 async function setUp(app, observation = PRESTON_OP) {
-  const { openDb } = await import("../server/db.mjs");
-  const { londonDate } = await import("../server/http.mjs");
-  const { storeLookup, upsertObservations, upsertResearch } = await import("../server/evidence.mjs");
+  const { openDb } = await import("../apps/server/db.mjs");
+  const { londonDate } = await import("../apps/server/http.mjs");
+  const { storeLookup, upsertObservations, upsertResearch } = await import("../apps/server/evidence.mjs");
   const now = new Date().toISOString();
   const ago = (n) => londonDate(new Date(Date.now() - n * DAY));
   const db = openDb(join(app.dataDir, "desk.sqlite"));

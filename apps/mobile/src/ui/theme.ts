@@ -1,4 +1,4 @@
-// The agreed bold look (the website's src/proto/proto-bold.css): a white
+// The agreed bold look (the website's apps/web/src/proto/proto-bold.css): a white
 // canvas, one light bright tint per tab with dark text, Cal Sans headings and
 // Google Sans for everything else.
 

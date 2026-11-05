@@ -1,5 +1,5 @@
 // The shapes the Bounty server sends. Copied from the website for now; they
-// move to packages/shared with the monorepo so both apps read one copy.
+// move to packages/shared next so both apps read one copy.
 
 export type Verdict = "buy" | "think" | "leave" | "unknown";
 

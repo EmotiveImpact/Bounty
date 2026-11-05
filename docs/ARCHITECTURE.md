@@ -1,10 +1,10 @@
 # Bounty architecture and module contracts
 
-This is the working contract between modules. Money is integer pence and time is minutes everywhere on the server; the client converts pounds at the edge. Timestamps are ISO 8601 in UTC. Calendar dates (`YYYY-MM-DD`) are UK dates: "today" for payouts, cash dates, deadlines and ledger entries is `londonDate(now)` from `server/http.mjs`. The interface shows every date and time in UK time, never a raw ISO string.
+This is the working contract between modules. Money is integer pence and time is minutes everywhere on the server; the client converts pounds at the edge. Timestamps are ISO 8601 in UTC. Calendar dates (`YYYY-MM-DD`) are UK dates: "today" for payouts, cash dates, deadlines and ledger entries is `londonDate(now)` from `apps/server/http.mjs`. The interface shows every date and time in UK time, never a raw ISO string.
 
 ## Evidence classes
 
-Defined in `server/contract.mjs` and never pooled:
+Defined in `apps/server/contract.mjs` and never pooled:
 
 | Kind                      | Meaning                                   | Used for                          |
 | ------------------------- | ----------------------------------------- | --------------------------------- |
@@ -39,13 +39,13 @@ The data folder (`.data/` or `BOUNTY_DATA_DIR`) is created with mode 0700 and `d
 
 `app.mjs` mounts every `routes-*.mjs`. A route module exports `routes(db)` returning `[method, pattern, handler, options?]`. Patterns use `:name` segments. Handlers receive `{ req, url, params, body }` and return JSON or `reply(status, value)`; client errors throw via `fail(message, status)`. `options.limit` raises the JSON body limit (default 64 KB).
 
-The API answers only requests whose Host header is exactly `127.0.0.1`, `localhost` or `[::1]` (with any port), so a rebound domain or a numeric lookalike such as `0x7f.1` is refused. Writes are refused when the Origin is anything other than `scheme://` one of those hosts with an optional port (parsed as strictly as the Host header, so `null`, `evil-localhost` and numeric lookalikes are refused) or `Sec-Fetch-Site` is `cross-site`, and they need the media type `application/json` itself (a parameter that merely mentions JSON is refused), which a cross-site form cannot send without a preflight. The body limit counts bytes, and the body is decoded once, so a character split across network chunks is kept intact. `isoDate` rejects impossible dates with a 400. Responses are JSON, `no-store` and `nosniff`; unexpected errors return a 500 without details. By default it listens on 127.0.0.1 only. A hosted copy (`server/access.mjs`, [DEPLOY.md](DEPLOY.md)) adds the host names in `BOUNTY_PUBLIC_HOSTS` (and, on Vercel, the deployment's own addresses) to the accepted Host and Origin hosts, and then requires HTTP Basic credentials whose password matches `BOUNTY_PASSWORD` on every request, checked straight after the Host header and before any route is matched. The API refuses to start if it would listen beyond this machine, or name public hosts, without a password of at least 16 characters.
+The API answers only requests whose Host header is exactly `127.0.0.1`, `localhost` or `[::1]` (with any port), so a rebound domain or a numeric lookalike such as `0x7f.1` is refused. Writes are refused when the Origin is anything other than `scheme://` one of those hosts with an optional port (parsed as strictly as the Host header, so `null`, `evil-localhost` and numeric lookalikes are refused) or `Sec-Fetch-Site` is `cross-site`, and they need the media type `application/json` itself (a parameter that merely mentions JSON is refused), which a cross-site form cannot send without a preflight. The body limit counts bytes, and the body is decoded once, so a character split across network chunks is kept intact. `isoDate` rejects impossible dates with a 400. Responses are JSON, `no-store` and `nosniff`; unexpected errors return a 500 without details. By default it listens on 127.0.0.1 only. A hosted copy (`apps/server/access.mjs`, [DEPLOY.md](DEPLOY.md)) adds the host names in `BOUNTY_PUBLIC_HOSTS` (and, on Vercel, the deployment's own addresses) to the accepted Host and Origin hosts, and then requires HTTP Basic credentials whose password matches `BOUNTY_PASSWORD` on every request, checked straight after the Host header and before any route is matched. The API refuses to start if it would listen beyond this machine, or name public hosts, without a password of at least 16 characters.
 
-## Trip economics (`server/trip.mjs`)
+## Trip economics (`apps/server/trip.mjs`)
 
 `journey({ mode, miles, fare, perMile, extra, minutes })` gives the cost and minutes of one return journey. `tripEconomics(input)` returns `units, sold, proceeds, costs{stock, packaging, postage, fees, returns, travel}, totalCosts, contribution, unitContribution, cashRequired, journeyPerUnit, activeMinutes, activeHours, hourly, unsoldLoss, breakEvenSale, allSellAssumed`. The journey is shared across units once. `cashRequired` is the cash that leaves before any payout. `unsoldLoss` is the loss if nothing sells. `lowerMedian(values)` is the cautious sale estimate.
 
-## Buy-alert gate (`server/alerts.mjs`)
+## Buy-alert gate (`apps/server/alerts.mjs`)
 
 `evaluateAlert(input)` returns `{ eligible, reasons, checks }`. Every check must pass on positive evidence: live evidence, exact match, positive contribution, hourly floor, every required cost and time entered (`missingInputs` must be an empty list; a blank is never zero), the journey entered (`journeyKnown`), fresh offer (observed within 7 days and not in the future), confirmed branch stock, the latest branch check found stock, the price applies at that branch (`priceAtBranch`: the branch check, or an earlier one at the same branch, recorded the shelf price, or the offer is from the same identified shop; a price seen at another shop or online never sets it, see the estimate's fifth review round), no more units planned than are likely left on the shelf (`shelfUnits`: the newest branch check's or stock report's count less units bought through bounties since; an uncounted shelf leaves this to the availability check, and a counted shelf with no units planned fails), promotion eligibility (or costing at the regular price), known parcel cost, at least three independent completed sales in 90 days from distinct named sellers, a known time to sell (and, when a cash date is set, an expected payout on or before it, where 0 days is a real cash date), display permission, the buying thresholds (Priority 1 or 2), a trial batch of at most three units for an unproven item, demand (no more units than `demandUnits`: the sales rate over `sellWindowWeeks`, 2, less competing listings and units from earlier bounties for the item; unknown fails), and the trip fitting the person making it: their transport, carrying limit, cash and storage (see trip fit below). Planner fixtures always fail the first check.
 
@@ -53,7 +53,7 @@ The API answers only requests whose Host header is exactly `127.0.0.1`, `localho
 
 The cash date is met by money received, so the input carries `payoutDays`: days from the decision to the expected payout, from `goals.payoutDate` (days to sell, then the next dispatch day, delivery and the marketplace payout delay). With a cash date and no payout estimate the check fails.
 
-## Trip fit (`server/suitability.mjs`)
+## Trip fit (`apps/server/suitability.mjs`)
 
 A trip must fit the person making it: their transport, how much they can carry, the cash they can spend and their storage at home. This was added in the fifth review round (finding 4).
 
@@ -68,7 +68,7 @@ A trip must fit the person making it: their transport, how much they can carry, 
 - **Alerts.** `dispatchAlerts` never sends a go alert to a member the trip does not fit. A member with no complete profile gets a "profile" inbox entry with no figures, asking them to confirm their transport, carrying limit and storage; completing the profile (`PATCH`) sends the alert if the trip then fits. The member's card shows the fit checks, the states `confirm-profile` and `does-not-fit`, and caps the units they can claim at the units that fit.
 - **Limits.** Storage counts this trip's units only, not units the member already holds unsold. Editing a profile does not re-check live claims at once: the next read shows the new fit and the next re-check sends any notice. A trip that fits only fewer units than the figures assume is not alerted, though the card lets the member claim the units that fit. The validation audit's estimate carries no profile, so its `alert.eligible` is false; that field does not decide whether an audit item passes.
 
-## Opportunity rules (`server/opportunity.mjs`)
+## Opportunity rules (`apps/server/opportunity.mjs`)
 
 `OPPORTUNITY_RULES` holds the agreed buying thresholds: £5 to £50 purchase price per unit, under 2 kg, at least £5 profit per unit after variable costs (including the unit's share of travel) and at least a 35% return on the purchase price, with a trial batch of three. `effectiveRules(overrides)` lets a member tighten these but never loosen them. `classifyOpportunity(input)` returns one of five tiers with reasons:
 
@@ -88,13 +88,13 @@ Category rules (`CATEGORY_RULES`, still to be confirmed by Edem) apply on top of
 
 `MEMBERSHIP_TIERS` lists the early access tiers as data (names, release offsets and earned-point thresholds are still open decisions). `accessTier()` takes the earlier of a member's current paid tier and the tier their earned reputation unlocks, returning both so paid and earned status are shown separately.
 
-## Uploaded images (`server/metadata.mjs`)
+## Uploaded images (`apps/server/metadata.mjs`)
 
 `stripMetadata(buffer, mediaType)` rebuilds an image from an allowlist of the parts needed to display it, so shelf photos and receipt pictures never keep location data. For JPEG it keeps the frame, tables and scans (following progressive files scan by scan), a JFIF header, an ICC colour profile and the Adobe colour flag; it drops Exif, XMP, MPF, maker notes, comments and every other application segment, and discards everything after the end-of-image marker, where motion photos keep their video and MPF files their secondary images. For PNG it keeps image and colour chunks only and stops at IEND. A file without a scan or an end marker is refused. PDFs pass through unchanged and the caller says so. Stored files are private, as described under Layout.
 
 ## Cross-module contracts
 
-### `estimateFromEvidence(db, request)` in `server/estimate.mjs`
+### `estimateFromEvidence(db, request)` in `apps/server/estimate.mjs`
 
 Request:
 
@@ -144,7 +144,7 @@ The alert carries the `journey` check from `evaluateAlert` (input `journeyKnown`
 
 Routes: `GET /api/research/candidates` accepts `size`, `pack`, `model` and `condition` query values as operator-confirmed attributes (same rules as `offerAttributes`; the result includes `offerAttributes`). `GET /api/research/rules` adds `categories` (`CATEGORY_RULES`).
 
-Client (`src/ResearchCalculator.tsx`): journey fields are marked required and a blank one is shown as "not entered" beside every figure that depends on it; offer attributes the source left blank can be confirmed (applied only once the confirmation box is ticked, and shown as "you confirmed"); category choice with the rules and any failures; three prices side by side (the claimed column is headed "Recommended retail price" for an RRP); time until payment, with a cash date from Goals filling an empty one; the locality starts blank and is flagged until entered, because a branch check counts only in the locality stated for the trip. A blank model can be confirmed as "no model number", sent as `offerAttributes { model: "none" }`, which matches only sales that state no model. Wherever independent sellers are shown, `sample.withoutSeller` is shown beside them ("N sales with no seller name are not counted as independent"). "Add to validation audit" hands over `sales`, `weightKg` and `estimateInputs` (the request without offer, sales, locality, promotionEligible and weightKg) so the audit rebuilds the estimate on screen. Stricter thresholds use `loadMemberRules`/`saveMemberRules` from `src/api.ts`, shared with the Planner, and the default units never exceed the member's trial batch. Every input change takes a new sequence number, so a late estimate response never replaces a newer validation error or result; an estimate for older inputs is shown as updating and cannot be tracked, drafted or sent to the audit. A tracked trip sends `predicted.sample` and `payoutBy`, and a sample trip's label ends "(sample)".
+Client (`apps/web/src/ResearchCalculator.tsx`): journey fields are marked required and a blank one is shown as "not entered" beside every figure that depends on it; offer attributes the source left blank can be confirmed (applied only once the confirmation box is ticked, and shown as "you confirmed"); category choice with the rules and any failures; three prices side by side (the claimed column is headed "Recommended retail price" for an RRP); time until payment, with a cash date from Goals filling an empty one; the locality starts blank and is flagged until entered, because a branch check counts only in the locality stated for the trip. A blank model can be confirmed as "no model number", sent as `offerAttributes { model: "none" }`, which matches only sales that state no model. Wherever independent sellers are shown, `sample.withoutSeller` is shown beside them ("N sales with no seller name are not counted as independent"). "Add to validation audit" hands over `sales`, `weightKg` and `estimateInputs` (the request without offer, sales, locality, promotionEligible and weightKg) so the audit rebuilds the estimate on screen. Stricter thresholds use `loadMemberRules`/`saveMemberRules` from `apps/web/src/api.ts`, shared with the Planner, and the default units never exceed the member's trial batch. Every input change takes a new sequence number, so a late estimate response never replaces a newer validation error or result; an estimate for older inputs is shown as updating and cannot be tracked, drafted or sent to the audit. A tracked trip sends `predicted.sample` and `payoutBy`, and a sample trip's label ends "(sample)".
 
 Claimed price (`prices.claimed`): the Awin previous price (`was_price`, kind `previous`) first, then the Awin recommended retail price (`rrp_price`, kind `rrp`), then a source regular price above the offer price (kind `regular`). Was and RRP prices are read into the offer as `wasPrice` and `rrpPrice` only; they never become `regularPrice`, so they never set the cost. The stock warning is `stock.reason` from `stockStatus`.
 
@@ -253,7 +253,7 @@ Claimed price (`prices.claimed`): the Awin previous price (`was_price`, kind `pr
 - Branch check times. `recordCheck` stamps the server time when `checkedAt` is blank. Its result adds `checkedAtStamped`, `newerEvidence` (`{ kind: "check" | "report", id, at, inStock, unitsSeen }` or null) and `olderWarning`, which says a back-dated check will not change what bounties show for that shelf because a newer check or stock report decides it.
 - Import cycle: audit.mjs and estimate.mjs import each other. This is safe while neither uses the other's exports at module top level. `tableExists` is a hoisted function declaration.
 
-#### Audit UI (`src/Audit.tsx`)
+#### Audit UI (`apps/web/src/Audit.tsx`)
 
 - The pilot locality is a setting kept in localStorage ("bounty-audit-pilot-locality"). It has no default and never uses the profile area. A notice appears when it equals the planner's sample area.
 - `AuditHandover` = `AuditDraft` plus `sales`, `weightKg` and `estimateInputs`. Without these, an item handed over from Research cannot pass.
@@ -320,7 +320,7 @@ An offer is excluded with `rejected: true` when it fails a hard filter, has a bl
 
 #### Client
 
-The Planner and Goals read and write the member's stricter thresholds with `loadMemberRules` and `saveMemberRules` from `src/api.ts`. Tracking a Planner trip sends `predicted.sample: true` and `payoutBy`. Goals shows `potentialProceeds` (live predictions only) with `potentialProceedsLeftOut`, and household savings after trip costs with the gross and costs figures.
+The Planner and Goals read and write the member's stricter thresholds with `loadMemberRules` and `saveMemberRules` from `apps/web/src/api.ts`. Tracking a Planner trip sends `predicted.sample: true` and `payoutBy`. Goals shows `potentialProceeds` (live predictions only) with `potentialProceedsLeftOut`, and household savings after trip costs with the gross and costs figures.
 
 ### Ledger
 

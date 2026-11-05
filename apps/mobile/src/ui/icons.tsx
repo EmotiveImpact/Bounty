@@ -1,6 +1,6 @@
 import { SvgXml } from "react-native-svg";
 
-// Line icons from the website (src/proto/icons.tsx), drawn on a 24-unit
+// Line icons from the website (apps/web/src/proto/icons.tsx), drawn on a 24-unit
 // grid. The markup is fixed here in the source, never built from data.
 const PATHS: Record<string, string> = {
   deals:

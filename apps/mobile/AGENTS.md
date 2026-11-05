@@ -1,4 +1,4 @@
-This is the Bounty phone app (Expo, iPhone and Android). Read README.md for what it does and the code map. It calls the same server as the website in the repo root; build screens only from src/ui/kit.tsx, keep copy in British English with no em dashes, and label every made-up figure as a sample.
+This is the Bounty phone app (Expo, iPhone and Android). Read README.md for what it does and the code map. It calls the same server as the website (apps/server, live at bounty-nu.vercel.app); build screens only from src/ui/kit.tsx, keep copy in British English with no em dashes, and label every made-up figure as a sample.
 
 This is an Expo/React Native mobile application. Prioritize mobile-first patterns, performance, and cross-platform compatibility.
 

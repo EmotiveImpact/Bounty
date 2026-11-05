@@ -20,8 +20,8 @@ let app;
 let browser;
 
 async function setUp() {
-  const { openDb } = await import("../server/db.mjs");
-  const { setPermission, storeLookup, upsertResearch } = await import("../server/evidence.mjs");
+  const { openDb } = await import("../apps/server/db.mjs");
+  const { setPermission, storeLookup, upsertResearch } = await import("../apps/server/evidence.mjs");
   const now = new Date().toISOString();
   const ago = (n) => new Date(Date.now() - n * DAY).toISOString().slice(0, 10);
   const db = openDb(join(app.dataDir, "desk.sqlite"));
