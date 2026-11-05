@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 const children = [
-  spawn(process.execPath, ["server/api.mjs"], { stdio: "inherit" }),
-  spawn(process.execPath, ["node_modules/vite/bin/vite.js"], {
+  spawn(process.execPath, ["apps/server/api.mjs"], { stdio: "inherit" }),
+  spawn(process.execPath, ["node_modules/vite/bin/vite.js", "apps/web"], {
     stdio: "inherit",
   }),
 ];

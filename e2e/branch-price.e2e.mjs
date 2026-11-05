@@ -22,9 +22,9 @@ let app;
 let browser;
 
 async function setUp() {
-  const { openDb } = await import("../server/db.mjs");
-  const { londonDate } = await import("../server/http.mjs");
-  const { storeLookup, upsertObservations, upsertResearch } = await import("../server/evidence.mjs");
+  const { openDb } = await import("../apps/server/db.mjs");
+  const { londonDate } = await import("../apps/server/http.mjs");
+  const { storeLookup, upsertObservations, upsertResearch } = await import("../apps/server/evidence.mjs");
   const now = new Date().toISOString();
   const ago = (n) => londonDate(new Date(Date.now() - n * DAY));
   const db = openDb(join(app.dataDir, "desk.sqlite"));

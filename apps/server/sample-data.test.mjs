@@ -16,7 +16,7 @@ test("30 extra sample deals, each labelled sample with its own photo", () => {
   assert.equal(new Set(skus).size, skus.length, "every sku is unique");
   for (const o of allSampleOffers) {
     assert.equal(o.sample, true, o.sku);
-    assert.ok(existsSync(new URL(`../public/products/${o.sku}.jpg`, import.meta.url)), `photo for ${o.sku}`);
+    assert.ok(existsSync(new URL(`../web/public/products/${o.sku}.jpg`, import.meta.url)), `photo for ${o.sku}`);
     if (o.category === "clothing") assert.ok(o.size, `${o.sku} needs a size`);
   }
   assert.ok(new Set(allSampleOffers.map((o) => o.shop)).size >= 12, "spread across at least 12 shops");

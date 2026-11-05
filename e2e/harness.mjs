@@ -65,11 +65,12 @@ export async function startApp({ env = {} } = {}) {
   const apiPort = await freePort();
   const webPort = await freePort();
   const childEnv = { ...process.env, BOUNTY_DATA_DIR: dataDir, PORT: String(apiPort), ...env };
-  const apiProc = spawn(process.execPath, ["server/api.mjs"], { cwd: ROOT, env: childEnv, stdio: "ignore" });
+  const apiProc = spawn(process.execPath, ["apps/server/api.mjs"], { cwd: ROOT, env: childEnv, stdio: "ignore" });
   const viteScript = `
     import { createServer } from "vite";
     const server = await createServer({
-      configFile: "vite.config.js",
+      root: "apps/web",
+      configFile: "apps/web/vite.config.js",
       logLevel: "error",
       cacheDir: ${JSON.stringify(join(dataDir, "vite-cache"))},
       server: { port: ${webPort}, strictPort: true, proxy: { "/api": "http://127.0.0.1:${apiPort}" } },

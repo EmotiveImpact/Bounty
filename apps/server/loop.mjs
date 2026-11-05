@@ -15,7 +15,7 @@ let stopping = false;
 
 function runWorker() {
   return new Promise((resolve) => {
-    child = spawn(process.execPath, ["server/worker.mjs", "--scheduled"], { stdio: "inherit" });
+    child = spawn(process.execPath, ["apps/server/worker.mjs", "--scheduled"], { stdio: "inherit" });
     child.once("error", (error) => {
       console.error("Could not start the worker: " + error.message);
       resolve(1);
