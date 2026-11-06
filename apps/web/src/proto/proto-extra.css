@@ -97,16 +97,6 @@
     }
   }
 }
-/* On phones and small tablets, signed-out visitors (who have no alerts or
-   chats yet) see Sign in and Sign up where the bell and chat would be, so
-   the top bar stays on one row. */
-@media (max-width: 760px) {
-  @scope (.bx) to (.legacy) {
-    .tools.picons:has(.authbtns) > .popwrap {
-      display: none;
-    }
-  }
-}
 
 /* Finish trip sign-off. */
 @scope (.bx) to (.legacy) {
