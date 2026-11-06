@@ -15,7 +15,7 @@ There are two ways to put Bounty online. Both need either member sign-in (accoun
 With `DATABASE_URL` set to a Postgres connection string (the dev demo uses a free Neon project in London), the site opens for everyone with a **Sign in** button at the top, instead of the browser's password pop-up. Visitors can look around (every read, and POST routes marked `{ read: true }` that only work something out, such as deals, scan, plan, baskets and research estimates). Saving or changing anything needs a signed-in member, and trying it while signed out opens the sign-in window. A session cookie keeps each device signed in for 30 days. Each Vercel address (production and every preview) has its own cookie, so a new preview link asks once.
 
 - New members sign up with `BOUNTY_INVITE_CODE` (at least 8 characters). Without it, sign-up is closed and only existing members can sign in.
-- Accounts and sessions are the only things kept in Postgres (`server/accounts.mjs` creates the `bounty_users` and `bounty_sessions` tables on first use). Everything else stays in SQLite, so on the free demo it can still reset.
+- Accounts and sessions are the only things kept in Postgres (`apps/server/accounts.mjs` creates the `bounty_users` and `bounty_sessions` tables on first use). Everything else stays in SQLite, so on the free demo it can still reset.
 - Passwords are stored as scrypt hashes and session tokens as SHA-256 hashes. After eight wrong passwords for one email, that email is refused for 15 minutes.
 - When `DATABASE_URL` is set, `BOUNTY_PASSWORD` is ignored.
 
@@ -27,16 +27,20 @@ Without `DATABASE_URL`, the shared password applies.
 
 A hosted API refuses to start without `DATABASE_URL` or `BOUNTY_PASSWORD` (at least 16 characters). Every request must carry it, and the browser asks for it the first time the app calls the API: type any user name and the password. Anyone with the password can see and change everything, including acting as any member, so share it only with people you would trust with the whole database.
 
-Settings (read by `server/access.mjs`):
+Settings (read by `apps/server/access.mjs`):
 
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | Postgres (Neon) connection string; turns on member sign-in |
 | `BOUNTY_INVITE_CODE` | Code new members enter to sign up |
+| `BOUNTY_OPERATORS` | Comma-separated emails that may use Admin (tips desk, sources, evidence, audit). With member accounts on, nobody else can, so set it before relying on Admin |
 | `BOUNTY_PASSWORD` | Required whenever the API is reachable beyond this machine, unless `DATABASE_URL` is set |
 | `BOUNTY_PUBLIC_HOSTS` | Extra host names the API answers, besides localhost. On Vercel the deployment's own addresses are added automatically |
 | `BOUNTY_LISTEN_HOST` | Address to listen on (`0.0.0.0` in the Dockerfile) |
 | `BOUNTY_DATA_DIR` | Where the database, proofs and photos live (`/tmp/bounty-data` on Vercel, `/data` in the Dockerfile) |
+| `RESEND_API_KEY` | Key from resend.com for account emails (confirm email, reset password). Without it no email is sent and Admin > Members makes reset links by hand |
+| `BOUNTY_MAIL_FROM` | Who account emails come from, on a domain set up in Resend, e.g. `Bounty <hello@grababounty.com>` |
+| `BOUNTY_KEEP_DATA` | `off` stops copying members' records to Neon on Vercel (on by default when `DATABASE_URL` is set) |
 
 Partner credentials (`HOBNIGHT_API_KEY`, `KEEPA_API_KEY`, `EBAY_ACCESS_TOKEN`) go in the same environment variables if you have them. They stay on the server.
 
@@ -44,9 +48,11 @@ On your own computer nothing changes: with none of these set, the API listens on
 
 ## Free demo on Vercel
 
-`vercel.json` builds the Vite app and sends every `/api/...` request to one Vercel Function (`api/index.mjs`) in London (`lhr1`). The function runs the same API as on your own computer, with its SQLite database in the function's temporary storage (`server/demo.mjs`). The first request to a fresh function imports Open Prices, and so does the first request after the prices are six hours old.
+`vercel.json` builds the Vite app and sends every `/api/...` request to one Vercel Function (`api/index.mjs`) in London (`lhr1`). The function runs the same API as on your own computer, with its SQLite database in the function's temporary storage (`apps/server/demo.mjs`). The first request to a fresh function imports Open Prices, and so does the first request after the prices are six hours old.
 
-What you enter (ledger trips, bounties, members, audit items, proofs) lasts only as long as the function instance. Vercel stops an idle instance after a while and may run more than one at once, and each has its own database. Treat the demo as somewhere to click around, not somewhere to keep records.
+With `DATABASE_URL` set (the Neon database used for sign-in), what members enter (ledger trips, bounties, goals, audit items, proofs and shelf photos) is kept for good: `apps/server/keep.mjs` copies the SQLite database and those files to Neon tables `bounty_keep` and `bounty_keep_files` after every change, and copies them back when Vercel starts a fresh instance. Changes run one at a time per instance, and each save only goes through if no other instance saved first, so two instances do not overwrite each other. Set `BOUNTY_KEEP_DATA=off` to go back to the old behaviour.
+
+Without `DATABASE_URL` (the password-only demo), what you enter lasts only as long as the function instance. Vercel stops an idle instance after a while and may run more than one at once, and each has its own database.
 
 1. In Vercel choose **Add New**, **Project** and import `EmotiveImpact/Bounty`. `vercel.json` sets the build, so the defaults can stay.
 2. Under **Settings**, **Environment Variables**, add `DATABASE_URL` and `BOUNTY_INVITE_CODE` (or `BOUNTY_PASSWORD` for the older shared password) and redeploy.

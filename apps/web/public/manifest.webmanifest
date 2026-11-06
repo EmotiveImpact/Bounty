@@ -1,0 +1,16 @@
+{
+  "name": "Bounty",
+  "short_name": "Bounty",
+  "description": "Find deals you can resell for profit, scan in the shop, and track your stock and money.",
+  "start_url": "/#Deals",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "lang": "en-GB",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

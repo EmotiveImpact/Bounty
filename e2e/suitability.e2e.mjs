@@ -23,9 +23,9 @@ let app;
 let browser;
 
 async function setUp() {
-  const { openDb } = await import("../server/db.mjs");
-  const { londonDate } = await import("../server/http.mjs");
-  const { storeLookup, upsertObservations, upsertResearch } = await import("../server/evidence.mjs");
+  const { openDb } = await import("../apps/server/db.mjs");
+  const { londonDate } = await import("../apps/server/http.mjs");
+  const { storeLookup, upsertObservations, upsertResearch } = await import("../apps/server/evidence.mjs");
   const now = new Date().toISOString();
   const ago = (n) => londonDate(new Date(Date.now() - n * DAY));
   const db = openDb(join(app.dataDir, "desk.sqlite"));
@@ -115,7 +115,7 @@ test(
   async () => {
     await setUp();
     const who = { 390: "Ann", 1280: "Bea" };
-    await atWidths(browser, app.url + "/#Bounties", async (page, width) => {
+    await atWidths(browser, app.url + "/#Admin", async (page, width) => {
       const name = who[width];
       await page.getByLabel("Acting as").selectOption({ label: name });
       const card = page.locator("article.bounty", { hasText: "Mini speaker" });
@@ -273,11 +273,16 @@ test(
       await costs.getByLabel("Locality for the stock check").fill("Camden");
       return costs.locator(".trip-profile");
     };
+    // The full planner sits below My trip; its profile is edited in a window.
+    const openPlannerProfile = async (page) => {
+      await page.goto(app.url + "/#Planner");
+      await page.getByRole("button", { name: "Show the full planner" }).click();
+      await page.locator(".planner-profilebar").getByRole("button", { name: "Edit profile" }).click();
+    };
     await atWidths(browser, app.url + "/", async (page) => {
-      // Opening the Planner (the landing tab) saves nothing.
+      // Opening the Planner saves nothing.
       await page.evaluate(() => localStorage.clear());
-      await page.reload();
-      await page.getByRole("heading", { name: "Your buying profile" }).waitFor();
+      await openPlannerProfile(page);
       await page.waitForTimeout(400);
       assert.equal(await page.evaluate(() => localStorage.getItem("bounty-profile")), null, "the Planner's starting values are not saved");
       await page.getByText("The transport, cash, carry limit and storage you change here are kept in this browser to fill in Research and member forms.").waitFor();
@@ -293,7 +298,7 @@ test(
         assert.equal(await profile.getByLabel(label).inputValue(), "", `${label} stays blank`);
       // The member form's button fills nothing in either, and says where to change them.
       const memberForm = async () => {
-        await page.goto(app.url + "/#Bounties");
+        await page.goto(app.url + "/#Admin");
         await page.getByLabel("Acting as").selectOption({ label: "Ann" });
         await page.locator("summary", { hasText: "Edit profile, alerts and paid tier" }).click();
         const form = page.locator(".member-area form.member-form");
@@ -314,7 +319,7 @@ test(
       assert.equal(await form.getByLabel("How much you can carry (kg)").inputValue(), "");
       // Changing the transport marks that field alone.
       await page.evaluate(() => sessionStorage.clear());
-      await page.goto(app.url + "/");
+      await openPlannerProfile(page);
       await page.getByRole("combobox", { name: /^Transport/ }).selectOption("Car");
       await page.waitForFunction(() => JSON.parse(localStorage.getItem("bounty-profile") || "{}").transport === "Car");
       assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem("bounty-profile")).edited), ["transport"]);

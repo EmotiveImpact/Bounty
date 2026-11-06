@@ -1,0 +1,28 @@
+/* Help, Terms and Privacy. */
+.lg { display: grid; gap: 18px; }
+.lg-text { max-width: 760px; font-size: 15.5px; line-height: 1.6; color: #222; }
+.lg-text h2 { font-family: var(--display, inherit); font-weight: 500; font-size: 22px; margin: 28px 0 8px; }
+.lg-text h2:first-child { margin-top: 4px; }
+.lg-text p, .lg-text ul { margin: 0 0 10px; }
+.lg-text ul { padding-left: 20px; }
+.lg-text li { margin-bottom: 6px; }
+.lg-text a, .lg-more a { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+.lg-table { width: 100%; border-collapse: collapse; margin: 6px 0 12px; font-size: 14px; }
+.lg-table th, .lg-table td { text-align: left; vertical-align: top; padding: 10px 12px 10px 0; border-bottom: 1px solid #e6e6e6; }
+.lg-table th { font-weight: 600; }
+.lg-more { font-size: 14px; color: #555; margin: 14px 0 0; }
+.lg-two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px; align-items: start; }
+.lg-faq { display: grid; gap: 8px; }
+.lg-faq details { background: #f4f4f2; border-radius: 16px; padding: 14px 16px; }
+.lg-faq summary { cursor: pointer; font-weight: 600; }
+.lg-faq p { margin: 8px 0 0; line-height: 1.55; color: #333; }
+.lg-msg { width: 100%; min-height: 120px; resize: vertical; font: inherit; padding: 12px 14px; }
+.lg-foot { display: flex; flex-wrap: wrap; gap: 6px 18px; justify-content: center; padding: 36px 16px 24px; font-size: 13px; color: #666; }
+.lg-foot a { color: inherit; }
+@media (max-width: 900px) {
+  .lg-two { grid-template-columns: 1fr; }
+  .lg-table thead { display: none; }
+  .lg-table tr { display: grid; padding: 8px 0; border-bottom: 1px solid #e6e6e6; }
+  .lg-table td { border: 0; padding: 2px 0; }
+  .lg-table td:first-child { font-weight: 600; }
+}

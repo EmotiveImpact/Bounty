@@ -1,4 +1,0 @@
-/* Admin layout (proto/Admin.tsx). */
-.adm { display: grid; gap: 20px; font-family: var(--k-sans); }
-.adm-legacy { min-width: 0; }
-.rs { display: grid; gap: 22px; }

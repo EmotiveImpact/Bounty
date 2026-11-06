@@ -65,11 +65,12 @@ export async function startApp({ env = {} } = {}) {
   const apiPort = await freePort();
   const webPort = await freePort();
   const childEnv = { ...process.env, BOUNTY_DATA_DIR: dataDir, PORT: String(apiPort), ...env };
-  const apiProc = spawn(process.execPath, ["server/api.mjs"], { cwd: ROOT, env: childEnv, stdio: "ignore" });
+  const apiProc = spawn(process.execPath, ["apps/server/api.mjs"], { cwd: ROOT, env: childEnv, stdio: "ignore" });
   const viteScript = `
     import { createServer } from "vite";
     const server = await createServer({
-      configFile: "vite.config.js",
+      root: "apps/web",
+      configFile: "apps/web/vite.config.js",
       logLevel: "error",
       cacheDir: ${JSON.stringify(join(dataDir, "vite-cache"))},
       server: { port: ${webPort}, strictPort: true, proxy: { "/api": "http://127.0.0.1:${apiPort}" } },
@@ -122,6 +123,15 @@ export async function atWidths(browser, url, fn, widths = [390, 1280]) {
     const errors = [];
     page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
     page.on("pageerror", (e) => errors.push(String(e)));
+    // Skip the first-visit "Where do you hunt?" window; it would sit over
+    // every screen the tests use.
+    await page.addInitScript(() => {
+      try {
+        localStorage.setItem("bounty-onboarded", "true");
+      } catch {
+        // A page without storage still shows the window; tests then fail loudly.
+      }
+    });
     await page.goto(url);
     await fn(page, width);
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);

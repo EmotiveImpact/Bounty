@@ -54,7 +54,7 @@ For repeatable local scheduling, run `npm run worker:loop` in a separate process
 
 Every import, scheduled or manual, successful, failed or served from the cache, is recorded in `import_runs` with its source, mode, query or file, row count and error. Errors pass through redaction so a credential can never be stored. The Sources tab shows, for each source, its configuration status, licence, rows stored, last successful fetch, last error and the 20 most recent runs. Open Prices is marked stale when it has had no successful import for 24 hours.
 
-The repository's sample files in `server/fixtures/` are refused as evidence wherever they are copied to, and so is any file holding one of their rows.
+The repository's sample files in `apps/server/fixtures/` are refused as evidence wherever they are copied to, and so is any file holding one of their rows.
 
 Re-importing never duplicates rows: research rows are keyed by provider and source id, observations by Open Prices price id. A repeat refreshes the stored fields and the import time but keeps the first import time, and the source date (when the price was observed or the item sold) is always kept apart from both. Research snapshots show the latest imported details per source record; Keepa series use a distinct id per time point.
 

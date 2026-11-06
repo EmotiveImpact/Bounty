@@ -17,15 +17,21 @@ after(async () => {
   app?.stop();
 });
 
-test("every tab opens cleanly at 390 and 1280 px", { skip: !chromium && "Playwright is not installed" }, async () => {
-  await atWidths(browser, app.url, async (page) => {
-    const tabs = page.locator("main > nav > button");
-    const count = await tabs.count();
-    assert.ok(count >= 4, "expected the app's tabs");
-    for (let i = 0; i < count; i++) {
-      await tabs.nth(i).click();
+// Every screen of the app, by its address.
+const SCREENS = ["Deals", "Scan", "Bounties", "Ledger", "Goals", "Planner", "Research", "Saved", "Profile", "Plans", "Crew", "Admin"];
+
+test("every screen opens cleanly at 390 and 1280 px", { skip: !chromium && "Playwright is not installed" }, async () => {
+  await atWidths(browser, app.url, async (page, width) => {
+    // On a phone the bottom bar, on a computer the side rail: both lead to
+    // the same five main screens.
+    const bar = width < 900 ? page.locator("nav.phone-nav button") : page.locator(".strip .nav");
+    assert.ok((await bar.count()) >= 5, "expected the main screens in the menu");
+    for (const name of SCREENS) {
+      await page.evaluate((h) => (location.hash = h), name);
       await page.waitForLoadState("networkidle");
-      assert.equal(await tabs.nth(i).getAttribute("aria-pressed"), "true");
+      const heading = page.locator("main h1").first();
+      await heading.waitFor({ timeout: 10000 });
+      assert.ok((await heading.innerText()).trim().length > 0, `${name} has a heading`);
     }
   });
 });

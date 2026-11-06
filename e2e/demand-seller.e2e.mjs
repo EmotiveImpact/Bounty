@@ -38,8 +38,8 @@ const shot = async (target, name) => {
 
 /** Offer, sales, an empty lookup and display permission for one item. */
 async function seed(barcode, sourceId, title) {
-  const { openDb } = await import("../server/db.mjs");
-  const { setPermission, storeLookup, upsertResearch } = await import("../server/evidence.mjs");
+  const { openDb } = await import("../apps/server/db.mjs");
+  const { setPermission, storeLookup, upsertResearch } = await import("../apps/server/evidence.mjs");
   const now = new Date().toISOString();
   const ago = (n) => new Date(Date.now() - n * DAY).toISOString().slice(0, 10);
   const db = openDb(join(app.dataDir, "desk.sqlite"));
@@ -116,8 +116,8 @@ test(
     ok(await post(`/api/bounties/${first.bounty.id}/withdraw`, {}));
     // Ann lists her 3 units on eBay as ann_resells; a lookup sees them.
     {
-      const { openDb } = await import("../server/db.mjs");
-      const { storeLookup, upsertResearch } = await import("../server/evidence.mjs");
+      const { openDb } = await import("../apps/server/db.mjs");
+      const { storeLookup, upsertResearch } = await import("../apps/server/evidence.mjs");
       const now = new Date().toISOString();
       const db = openDb(join(app.dataDir, "desk.sqlite"));
       const ids = ["ann-1", "ann-2", "ann-3"];
@@ -135,7 +135,7 @@ test(
     const second = ok(await item.bounty("Mini Bluetooth speaker"), 201);
     assert.match(second.message, /the distribution cap is 0/);
 
-    await atWidths(browser, app.url + "/#Bounties", async (page, width) => {
+    await atWidths(browser, app.url + "/#Admin", async (page, width) => {
       const card = page.locator("article.bounty:not(.closed)", { hasText: "Mini Bluetooth speaker" });
       const cap = card.locator("dt", { hasText: "Distribution cap" }).locator("xpath=following-sibling::dd[1]");
       if (width === 390) {
@@ -212,14 +212,14 @@ test(
     // As a claim made before round 5 stored it: no cash in its terms, then
     // the next re-check.
     const asOldClaim = async () => {
-      const { openDb } = await import("../server/db.mjs");
+      const { openDb } = await import("../apps/server/db.mjs");
       const db = openDb(join(app.dataDir, "desk.sqlite"));
       db.prepare("UPDATE claims SET terms = json_remove(terms, '$.cashAvailable') WHERE id = ?").run(made.claim.id);
       db.close();
       ok(await post(`/api/bounties/${bounty.id}/recheck`, {}));
     };
 
-    await atWidths(browser, app.url + "/#Bounties", async (page, width) => {
+    await atWidths(browser, app.url + "/#Admin", async (page, width) => {
       await asOldClaim();
       await page.reload();
       await page.getByLabel("Acting as").selectOption({ label: "Cat" });
@@ -267,7 +267,7 @@ test(
     // As a claim and member from before round 5 were stored: no cash with
     // the claim and no transport, carry limit or room on the profile.
     const asOld = async () => {
-      const { openDb } = await import("../server/db.mjs");
+      const { openDb } = await import("../apps/server/db.mjs");
       const db = openDb(join(app.dataDir, "desk.sqlite"));
       db.prepare("UPDATE claims SET terms = json_remove(terms, '$.cashAvailable') WHERE id = ?").run(made.claim.id);
       db.prepare("UPDATE members SET transport = NULL, carry_kg = NULL, storage_units = NULL WHERE id = ?").run(fay.id);
@@ -275,7 +275,7 @@ test(
       ok(await post(`/api/bounties/${bounty.id}/recheck`, {}));
     };
 
-    await atWidths(browser, app.url + "/#Bounties", async (page, width) => {
+    await atWidths(browser, app.url + "/#Admin", async (page, width) => {
       await asOld();
       await page.reload();
       await page.getByLabel("Acting as").selectOption({ label: "Fay" });
@@ -320,7 +320,8 @@ test(
       const errors = [];
       page.on("console", (m) => m.type() === "error" && !expected.test(m.text()) && errors.push(m.text()));
       page.on("pageerror", (e) => errors.push(String(e)));
-      await page.goto(app.url + "/#Bounties");
+      await page.addInitScript(() => localStorage.setItem("bounty-onboarded", "true"));
+      await page.goto(app.url + "/#Admin");
       await page.getByLabel("Acting as").selectOption({ label: "Hana" });
       await page.locator("summary", { hasText: "Edit profile, alerts and paid tier" }).click();
       const field = page.getByLabel("Your marketplace seller name, optional (for example your eBay user name)");
