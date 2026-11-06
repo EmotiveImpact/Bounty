@@ -8,19 +8,20 @@
     "scheme": "bounty",
     "userInterfaceStyle": "light",
     "ios": {
-      "icon": "./assets/expo.icon",
-      "bundleIdentifier": "london.bounty.app",
-      "supportsTablet": false
+      "bundleIdentifier": "com.emotiveimpact.bounty",
+      "supportsTablet": false,
+      "config": {
+        "usesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#FFFFFF",
+        "backgroundColor": "#d6f86b",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "london.bounty.app"
+      "package": "com.emotiveimpact.bounty"
     },
     "web": {
       "output": "single",
@@ -33,7 +34,7 @@
         {
           "backgroundColor": "#d6f86b",
           "image": "./assets/images/splash-icon.png",
-          "imageWidth": 76
+          "imageWidth": 140
         }
       ],
       [
@@ -49,6 +50,7 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "owner": "emotiveimpact"
   }
 }

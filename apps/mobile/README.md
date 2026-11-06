@@ -69,6 +69,19 @@ we start using `packages/shared` they move there.
 
 ## Not in this version
 
-Payments, push alerts, the Simple/Pro switch, posting tips, and the App Store
-and Google Play listings. The app id `london.bounty.app` in `app.json` is a
-placeholder until the store accounts are set up.
+Payments, push alerts, the Simple/Pro switch, posting tips, and the public
+App Store and Google Play listings.
+
+## TestFlight builds
+
+The app id is `com.emotiveimpact.bounty` on Expo account `emotiveimpact`.
+Builds run in Expo's cloud (EAS), not on a local Xcode:
+
+```sh
+npx eas-cli@latest build -p ios --profile production --auto-submit
+```
+
+The build number goes up by itself each time (`eas.json`). The first build
+asks for the Apple ID password and a two-factor code once; after that EAS
+keeps the signing certificate. The icon is the bolt-chest logo on lime
+(`assets/images/icon.png`).
