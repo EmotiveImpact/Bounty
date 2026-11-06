@@ -1,0 +1,61 @@
+{
+  "expo": {
+    "name": "Bounty",
+    "slug": "bounty",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "bounty",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "bundleIdentifier": "com.emotiveimpact.bounty",
+      "supportsTablet": false,
+      "config": {
+        "usesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#d6f86b",
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "package": "com.emotiveimpact.bounty"
+    },
+    "web": {
+      "output": "single",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#d6f86b",
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 140
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Bounty uses the camera to read barcodes in the shop.",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
+        }
+      ],
+      "expo-font"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    },
+    "owner": "emotiveimpact",
+    "extra": {
+      "eas": {
+        "projectId": "3846bd2c-22e6-4895-86af-0638a2d2d518"
+      }
+    }
+  }
+}
