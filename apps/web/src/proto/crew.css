@@ -28,9 +28,10 @@
 .cr-band-row figure { margin: 0; display: grid; gap: 8px; align-content: end; }
 .cr-band-row img {
   width: 100%;
-  aspect-ratio: 2 / 3.4;
-  object-fit: cover;
-  object-position: 50% 70%;
+  aspect-ratio: 2 / 3;
+  /* Whole body, head to feet: never crop the crew. */
+  object-fit: contain;
+  object-position: 50% 100%;
   border-radius: 18px;
   background: #fff;
   border: 1px solid var(--k-line);
@@ -53,7 +54,7 @@
   min-width: 0;
 }
 .cr-photo { background: #fff; display: grid; align-items: end; border-right: 1px solid var(--k-line); }
-.cr-photo img { width: 100%; height: 100%; aspect-ratio: 2 / 3; object-fit: cover; object-position: 50% 30%; display: block; }
+.cr-photo img { width: 100%; height: 100%; aspect-ratio: 2 / 3; object-fit: contain; object-position: 50% 100%; display: block; filter: brightness(1.04); }
 .cr-body { padding: 18px 18px 14px; display: grid; gap: 8px; align-content: start; }
 .cr-body h2 { margin: 0; font-size: 24px; line-height: 1.05; color: var(--k-ink); }
 .cr-body p { margin: 0; font-size: 14px; line-height: 1.5; color: var(--k-text); }

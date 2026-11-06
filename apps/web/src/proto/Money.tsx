@@ -23,7 +23,7 @@ import {
   useToast,
 } from "../ui/kit";
 import { TaxExport } from "./TaxExport";
-import { CrewArt } from "./CrewArt";
+import { CrewArt, CrewLoading } from "./CrewArt";
 import { exampleMoney } from "./examples";
 import "./money.css";
 
@@ -266,7 +266,7 @@ function MoneyInner({ lens, lensButtons, go }: Props) {
     return (
       <div className="mn">
         {head}
-        <p className="mn-p">Loading your figures…</p>
+        <CrewLoading look="negotiator-count">Adding up your figures…</CrewLoading>
       </div>
     );
 

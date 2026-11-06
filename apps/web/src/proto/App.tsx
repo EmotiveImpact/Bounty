@@ -16,7 +16,7 @@ import {
   type Lens,
 } from "../api";
 import { BuyingRules, ItemTile, byMode } from "../Planner";
-import { CrewArt } from "./CrewArt";
+import { CrewArt, CrewLoading } from "./CrewArt";
 import { savedExtras, type Deal } from "../Deals";
 import { Ico } from "./icons";
 import MoneyScreen from "./Money";
@@ -137,6 +137,19 @@ function fromHash(): { view: View; sku: string | null } {
   return view ? { view, sku: sku ?? null } : { view: "deals", sku: null };
 }
 
+// True when the address names a screen that does not exist, such as an
+// old or mistyped link. The app still opens on Deals, with a note.
+function unknownHash(): boolean {
+  let h = "";
+  try {
+    h = decodeURIComponent(location.hash.slice(1));
+  } catch {
+    return true;
+  }
+  const name = h.split("/")[0];
+  return name !== "" && !Object.values(HASH).includes(name);
+}
+
 const CAT_LABEL: Record<string, string> = {
   clothing: "Clothing",
   general: "Home and general",
@@ -206,6 +219,7 @@ export default function ProtoApp({
   const first = fromHash();
   const [view, setView] = useState<View>(first.view);
   const [sku, setSku] = useState<string | null>(first.sku);
+  const [lost, setLost] = useState(unknownHash);
   const [deals, setDeals] = useState<Deal[] | null>(null);
   const [error, setError] = useState("");
   const [reload, setReload] = useState(0);
@@ -295,6 +309,7 @@ export default function ProtoApp({
       const h = fromHash();
       setView(h.view);
       setSku(h.sku);
+      setLost(unknownHash());
     };
     window.addEventListener("hashchange", on);
     return () => window.removeEventListener("hashchange", on);
@@ -341,6 +356,7 @@ export default function ProtoApp({
   const go = (v: View, itemSku: string | null = null) => {
     setPop(null);
     setProfOpen(false);
+    setLost(false);
     setView(v);
     setSku(itemSku);
     if (v !== "deals") {
@@ -2335,9 +2351,18 @@ export default function ProtoApp({
           {header}
           {onboarding}
           <main className="wrap">
+            {lost && (
+              <div className="crew-note crew-lost" role="status">
+                <CrewArt look="scout-map" />
+                <div>
+                  <p className="crew-lost-title">That page has wandered off.</p>
+                  <p className="sub">The link may be old or mistyped, so here are today's deals instead.</p>
+                </div>
+              </div>
+            )}
             {error && <p className="note">{error}</p>}
             {!deals && !error && (view === "deals" || view === "item") && (
-              <p className="sub">Loading deals…</p>
+              <CrewLoading look="scout-search">Looking for deals…</CrewLoading>
             )}
             {body}
           </main>
