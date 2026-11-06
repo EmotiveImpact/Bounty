@@ -47,9 +47,8 @@ export function Title({ size = 28, style, ...rest }: TextProps & { size?: number
 /** The logo in every slot. One place to change when the new logo arrives. */
 export function Wordmark() {
   return (
-    <View accessible accessibilityLabel="Bounty London" style={s.word}>
+    <View accessible accessibilityLabel="Bounty" style={s.word}>
       <Text style={s.wordBig}>BOUNTY</Text>
-      <Text style={s.wordSmall}>LONDON</Text>
     </View>
   );
 }
@@ -316,7 +315,6 @@ export const s = StyleSheet.create({
   title: { fontFamily: fonts.display, color: colours.ink, letterSpacing: 0 },
   word: { alignItems: "center" },
   wordBig: { fontFamily: fonts.display, fontSize: 24, lineHeight: 26, color: colours.ink },
-  wordSmall: { fontFamily: fonts.textMedium, fontSize: 7.5, letterSpacing: 3.4, marginRight: -3.4, color: colours.ink },
   topbar: {
     height: 56,
     paddingHorizontal: space.l,
