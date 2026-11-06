@@ -16,7 +16,6 @@ import {
   type ViewStyle,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useAuth } from "@/lib/auth";
 import { Icon } from "./icons";
 import { useMenu } from "./side-menu";
 import { colours, fonts, radius, space } from "./theme";
@@ -62,22 +61,14 @@ export function Wordmark() {
  * down arrow on the right. Both open the side menu with the extras.
  */
 export function TopBar() {
-  const { user } = useAuth();
   const menu = useMenu();
-  const initial = (user?.name || user?.email || "B").trim().charAt(0).toUpperCase();
+  // The logo sits alone on the left; the menu button is at the far right,
+  // where a thumb reaches it. The account is at the top of the menu.
   return (
     <View style={s.topbar}>
-      <View style={s.row}>
-        <Pressable accessibilityRole="button" accessibilityLabel="Menu" onPress={menu.open} hitSlop={8} style={s.menuBtn}>
-          <Icon name="menu" size={24} />
-        </Pressable>
-        <Wordmark />
-      </View>
-      <Pressable accessibilityRole="button" accessibilityLabel="Your account" onPress={menu.open} style={s.avatarBtn} hitSlop={8}>
-        <View style={s.avatar}>
-          <Text style={s.avatarText}>{initial}</Text>
-        </View>
-        <Icon name="down" size={16} />
+      <Wordmark />
+      <Pressable accessibilityRole="button" accessibilityLabel="Menu" onPress={menu.open} hitSlop={8} style={s.menuBtn}>
+        <Icon name="menu" size={24} />
       </Pressable>
     </View>
   );
@@ -323,7 +314,6 @@ export const s = StyleSheet.create({
   small: { fontSize: 13.5, lineHeight: 19, color: colours.inkSoft },
   kicker: { fontFamily: fonts.textBold, fontSize: 12.5, letterSpacing: 1, textTransform: "uppercase", color: colours.ink },
   title: { fontFamily: fonts.display, color: colours.ink, letterSpacing: 0 },
-  row: { flexDirection: "row", alignItems: "center", gap: space.s },
   word: { alignItems: "center" },
   wordBig: { fontFamily: fonts.display, fontSize: 24, lineHeight: 26, color: colours.ink },
   wordSmall: { fontFamily: fonts.textMedium, fontSize: 7.5, letterSpacing: 3.4, marginRight: -3.4, color: colours.ink },
@@ -335,10 +325,7 @@ export const s = StyleSheet.create({
     justifyContent: "space-between",
     backgroundColor: colours.canvas,
   },
-  menuBtn: { width: 36, height: 36, alignItems: "center", justifyContent: "center", marginLeft: -6 },
-  avatarBtn: { flexDirection: "row", alignItems: "center", gap: 4 },
-  avatar: { width: 34, height: 34, borderRadius: 17, backgroundColor: colours.lilac, alignItems: "center", justifyContent: "center" },
-  avatarText: { fontFamily: fonts.textBold, fontSize: 15, color: colours.ink },
+  menuBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: colours.panel, alignItems: "center", justifyContent: "center" },
   screen: { flex: 1, backgroundColor: colours.canvas },
   page: { padding: space.l, paddingBottom: 40, gap: space.xl },
   hero: { borderRadius: radius.l, padding: space.xl, gap: space.s },

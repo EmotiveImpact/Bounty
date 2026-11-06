@@ -31,10 +31,10 @@ export function useMenu() {
   return menu;
 }
 
-// Like X and Uber: the menu sits underneath, and opening it pushes the
-// whole app to the right, leaving a dimmed strip of the page you were on.
-// Swipe in from the left edge to open it; swipe back or tap the strip to
-// close it.
+// Like X and Uber, but from the right: the menu sits underneath, and
+// opening it pushes the whole app to the left, leaving a dimmed strip of the
+// page you were on. Swipe in from the right edge to open it (the left edge
+// is the iPhone's own back gesture); swipe back or tap the strip to close it.
 
 const SPRING = { damping: 24, stiffness: 240, mass: 0.9, useNativeDriver: true } as const;
 const TAB_PATHS = ["/deals", "/tips", "/scan", "/stock", "/money"];
@@ -58,13 +58,13 @@ export function MenuProvider({ enabled, children }: { enabled: boolean; children
   const open = useCallback(() => settle(1), [settle]);
   const close = useCallback(() => settle(0), [settle]);
 
-  // Swipe in from the left edge of a tab to open.
+  // Swipe in from the right edge of a tab to open.
   const edge = useMemo(
     () =>
       PanResponder.create({
-        onMoveShouldSetPanResponder: (_, g) => g.dx > 6 && Math.abs(g.dx) > Math.abs(g.dy),
-        onPanResponderMove: (_, g) => progress.setValue(clamp(g.dx / panel)),
-        onPanResponderRelease: (_, g) => settle(g.vx > 0.3 || g.dx > panel / 3 ? 1 : 0),
+        onMoveShouldSetPanResponder: (_, g) => g.dx < -6 && Math.abs(g.dx) > Math.abs(g.dy),
+        onPanResponderMove: (_, g) => progress.setValue(clamp(-g.dx / panel)),
+        onPanResponderRelease: (_, g) => settle(g.vx < -0.3 || g.dx < -panel / 3 ? 1 : 0),
         onPanResponderTerminate: () => settle(0),
       }),
     [panel, progress, settle],
@@ -73,9 +73,9 @@ export function MenuProvider({ enabled, children }: { enabled: boolean; children
   const back = useMemo(
     () =>
       PanResponder.create({
-        onMoveShouldSetPanResponder: (_, g) => g.dx < -6 && Math.abs(g.dx) > Math.abs(g.dy),
-        onPanResponderMove: (_, g) => progress.setValue(clamp(1 + g.dx / panel)),
-        onPanResponderRelease: (_, g) => settle(g.vx < -0.3 || g.dx < -panel / 3 ? 0 : 1),
+        onMoveShouldSetPanResponder: (_, g) => g.dx > 6 && Math.abs(g.dx) > Math.abs(g.dy),
+        onPanResponderMove: (_, g) => progress.setValue(clamp(1 - g.dx / panel)),
+        onPanResponderRelease: (_, g) => settle(g.vx > 0.3 || g.dx > panel / 3 ? 0 : 1),
         onPanResponderTerminate: () => settle(1),
       }),
     [panel, progress, settle],
@@ -96,7 +96,7 @@ export function MenuProvider({ enabled, children }: { enabled: boolean; children
               { width: panel, paddingTop: insets.top + space.m, paddingBottom: insets.bottom + space.m },
               {
                 opacity: progress.interpolate({ inputRange: [0, 0.4, 1], outputRange: [0, 0.6, 1] }),
-                transform: [{ translateX: progress.interpolate({ inputRange: [0, 1], outputRange: [-panel * 0.25, 0] }) }],
+                transform: [{ translateX: progress.interpolate({ inputRange: [0, 1], outputRange: [panel * 0.25, 0] }) }],
               },
             ]}
           >
@@ -108,7 +108,7 @@ export function MenuProvider({ enabled, children }: { enabled: boolean; children
           style={[
             styles.app,
             isOpen && styles.appLifted,
-            { transform: [{ translateX: progress.interpolate({ inputRange: [0, 1], outputRange: [0, panel] }) }] },
+            { transform: [{ translateX: progress.interpolate({ inputRange: [0, 1], outputRange: [0, -panel] }) }] },
           ]}
         >
           {children}
@@ -197,20 +197,20 @@ function MenuList({ onClose }: { onClose: () => void }) {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: colours.panel },
+  root: { flex: 1, backgroundColor: colours.panel, overflow: "hidden" },
   app: { flex: 1, backgroundColor: colours.canvas, overflow: "hidden" },
   appLifted: {
-    borderTopLeftRadius: radius.l,
-    borderBottomLeftRadius: radius.l,
+    borderTopRightRadius: radius.l,
+    borderBottomRightRadius: radius.l,
     shadowColor: "#000",
     shadowOpacity: 0.18,
     shadowRadius: 18,
-    shadowOffset: { width: -4, height: 0 },
+    shadowOffset: { width: 4, height: 0 },
     elevation: 12,
   },
   shade: { backgroundColor: "rgba(17,17,17,0.12)" },
-  edge: { position: "absolute", left: 0, bottom: 0, width: 16 },
-  panel: { position: "absolute", top: 0, bottom: 0, left: 0, paddingHorizontal: space.m },
+  edge: { position: "absolute", right: 0, bottom: 0, width: 16 },
+  panel: { position: "absolute", top: 0, bottom: 0, right: 0, paddingHorizontal: space.m },
   head: { flexDirection: "row", alignItems: "center", gap: space.m, padding: space.s, paddingBottom: space.l, borderBottomWidth: 1, borderBottomColor: colours.line },
   avatar: { width: 46, height: 46, borderRadius: 23, backgroundColor: colours.lilac, alignItems: "center", justifyContent: "center" },
   avatarText: { fontFamily: fonts.display, fontSize: 22, color: colours.ink },
