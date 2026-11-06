@@ -5,6 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { Talk } from "./Talk";
 import {
   api,
   loadLens,
@@ -1680,6 +1681,7 @@ export default function ProtoApp({
               )}
             </div>
           </div>
+          <Talk kind="deal" shop={d.shop} area={d.area} sells={d.salePrice} flat />
         </div>
         <div className="two" style={{ marginTop: 20 }}>
           <div className="panel chart">

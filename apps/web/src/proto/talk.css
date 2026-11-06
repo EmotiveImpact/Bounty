@@ -1,0 +1,202 @@
+/* Comment thread under a deal or a tip (sample). Uses the global kit tokens
+   so it looks the same inside the page and inside a window. */
+.talk {
+  background: var(--k-surface, #fff);
+  border: 1px solid var(--k-line, #e8e6ee);
+  border-radius: 14px;
+  padding: 18px;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.talk-head {
+  display: grid;
+  gap: 4px;
+}
+.talk-head h3 {
+  margin: 0;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.talk-head small {
+  color: var(--k-muted, #64626e);
+  font-size: 13px;
+}
+.talk-sample {
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--k-tile, #f5f4f8);
+  color: var(--k-muted, #64626e);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+.talk-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.talk-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1.5px solid var(--k-line-2, #d4d1dc);
+  background: var(--k-surface, #fff);
+  color: var(--k-ink, #111);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.talk-chip i {
+  font-style: normal;
+}
+.talk-chip.on {
+  border-color: var(--k-ink, #111);
+  background: var(--k-sky, #cfe4ff);
+}
+.talk-form {
+  display: flex;
+  gap: 8px;
+}
+.talk-form input {
+  flex: 1;
+  min-width: 0;
+  height: 42px;
+  border-radius: 10px;
+  border: 1.5px solid var(--k-line-2, #d4d1dc);
+  padding: 0 12px;
+  font: inherit;
+  font-size: 14px;
+  background: var(--k-surface, #fff);
+  color: var(--k-ink, #111);
+}
+.talk-post {
+  height: 42px;
+  padding: 0 18px;
+  border-radius: 999px;
+  border: 0;
+  background: var(--k-ink, #111);
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.talk-post:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.talk-warn {
+  margin: -4px 0 0;
+  font-size: 13px;
+  color: var(--k-loss, #b42318);
+}
+.talk-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+}
+.talk-list li {
+  display: grid;
+  grid-template-columns: 34px 1fr auto;
+  gap: 10px;
+  padding: 12px 0;
+  border-top: 1px solid var(--k-line, #e8e6ee);
+  align-items: start;
+}
+.talk-av {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--k-tile, #f5f4f8);
+  font-weight: 700;
+  font-size: 14px;
+}
+.talk-body {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.talk-body p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.talk-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--k-muted, #64626e);
+}
+.talk-meta b {
+  color: var(--k-ink, #111);
+}
+.talk-tag {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 2px 9px;
+  background: var(--k-tile, #f5f4f8);
+}
+.talk-tag i {
+  font-style: normal;
+}
+.talk-tag.ok,
+.talk-tag.sold {
+  background: var(--k-profit-bg, #e3f3ea);
+  color: var(--k-profit, #0b8a43);
+}
+.talk-tag.gone {
+  background: var(--k-loss-bg, #fdecea);
+  color: var(--k-loss, #b42318);
+}
+.talk-tag.price {
+  background: var(--k-warn-bg, #fff4d6);
+  color: var(--k-warn, #8a5a00);
+}
+.talk-tag.where {
+  background: var(--k-sky, #cfe4ff);
+  color: #1d3f7a;
+}
+.talk-gone {
+  color: var(--k-muted, #64626e);
+  font-style: italic;
+}
+.talk-report {
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  color: var(--k-muted, #64626e);
+  cursor: pointer;
+  padding: 2px 0;
+}
+.talk-report:hover {
+  text-decoration: underline;
+}
+.talk-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--k-muted, #64626e);
+}
+.talk.flat {
+  background: #f3f3f5;
+  border: 0;
+  border-radius: 22px;
+}
+.talk.flat .talk-list li {
+  border-top-color: #e2e2e6;
+}
