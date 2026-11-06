@@ -51,6 +51,11 @@
       "typedRoutes": true,
       "reactCompiler": true
     },
-    "owner": "emotiveimpact"
+    "owner": "emotiveimpact",
+    "extra": {
+      "eas": {
+        "projectId": "3846bd2c-22e6-4895-86af-0638a2d2d518"
+      }
+    }
   }
 }
