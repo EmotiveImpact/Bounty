@@ -1,6 +1,6 @@
 /* The campaign look Edem agreed on 2026-11-02 (mock: bounty-bold.html):
    white page, one light bright colour per tab, Cal Sans headings at Medium
-   weight, Google Sans for everything else, and the BOUNTY LONDON wordmark.
+   weight, Google Sans for everything else, and the BOUNTY wordmark.
    Loaded after proto.css and proto-extra.css so it wins. The tab colour
    comes from data-tab on the .bx shell. */
 @scope (.bx) to (.legacy) {

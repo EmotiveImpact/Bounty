@@ -38,9 +38,8 @@ import "./proto-bold.css";
 // The logo in every slot. One place to change when the new logo arrives.
 function Wordmark() {
   return (
-    <span className="wordmark" aria-label="Bounty London">
+    <span className="wordmark" aria-label="Bounty">
       <b aria-hidden="true">BOUNTY</b>
-      <small aria-hidden="true">LONDON</small>
     </span>
   );
 }
