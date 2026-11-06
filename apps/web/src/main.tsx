@@ -9,6 +9,7 @@ import { clearResearchDraft } from "./ResearchCalculator";
 import Ledger from "./Ledger";
 import ProtoApp, { type View } from "./proto/App";
 import SignIn, { type Member } from "./SignIn";
+import { Button, Window } from "./ui/kit";
 import { reloadPlans } from "./plans";
 import { SIGN_IN_EVENT } from "./api";
 
@@ -89,6 +90,33 @@ type Auth = { required: boolean; inviteOpen: boolean; member: Member | null; ope
 function Root() {
   const [auth, setAuth] = React.useState<Auth>({ required: false, inviteOpen: false, member: null, operator: true });
   const [signingIn, setSigningIn] = React.useState<false | "in" | "up">(false);
+  // Links in account emails: #reset=<token> and #verify=<token>.
+  const [resetToken, setResetToken] = React.useState<string | null>(null);
+  const [confirmed, setConfirmed] = React.useState<null | { ok: boolean; text: string }>(null);
+  React.useEffect(() => {
+    const m = /^#(reset|verify)=([A-Za-z0-9_-]{10,200})$/.exec(window.location.hash);
+    if (!m) return;
+    history.replaceState(null, "", window.location.pathname + window.location.search + "#Deals");
+    if (m[1] === "reset") {
+      setResetToken(m[2]);
+      setSigningIn("in");
+      return;
+    }
+    fetch("/api/auth/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: m[2] }),
+    })
+      .then(async (res) => {
+        const data = await res.json().catch(() => null);
+        setConfirmed(
+          res.ok
+            ? { ok: true, text: "Thanks, your email " + (data?.email ?? "") + " is confirmed." }
+            : { ok: false, text: data?.error || "That link did not work. Send a new one from Profile and settings." },
+        );
+      })
+      .catch(() => setConfirmed({ ok: false, text: "We couldn’t reach Bounty. Try the link again in a moment." }));
+  }, []);
   const refresh = React.useCallback(() => {
     fetch("/api/auth/me")
       .then((res) => (res.ok ? res.json() : null))
@@ -130,17 +158,34 @@ function Root() {
                   setAuth({ ...auth, member: null, operator: false });
                   reloadPlans();
                 },
+                signedOut: () => (setAuth({ ...auth, member: null, operator: false }), reloadPlans()),
+                refresh,
               }
             : undefined
         }
       />
+      {confirmed && (
+        <Window
+          open
+          onOpenChange={(o) => !o && setConfirmed(null)}
+          title={confirmed.ok ? "Email confirmed" : "Link not working"}
+          footer={
+            <Button variant="main" onClick={() => setConfirmed(null)}>
+              OK
+            </Button>
+          }
+        >
+          <p style={{ margin: 0 }}>{confirmed.text}</p>
+        </Window>
+      )}
       {signingIn && (
         <SignIn
           startMode={signingIn}
+          resetToken={resetToken ?? undefined}
           inviteOpen={auth.inviteOpen}
-          onClose={close}
+          onClose={() => (close(), setResetToken(null))}
           onSignedIn={(member) => (
-            setAuth({ ...auth, required: true, member }), setSigningIn(false), reloadPlans(), refresh()
+            setAuth({ ...auth, required: true, member }), setSigningIn(false), setResetToken(null), reloadPlans(), refresh()
           )}
         />
       )}

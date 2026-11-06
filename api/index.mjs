@@ -14,6 +14,7 @@ const { accessConfig } = await import("../apps/server/access.mjs");
 const { freshPrices } = await import("../apps/server/demo.mjs");
 const { seedSampleTips } = await import("../apps/server/sample-tips.mjs");
 const { accounts, neonStore } = await import("../apps/server/accounts.mjs");
+const { mailer } = await import("../apps/server/mail.mjs");
 
 let handler;
 try {
@@ -23,12 +24,12 @@ try {
         "in the Vercel project's environment variables, then redeploy",
     );
   const { publicHosts, password, databaseUrl, inviteCode, operators } = accessConfig();
-  const members = databaseUrl ? accounts(await neonStore(databaseUrl), { inviteCode }) : null;
+  const members = databaseUrl ? accounts(await neonStore(databaseUrl), { inviteCode, mail: mailer() }) : null;
   // One API on one data folder: the shared database (deals, tips, sources),
   // each member's own Stock and Money (personal.mjs), sample tips, and the
   // Open Prices check that runs before each request.
-  const build = (db, { personal = null, onImported = () => undefined } = {}) => {
-    const api = createApi(db, { publicHosts, password, members, operators, personal });
+  const build = (db, { personal = null, forget = null, onImported = () => undefined } = {}) => {
+    const api = createApi(db, { publicHosts, password, members, operators, personal, forget });
     seedSampleTips(db);
     const beforeRequest = freshPrices(db, {
       // Not awaited: the import may finish during a change that is waiting
@@ -54,7 +55,7 @@ try {
         const db = openDb(join(dir, "desk.sqlite"));
         const own = personalStores(dir);
         return {
-          handle: build(db, { personal: own.personal, onImported: () => void keeper.changed() }),
+          handle: build(db, { personal: own.personal, forget: own.forget, onImported: () => void keeper.changed() }),
           checkpoint() {
             db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
             own.checkpoint();
@@ -69,7 +70,8 @@ try {
     handler = keeper.handle;
   } else {
     const db = database();
-    handler = build(db, { personal: databaseUrl ? personalStores(dataDir()).personal : null });
+    const own = databaseUrl ? personalStores(dataDir()) : null;
+    handler = build(db, { personal: own?.personal ?? null, forget: own?.forget ?? null });
   }
 } catch (error) {
   console.error("Bounty API not started: " + error.message);

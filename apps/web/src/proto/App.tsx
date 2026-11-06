@@ -31,6 +31,7 @@ import CrewScreen, { CrewBand } from "./CrewScreen";
 import { PageHead } from "../ui/kit";
 import { GoalsSettings } from "../Goals";
 import SignOff from "./SignOff";
+import AccountSettings from "./AccountSettings";
 import "./proto.css";
 import "./proto-extra.css";
 import "./proto-bold.css";
@@ -217,7 +218,16 @@ export default function ProtoApp({
   operator?: boolean;
   // Member sign-in on a hosted pilot; absent on your own computer, where
   // there are no accounts. email is null while signed out.
-  account?: { email: string | null; signIn: () => void; signUp: () => void; signOut: () => void };
+  account?: {
+    email: string | null;
+    signIn: () => void;
+    signUp: () => void;
+    signOut: () => void;
+    // After the account is deleted (already signed out on the server).
+    signedOut?: () => void;
+    // After the email changes.
+    refresh?: () => void;
+  };
 }) {
   const first = fromHash();
   const [view, setView] = useState<View>(first.view);
@@ -1869,6 +1879,14 @@ export default function ProtoApp({
           <PlanLine go={(v) => go(v)} wide />
         </div>
       </div>
+      {account?.email && (
+        <div style={{ marginTop: 20 }}>
+          <AccountSettings
+            onSignedOut={() => account.signedOut?.()}
+            onEmailChanged={() => account.refresh?.()}
+          />
+        </div>
+      )}
       <div className="legacy" style={{ marginTop: 20 }}>
         <div className="planner goals prof-forms">
           <GoalsSettings />

@@ -12,6 +12,8 @@ import * as dealRoutes from "./routes-deals.mjs";
 import * as bountyRoutes from "./routes-bounties.mjs";
 import * as ledgerRoutes from "./routes-ledger.mjs";
 import * as plans from "./plans.mjs";
+import { getGoals, goalTargets } from "./goals.mjs";
+import { getTrip, listTrips } from "./ledger.mjs";
 
 export const routeModules = [
   evidenceRoutes,
@@ -91,6 +93,7 @@ export function createApi(
     members = null,
     operators = [],
     personal = null,
+    forget = null,
   } = {},
 ) {
   const allowedHosts = new Set([...LOCAL_HOSTS, ...publicHosts]);
@@ -100,21 +103,23 @@ export function createApi(
   const shared = own ? modules.filter((m) => !PERSONAL_MODULES.includes(m)) : modules;
   const table = toTable([...shared.flatMap((m) => m.routes(db)), ...plans.routes(db, members)]);
   const personalTables = new Map();
-  function personalTable(user) {
-    const key = user ? String(user.id ?? user.email).toLowerCase() : "";
+  const personalKey = (user) => (user ? String(user.id ?? user.email).toLowerCase() : "");
+  function personalSpace(user) {
+    const key = personalKey(user);
     if (!personalTables.has(key)) {
       const { db: mine, proofDir } = personal(user);
-      personalTables.set(
-        key,
-        toTable(
+      personalTables.set(key, {
+        db: mine,
+        table: toTable(
           PERSONAL_MODULES.filter((m) => modules.includes(m)).flatMap((m) =>
             m === ledgerRoutes ? m.routes(mine, { proofDir }) : m.routes(mine),
           ),
         ),
-      );
+      });
     }
     return personalTables.get(key);
   }
+  const personalTable = (user) => personalSpace(user).table;
   function find(method, path, user, first = true) {
     const parts = path.split("/").filter(Boolean);
     let allowed = false;
@@ -151,6 +156,91 @@ export function createApi(
       });
       res.end(value === undefined ? "" : JSON.stringify(value));
     };
+    // The site's own address, for links in emails. The host was checked
+    // against the allowed hosts before any account route runs.
+    const origin = (secure) => `${secure ? "https" : "http"}://${String(req.headers.host || "").trim()}`;
+    // Password reset, email check and account settings. Returns
+    // { status, body } when the path is one of these, else null.
+    async function accountRoute(path, method, secure) {
+      const post = method === "POST";
+      if (post && path === "/api/auth/forgot")
+        return { status: 200, body: await members.forgot(await readJson(req), origin(secure)) };
+      if (post && path === "/api/auth/reset") {
+        const result = await members.reset(await readJson(req), secure);
+        res.setHeader("Set-Cookie", result.cookie);
+        return { status: 200, body: { user: result.user } };
+      }
+      if (post && path === "/api/auth/verify") return { status: 200, body: await members.verify(await readJson(req)) };
+      if (!path.startsWith("/api/account")) return null;
+      const user = await members.user(req);
+      if (!user) return { status: 401, body: { signIn: true, error: "Sign in first" } };
+      if (method === "GET" && path === "/api/account")
+        return { status: 200, body: { ...(await members.account(user)), operator: isOperator(user) } };
+      if (method === "GET" && path === "/api/account/export") {
+        const mine = own ? personalSpace(user).db : db;
+        const trips = listTrips(mine).map((t) => getTrip(mine, t.id));
+        let scoutProfile = null;
+        try {
+          scoutProfile =
+            db.prepare("SELECT * FROM members WHERE account_email = ?").get(String(user.email).toLowerCase()) ?? null;
+        } catch {
+          /* no scout profiles on this server */
+        }
+        return {
+          status: 200,
+          body: {
+            exported: new Date().toISOString(),
+            account: await members.account(user),
+            scoutProfile,
+            money: { goals: getGoals(mine), targets: goalTargets(mine) },
+            stock: { trips },
+          },
+        };
+      }
+      if (post && path === "/api/account/verify/send") {
+        const sent = await members.sendVerify(user, origin(secure)).catch(() => false);
+        return { status: 200, body: { sent, mailOn: Boolean(members.mailOn) } };
+      }
+      if (post && path === "/api/account/password") {
+        const result = await members.changePassword(user, await readJson(req), secure);
+        res.setHeader("Set-Cookie", result.cookie);
+        return { status: 200, body: { ok: true } };
+      }
+      if (post && path === "/api/account/email") {
+        const result = await members.changeEmail(user, await readJson(req), origin(secure));
+        // The scout profile follows the account to its new email.
+        try {
+          db.prepare("UPDATE members SET account_email = ? WHERE account_email = ?").run(result.user.email, result.from);
+        } catch {
+          /* no scout profiles on this server */
+        }
+        return { status: 200, body: { user: result.user, sent: result.sent, mailOn: Boolean(members.mailOn) } };
+      }
+      if (post && path === "/api/account/delete") {
+        await members.deleteAccount(user, await readJson(req));
+        // The scout profile stays for tip history, with nothing that names them.
+        try {
+          db.prepare(
+            "UPDATE members SET account_email = NULL, name = 'Deleted member', locality = NULL, seller_name = NULL, seller_key = NULL, alerts_opt_in = 0, alert_localities = '[]' WHERE account_email = ?",
+          ).run(String(user.email).toLowerCase());
+        } catch {
+          /* no scout profiles on this server */
+        }
+        if (own) {
+          const key = personalKey(user);
+          personalTables.delete(key);
+          forget?.(user);
+        }
+        res.setHeader("Set-Cookie", await members.signOut(req, secure));
+        return { status: 200, body: { deleted: true } };
+      }
+      if (post && path === "/api/account/reset-link") {
+        if (!isOperator(user)) return { status: 403, body: { error: "Only an operator can do this" } };
+        const body = await readJson(req);
+        return { status: 200, body: await members.resetLink(body?.email, origin(secure)) };
+      }
+      return { status: 404, body: { error: "Unknown route" } };
+    }
     try {
       // DNS-rebinding guard: only answer requests addressed to this machine.
       if (!allowedHosts.has(hostHeader(req.headers.host || "")))
@@ -186,6 +276,7 @@ export function createApi(
           user: user ? members.publicUser(user) : null,
           inviteOpen: members.inviteOpen,
           operator: isOperator(user),
+          mailOn: Boolean(members.mailOn),
         });
       }
       if (members) {
@@ -196,12 +287,17 @@ export function createApi(
         if (signing && method === "POST") {
           const result = await members[signing](await readJson(req), secure);
           res.setHeader("Set-Cookie", result.cookie);
+          // A new member gets the confirm email (when email is switched on).
+          if (result.created && members.sendVerify)
+            await members.sendVerify(result.created, origin(secure)).catch(() => false);
           return send(200, { user: result.user });
         }
         if (url.pathname === "/api/auth/signout" && method === "POST") {
           res.setHeader("Set-Cookie", await members.signOut(req, secure));
           return send(200, { ok: true });
         }
+        const done = await accountRoute(url.pathname, method, secure);
+        if (done) return send(done.status, done.body);
       }
       // The signed-in member, or null (always null without accounts).
       const user = members ? await members.user(req) : null;

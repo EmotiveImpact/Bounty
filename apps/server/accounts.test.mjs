@@ -66,7 +66,7 @@ test("signed out, anyone can look around but every change asks to sign in", asyn
     assert.equal(write.status, 401);
     assert.equal(write.body.signIn, true);
     const me = await call("GET", "/api/auth/me");
-    assert.deepEqual(me, { status: 200, body: { required: true, user: null, inviteOpen: true, operator: false }, setCookie: null });
+    assert.deepEqual(me, { status: 200, body: { required: true, user: null, inviteOpen: true, operator: false, mailOn: false }, setCookie: null });
     const res = await fetch(api.base + "/api/echo", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -91,7 +91,7 @@ test("sign up with the invite code, stay signed in, then sign out", async () => 
 
     const up = await call("POST", "/api/auth/signup", { email: " Edem@Example.co.uk ", password: "0123456789", invite: INVITE, name: "Edem" });
     assert.equal(up.status, 200);
-    assert.deepEqual(up.body.user, { email: "edem@example.co.uk", name: "Edem" });
+    assert.deepEqual(up.body.user, { email: "edem@example.co.uk", name: "Edem", verified: false });
     assert.match(up.setCookie, /^bounty_session=[\w-]{40,}; Path=\/; HttpOnly; SameSite=Lax; Max-Age=2592000$/);
     assert.ok(!up.setCookie.includes("Secure"), "plain http on this machine cannot keep a Secure cookie");
     const cookie = sessionCookie(up.setCookie);
@@ -99,7 +99,7 @@ test("sign up with the invite code, stay signed in, then sign out", async () => 
 
     assert.deepEqual((await call("POST", "/api/echo", { a: 1 }, cookie)).body, { a: 1 });
     const me = await call("GET", "/api/auth/me", undefined, cookie);
-    assert.deepEqual(me.body, { required: true, user: { email: "edem@example.co.uk", name: "Edem" }, inviteOpen: true, operator: false });
+    assert.deepEqual(me.body, { required: true, user: { email: "edem@example.co.uk", name: "Edem", verified: false }, inviteOpen: true, operator: false, mailOn: false });
 
     const again = await call("POST", "/api/auth/signup", { email: "edem@example.co.uk", password: "0123456789", invite: INVITE });
     assert.equal(again.status, 409);

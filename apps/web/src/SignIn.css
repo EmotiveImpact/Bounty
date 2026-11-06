@@ -206,6 +206,30 @@
   line-height: 1.45;
   text-align: center;
 }
+.signin-note a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.signin-forgot {
+  margin: -6px 0 0;
+  text-align: right;
+  font-size: 13px;
+}
+.signin-done {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: #eef9d2;
+  color: var(--si-ink);
+  font-size: 14px;
+  line-height: 1.45;
+}
+.signin-linkbtn {
+  display: grid;
+  place-items: center;
+  text-decoration: none;
+}
 .signin-error {
   margin: 0;
   padding: 10px 14px;

@@ -3,7 +3,7 @@
 // it. The key comes from the account id, so changing email keeps the data.
 // Used with createApi's personal option (app.mjs) when accounts are on.
 import { createHash } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { openDb } from "./db.mjs";
 import * as goals from "./goals.mjs";
@@ -36,6 +36,13 @@ export function personalStores(root) {
   }
   return {
     personal,
+    /** Removes a member's own database and receipts (account deleted). */
+    forget(user) {
+      const dir = memberDir(root, user);
+      const file = join(dir, "desk.sqlite");
+      for (const db of opened) if (db.isOpen && db.location?.() === file) db.close();
+      rmSync(dir, { recursive: true, force: true });
+    },
     /** Writes every member database's pending changes into its file. */
     checkpoint() {
       for (const db of opened) if (db.isOpen) db.exec("PRAGMA wal_checkpoint(TRUNCATE)");

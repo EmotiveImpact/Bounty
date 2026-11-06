@@ -2,3 +2,4 @@
 .adm { display: grid; gap: 20px; font-family: var(--k-sans); }
 .adm-legacy { min-width: 0; }
 .rs { display: grid; gap: 22px; }
+.adm-sub { color: var(--k-muted, #555); margin: 0 0 12px; font-size: 14px; }

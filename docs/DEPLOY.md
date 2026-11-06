@@ -38,6 +38,8 @@ Settings (read by `apps/server/access.mjs`):
 | `BOUNTY_PUBLIC_HOSTS` | Extra host names the API answers, besides localhost. On Vercel the deployment's own addresses are added automatically |
 | `BOUNTY_LISTEN_HOST` | Address to listen on (`0.0.0.0` in the Dockerfile) |
 | `BOUNTY_DATA_DIR` | Where the database, proofs and photos live (`/tmp/bounty-data` on Vercel, `/data` in the Dockerfile) |
+| `RESEND_API_KEY` | Key from resend.com for account emails (confirm email, reset password). Without it no email is sent and Admin > Members makes reset links by hand |
+| `BOUNTY_MAIL_FROM` | Who account emails come from, on a domain set up in Resend, e.g. `Bounty <hello@grababounty.com>` |
 | `BOUNTY_KEEP_DATA` | `off` stops copying members' records to Neon on Vercel (on by default when `DATABASE_URL` is set) |
 
 Partner credentials (`HOBNIGHT_API_KEY`, `KEEPA_API_KEY`, `EBAY_ACCESS_TOKEN`) go in the same environment variables if you have them. They stay on the server.

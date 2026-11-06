@@ -67,43 +67,63 @@ function Logo({ id }: { id: Provider }) {
   );
 }
 
+type Mode = "in" | "up" | "forgot" | "reset";
+
 export default function SignIn({
   startMode = "in",
+  resetToken,
   inviteOpen,
   onSignedIn,
   onClose,
 }: {
-  startMode?: "in" | "up";
+  startMode?: Mode;
+  // From a reset link in an email (#reset=...): choose a new password.
+  resetToken?: string;
   inviteOpen: boolean;
   onSignedIn: (member: Member) => void;
   onClose: () => void;
 }) {
-  const [mode, setMode] = useState<"in" | "up">(startMode);
+  const [mode, setMode] = useState<Mode>(resetToken ? "reset" : startMode);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
   const [invite, setInvite] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // After asking for a reset link: what to tell them.
+  const [asked, setAsked] = useState<null | { mailOn: boolean }>(null);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  async function post(path: string, body: unknown) {
+    const res = await fetch("/api/auth/" + path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw Error(data?.error || "That did not work (HTTP " + res.status + ")");
+    return data;
+  }
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/auth/" + (mode === "in" ? "signin" : "signup"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(mode === "in" ? { email, password } : { email, password, name, invite }),
-      });
-      const data = await res.json().catch(() => null);
-      if (!res.ok) throw Error(data?.error || "Sign-in failed (HTTP " + res.status + ")");
-      onSignedIn(data.user);
+      if (mode === "forgot") {
+        const data = await post("forgot", { email });
+        setAsked({ mailOn: Boolean(data?.mailOn) });
+      } else if (mode === "reset") {
+        const data = await post("reset", { token: resetToken, password });
+        onSignedIn(data.user);
+      } else {
+        const data = await post(mode === "in" ? "signin" : "signup", mode === "in" ? { email, password } : { email, password, name, invite });
+        onSignedIn(data.user);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -113,6 +133,18 @@ export default function SignIn({
 
   const shown = PROVIDERS.filter((p) => READY.includes(p.id) || preview());
   const up = mode === "up";
+  const forgot = mode === "forgot";
+  const reset = mode === "reset";
+  const signing = mode === "in" || mode === "up";
+  const title = up ? "Join the crew" : forgot ? "Reset your password" : reset ? "Choose a new password" : "Welcome back";
+  const sub = up
+    ? "Create your Bounty account to save finds, plan trips and track your stock."
+    : forgot
+      ? "Enter your email and we’ll send you a link to choose a new password."
+      : reset
+        ? "Pick a new password for your Bounty account. You’ll be signed in here and signed out everywhere else."
+        : "Sign in to pick up your finds, trips and stock where you left them.";
+  const toSignIn = () => (setMode("in"), setError(null), setAsked(null));
 
   return (
     <div className="signin" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
@@ -127,14 +159,10 @@ export default function SignIn({
           ×
         </button>
         <CrewArt look={up ? "boss-thumbs" : "negotiator-deal"} className="signin-crew" />
-        <h1 id="signin-title">{up ? "Join the crew" : "Welcome back"}</h1>
-        <p className="signin-sub">
-          {up
-            ? "Create your Bounty account to save finds, plan trips and track your stock."
-            : "Sign in to pick up your finds, trips and stock where you left them."}
-        </p>
+        <h1 id="signin-title">{title}</h1>
+        <p className="signin-sub">{sub}</p>
 
-        {shown.length > 0 && (
+        {signing && shown.length > 0 && (
           <>
             <div className="signin-ways">
               {shown.map((p) => {
@@ -160,64 +188,123 @@ export default function SignIn({
           </>
         )}
 
-        {up && (
-          <label>
-            Your name
-            <input value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" maxLength={80} />
-          </label>
-        )}
-        <label>
-          Email
-          <input
-            type="email"
-            required
-            autoFocus
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            autoComplete="email"
-          />
-        </label>
-        <label>
-          Password
-          <input
-            type="password"
-            required
-            minLength={up ? 10 : undefined}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete={up ? "new-password" : "current-password"}
-          />
-          {up && <small>At least 10 characters.</small>}
-        </label>
-        {up && (
-          <label>
-            Invite code
-            <input required value={invite} onChange={(e) => setInvite(e.target.value)} autoComplete="off" />
-          </label>
-        )}
-        {error && (
-          <p className="signin-error" role="alert">
-            {error}
-          </p>
-        )}
-        <button type="submit" className="signin-main" disabled={busy}>
-          {busy ? "One moment…" : up ? "Create my account" : "Sign in with email"}
-        </button>
-        {(inviteOpen || up) && (
-          <p className="signin-switchline">
-            {up ? "Already a member?" : "New to Bounty?"}{" "}
-            <button
-              type="button"
-              className="signin-switch"
-              onClick={() => (setMode(up ? "in" : "up"), setError(null))}
-            >
-              {up ? "Sign in" : "Create an account"}
+        {forgot && asked ? (
+          <>
+            <p className="signin-done" role="status">
+              {asked.mailOn
+                ? "If that email has a Bounty account, a reset link is on its way. It works once, for one hour. Check your junk folder if it hasn’t arrived in a few minutes."
+                : "We can’t send emails just yet. Message us from the Help page with the email you signed up with, and we’ll send you a reset link."}
+            </p>
+            {!asked.mailOn && (
+              <a className="signin-main signin-linkbtn" href="#Help" onClick={onClose}>
+                Go to Help
+              </a>
+            )}
+            <p className="signin-switchline">
+              <button type="button" className="signin-switch" onClick={toSignIn}>
+                Back to sign in
+              </button>
+            </p>
+          </>
+        ) : (
+          <>
+            {up && (
+              <label>
+                Your name
+                <input value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" maxLength={80} />
+              </label>
+            )}
+            {!reset && (
+              <label>
+                Email
+                <input
+                  type="email"
+                  required
+                  autoFocus
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  autoComplete="email"
+                />
+              </label>
+            )}
+            {!forgot && (
+              <label>
+                {reset ? "New password" : "Password"}
+                <input
+                  type="password"
+                  required
+                  autoFocus={reset}
+                  minLength={up || reset ? 10 : undefined}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete={up || reset ? "new-password" : "current-password"}
+                />
+                {(up || reset) && <small>At least 10 characters.</small>}
+              </label>
+            )}
+            {mode === "in" && (
+              <p className="signin-forgot">
+                <button type="button" className="signin-switch" onClick={() => (setMode("forgot"), setError(null))}>
+                  Forgot your password?
+                </button>
+              </p>
+            )}
+            {up && (
+              <label>
+                Invite code
+                <input required value={invite} onChange={(e) => setInvite(e.target.value)} autoComplete="off" />
+              </label>
+            )}
+            {error && (
+              <p className="signin-error" role="alert">
+                {error}
+              </p>
+            )}
+            <button type="submit" className="signin-main" disabled={busy}>
+              {busy
+                ? "One moment…"
+                : up
+                  ? "Create my account"
+                  : forgot
+                    ? "Send me a link"
+                    : reset
+                      ? "Save and sign in"
+                      : "Sign in with email"}
             </button>
+            {signing && (inviteOpen || up) && (
+              <p className="signin-switchline">
+                {up ? "Already a member?" : "New to Bounty?"}{" "}
+                <button
+                  type="button"
+                  className="signin-switch"
+                  onClick={() => (setMode(up ? "in" : "up"), setError(null))}
+                >
+                  {up ? "Sign in" : "Create an account"}
+                </button>
+              </p>
+            )}
+            {(forgot || reset) && (
+              <p className="signin-switchline">
+                <button type="button" className="signin-switch" onClick={toSignIn}>
+                  Back to sign in
+                </button>
+              </p>
+            )}
+          </>
+        )}
+        {signing && (
+          <p className="signin-note">
+            You stay signed in on this device for 30 days. By continuing you accept Bounty’s{" "}
+            <a href="#Terms" onClick={onClose}>
+              terms
+            </a>{" "}
+            and{" "}
+            <a href="#Privacy" onClick={onClose}>
+              privacy policy
+            </a>
+            .
           </p>
         )}
-        <p className="signin-note">
-          You stay signed in on this device for 30 days. By continuing you accept Bounty’s terms and privacy policy.
-        </p>
       </form>
     </div>
   );
