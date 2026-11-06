@@ -1,9 +1,13 @@
+/* Sign-in and sign-up window, in the bold campaign look: white card, Cal Sans
+   headline, a crew character on white, big rounded buttons. Light only, so
+   the character always sits on white. */
 .signin {
   --si-card: #ffffff;
-  --si-ink: #111827;
-  --si-muted: #6b7280;
-  --si-line: #e5e7eb;
-  --si-brand: #0a7c52;
+  --si-ink: #111111;
+  --si-muted: #64626e;
+  --si-soft: #f3f3f5;
+  --si-soft-hover: #e9e9ed;
+  --si-line: #e2e2e6;
   --si-error: #b42318;
   --si-error-soft: #fdecea;
   position: fixed;
@@ -13,60 +17,123 @@
   place-items: center;
   padding: 24px 16px;
   box-sizing: border-box;
-  background: rgba(17, 24, 39, 0.45);
+  background: rgba(17, 17, 17, 0.45);
   overflow-y: auto;
   color: var(--si-ink);
-  font-family: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
-}
-@media (prefers-color-scheme: dark) {
-  .signin {
-    --si-card: #171a21;
-    --si-ink: #f3f4f6;
-    --si-muted: #9ca3af;
-    --si-line: #2a2f3a;
-    --si-brand: #34c38f;
-    --si-error: #fca5a5;
-    --si-error-soft: #3b1515;
-  }
+  color-scheme: light;
+  font-family: "Google Sans", "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 .signin-card {
   position: relative;
   width: 100%;
-  max-width: 380px;
+  max-width: 420px;
   display: grid;
-  gap: 14px;
-  padding: 28px 24px;
+  gap: 12px;
+  padding: 28px 28px 22px;
   background: var(--si-card);
-  border: 1px solid var(--si-line);
-  border-radius: 16px;
-  box-shadow: 0 8px 24px rgba(17, 24, 39, 0.08);
+  border-radius: 28px;
+  box-shadow: 0 24px 60px rgba(17, 17, 17, 0.18);
+}
+.signin-card .signin-crew {
+  justify-self: center;
+  width: 128px;
+  height: 160px;
+  border-radius: 20px;
+  margin: 0 0 2px;
+}
+.signin-card .signin-crew img {
+  object-position: 50% 8%;
 }
 .signin-card h1 {
   margin: 0;
-  font-size: 22px;
+  font-family: "Cal Sans", system-ui, sans-serif;
+  font-weight: 500;
+  font-size: 34px;
+  line-height: 1.05;
+  letter-spacing: -0.01em;
+  text-align: center;
+  text-wrap: balance;
 }
 .signin-close {
   position: absolute;
-  top: 10px;
-  right: 12px;
-  width: 36px;
-  height: 36px;
+  top: 14px;
+  right: 14px;
+  width: 38px;
+  height: 38px;
   font-size: 24px;
   line-height: 1;
-  background: none;
+  border-radius: 50%;
+  background: var(--si-soft);
   border: 0;
-  color: var(--si-muted);
+  color: var(--si-ink);
   cursor: pointer;
 }
-.signin-sub,
-.signin-note {
-  margin: 0;
+.signin-sub {
+  margin: -2px 0 6px;
   color: var(--si-muted);
-  font-size: 14px;
-}
-.signin-note {
-  font-size: 12.5px;
+  font-size: 14.5px;
+  line-height: 1.45;
   text-align: center;
+  text-wrap: balance;
+}
+.signin-ways {
+  display: grid;
+  gap: 10px;
+}
+.signin-way {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 50px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--si-soft);
+  color: var(--si-ink);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.signin-way:hover:not(:disabled) {
+  background: var(--si-soft-hover);
+}
+.signin-way:disabled {
+  cursor: default;
+  color: #8a8893;
+}
+.signin-way:disabled svg {
+  opacity: 0.55;
+}
+.signin-way svg {
+  width: 20px;
+  height: 20px;
+  flex: none;
+}
+.signin-way em {
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #fff3a3;
+  color: var(--si-ink);
+}
+.signin-or {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 4px 0 0;
+  color: var(--si-muted);
+  font-size: 13px;
+}
+.signin-or::before,
+.signin-or::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--si-line);
 }
 .signin-card label {
   display: grid;
@@ -82,43 +149,85 @@
   font: inherit;
   font-size: 16px;
   font-weight: 400;
-  padding: 10px 12px;
-  border: 1px solid var(--si-line);
-  border-radius: 10px;
-  background: transparent;
+  height: 48px;
+  padding: 0 16px;
+  border: 1.5px solid transparent;
+  border-radius: 14px;
+  background: var(--si-soft);
   color: var(--si-ink);
+  box-sizing: border-box;
 }
 .signin-card input:focus {
-  outline: 2px solid var(--si-brand);
-  outline-offset: 1px;
+  outline: none;
+  border-color: var(--si-ink);
+  background: #fff;
 }
-.signin-card button[type="submit"] {
+.signin-main {
   font: inherit;
+  font-size: 16px;
   font-weight: 600;
-  padding: 12px;
+  height: 52px;
+  margin-top: 4px;
   border: 0;
-  border-radius: 10px;
-  background: var(--si-brand);
+  border-radius: 999px;
+  background: var(--si-ink);
   color: #fff;
   cursor: pointer;
 }
-.signin-card button[disabled] {
+.signin-main:hover:not(:disabled) {
+  background: #2a2a2a;
+}
+.signin-main:disabled {
   opacity: 0.6;
+}
+.signin-switchline {
+  margin: 0;
+  text-align: center;
+  font-size: 14px;
+  color: var(--si-muted);
 }
 .signin-switch {
   font: inherit;
-  font-size: 14px;
+  font-weight: 600;
+  padding: 0;
   background: none;
   border: 0;
-  color: var(--si-brand);
+  color: var(--si-ink);
   cursor: pointer;
   text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.signin-note {
+  margin: 4px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--si-line);
+  color: var(--si-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: center;
 }
 .signin-error {
   margin: 0;
-  padding: 10px 12px;
-  border-radius: 10px;
+  padding: 10px 14px;
+  border-radius: 14px;
   background: var(--si-error-soft);
   color: var(--si-error);
   font-size: 14px;
+}
+@media (max-width: 480px) {
+  .signin {
+    align-items: end;
+    padding: 12px 0 0;
+  }
+  .signin-card {
+    border-radius: 28px 28px 0 0;
+    padding: 22px 20px calc(18px + env(safe-area-inset-bottom, 0px));
+  }
+  .signin-card .signin-crew {
+    width: 96px;
+    height: 120px;
+  }
+  .signin-card h1 {
+    font-size: 30px;
+  }
 }

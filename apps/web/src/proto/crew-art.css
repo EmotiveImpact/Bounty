@@ -33,8 +33,6 @@
 .crew-note .crew-art { flex: none; width: 96px; height: 128px; border-radius: 16px; }
 .crew-note .sub { margin: 0; }
 
-/* Sign-in: the Negotiator offering to shake on it. */
-.signin-crew { width: 92px; height: 120px; border-radius: 14px; margin: -6px 0 -4px; }
 
 /* Plans: the character stands in the coloured top of each plan. */
 .pl-top.has-art { grid-template-columns: minmax(0, 1fr) 88px; column-gap: 12px; padding-bottom: 0; }
