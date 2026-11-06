@@ -35,3 +35,44 @@ export async function serve(db, modules, options = {}) {
     close: () => new Promise((resolve) => server.close(resolve)),
   };
 }
+
+// The same shape as postgresStore, kept in memory.
+export function memoryAccountsStore() {
+  const users = [];
+  const sessions = new Map();
+  return {
+    users,
+    sessions,
+    async userByEmail(email) {
+      return users.find((u) => u.email === email) || null;
+    },
+    async createUser({ email, name, passwordHash }) {
+      if (users.some((u) => u.email === email)) return null;
+      const user = { id: users.length + 1, email, name, password_hash: passwordHash };
+      users.push(user);
+      return { id: user.id, email, name };
+    },
+    async createSession({ hash, userId, expires }) {
+      sessions.set(hash, { userId, expires });
+    },
+    async sessionUser(hash) {
+      const s = sessions.get(hash);
+      if (!s || s.expires.getTime() <= Date.now()) return null;
+      const u = users.find((x) => x.id === s.userId);
+      return u ? { id: u.id, email: u.email, name: u.name } : null;
+    },
+    async deleteSession(hash) {
+      sessions.delete(hash);
+    },
+    plans: new Map(),
+    async plan(userId) {
+      return this.plans.get(userId) ?? null;
+    },
+    async setPlan(userId, plan, since) {
+      const row = plan ? { plan, since } : null;
+      this.plans.set(userId, row);
+      return row;
+    },
+  };
+}
+

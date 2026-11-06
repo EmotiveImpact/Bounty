@@ -1,43 +1,47 @@
 // Keeps members' records for good on the hosted site.
 //
-// On Vercel the API's SQLite database lives in the function's temporary
+// On Vercel the API's data folder (the shared SQLite database, each member's
+// own database, receipts and shelf photos) lives in the function's temporary
 // storage, which is emptied whenever Vercel starts a fresh instance. This
-// module copies the database, and the receipt and shelf photos beside it, to
-// Postgres (Neon) after every change, and copies them back when an instance
-// starts. Sign-in already lives in Neon (accounts.mjs).
+// module copies changed files to Postgres (Neon) after every change, and
+// copies them all back when an instance starts. Sign-in already lives in
+// Neon (accounts.mjs).
 //
 // How it stays consistent between instances:
-// - The copy in Postgres carries a version number.
+// - Postgres holds one version number for the whole folder.
 // - Changes (anything but GET, HEAD, OPTIONS) run one at a time per instance.
 //   Before a change the instance checks the version and reloads if another
-//   instance saved since; after a successful change it saves with
-//   "only if the version is still mine". If that fails (two instances saved
-//   in the same moment) it logs it and reloads on the next request.
+//   instance saved since. After a successful change it uploads the files that
+//   changed, then moves the version on only if it is still the one it loaded.
+//   If that fails (two instances saved in the same moment) it logs it and
+//   reloads on the next request.
 // - Reads check the version at most every few seconds.
-// The database is small (a few hundred KB, a few tens of KB gzipped), so
-// copying it whole is quick. This suits a pilot; a move to Postgres tables
-// is the long-term route (docs/STALE.md).
+// Databases are small (a few hundred KB, tens of KB gzipped), so copying a
+// changed file whole is quick. This suits a pilot; Postgres tables are the
+// long-term route (docs/STALE.md).
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 const READS = new Set(["GET", "HEAD", "OPTIONS"]);
-// Folders beside the database whose files are copied too.
-export const KEPT_FOLDERS = ["proofs", "report-photos"];
+// SQLite's side files are folded into the database by a checkpoint first.
+const SKIP = /-(wal|shm|journal)$/;
+
+const digest = (buf) => createHash("sha256").update(buf).digest("hex");
 
 /**
- * Wraps the API so the data directory survives restarts.
- * store: see memoryStore / postgresKeepStore. dir: the data directory.
- * build(file): opens the database at file and returns { db, handle(req, res) }.
- * Returns handle(req, res) plus changed() to save after work done outside a
- * request (the Open Prices import).
+ * Wraps the API so the data folder survives restarts.
+ * store: see memoryStore / postgresKeepStore. dir: the data folder.
+ * build() opens the data in dir and returns { handle(req, res), checkpoint(), close() }.
+ * Returns { handle, changed } (changed() saves after work done outside a
+ * request, such as the Open Prices import).
  */
 export function keepForGood({ store, dir, build, log = console.error, checkEvery = 5000, now = Date.now }) {
-  const file = join(dir, "desk.sqlite");
   let current = null;
   let version = 0;
   let checked = 0;
-  let known = new Set();
+  let known = new Map();
   let starting = null;
   let queue = Promise.resolve();
 
@@ -48,26 +52,41 @@ export function keepForGood({ store, dir, build, log = console.error, checkEvery
     return run;
   }
 
+  function localFiles() {
+    const out = [];
+    const walk = (folder) => {
+      if (!existsSync(folder)) return;
+      for (const entry of readdirSync(folder, { withFileTypes: true })) {
+        const full = join(folder, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.isFile() && !SKIP.test(entry.name)) out.push(relative(dir, full).split(sep).join("/"));
+      }
+    };
+    walk(dir);
+    return out;
+  }
+
+  const place = (path) => join(dir, ...path.split("/"));
+
   async function restore() {
-    const snap = await store.load();
+    const latest = await store.version();
     const old = current;
+    rmSync(dir, { recursive: true, force: true });
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    for (const f of [file, file + "-wal", file + "-shm"]) rmSync(f, { force: true });
-    for (const folder of KEPT_FOLDERS) rmSync(join(dir, folder), { recursive: true, force: true });
-    if (snap) writeFileSync(file, gunzipSync(Buffer.from(snap.data, "base64")), { mode: 0o600 });
-    known = new Set();
+    known = new Map();
     for (const path of await store.files()) {
-      const target = join(dir, ...path.split("/"));
-      mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
-      writeFileSync(target, Buffer.from(await store.getFile(path), "base64"), { mode: 0o600 });
-      known.add(path);
+      if (path.split("/").includes("..")) continue;
+      const buf = gunzipSync(Buffer.from(await store.getFile(path), "base64"));
+      mkdirSync(dirname(place(path)), { recursive: true, mode: 0o700 });
+      writeFileSync(place(path), buf, { mode: 0o600 });
+      known.set(path, digest(buf));
     }
-    version = snap ? snap.version : 0;
-    current = build(file);
+    version = latest;
+    current = build();
     checked = now();
-    // A read that started on the old database may still be running; close it
-    // a little later. The old file is already unlinked, so nothing mixes.
-    if (old) setTimeout(() => closeQuietly(old.db), 30000).unref?.();
+    // A read that started on the old data may still be running; close it a
+    // little later. Its files are already unlinked, so nothing mixes.
+    if (old) setTimeout(() => quietly(() => old.close()), 30000).unref?.();
   }
 
   async function freshen(force) {
@@ -77,24 +96,25 @@ export function keepForGood({ store, dir, build, log = console.error, checkEvery
     if (latest !== version) await restore();
   }
 
-  function localFiles() {
-    const out = [];
-    const walk = (folder) => {
-      if (!existsSync(folder)) return;
-      for (const entry of readdirSync(folder, { withFileTypes: true })) {
-        const full = join(folder, entry.name);
-        if (entry.isDirectory()) walk(full);
-        else if (entry.isFile()) out.push(relative(dir, full).split(sep).join("/"));
-      }
-    };
-    for (const folder of KEPT_FOLDERS) walk(join(dir, folder));
-    return out;
-  }
-
   async function save() {
-    current.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
-    const data = gzipSync(readFileSync(file)).toString("base64");
-    const next = await store.save(data, version);
+    current.checkpoint();
+    const here = new Map(localFiles().map((path) => [path, readFileSync(place(path))]));
+    let changes = 0;
+    for (const [path, buf] of here) {
+      const hash = digest(buf);
+      if (known.get(path) === hash) continue;
+      await store.putFile(path, gzipSync(buf).toString("base64"));
+      known.set(path, hash);
+      changes += 1;
+    }
+    for (const path of [...known.keys()])
+      if (!here.has(path)) {
+        await store.dropFile(path);
+        known.delete(path);
+        changes += 1;
+      }
+    if (!changes) return true;
+    const next = await store.bump(version);
     if (next == null) {
       log("Bounty keep: another instance saved at the same moment; reloading on the next request");
       checked = 0;
@@ -102,19 +122,10 @@ export function keepForGood({ store, dir, build, log = console.error, checkEvery
       return false;
     }
     version = next;
-    const here = new Set(localFiles());
-    for (const path of here)
-      if (!known.has(path)) {
-        await store.putFile(path, readFileSync(join(dir, ...path.split("/"))).toString("base64"));
-        known.add(path);
-      }
-    for (const path of [...known])
-      if (!here.has(path)) {
-        await store.dropFile(path);
-        known.delete(path);
-      }
     return true;
   }
+
+  const saveQuietly = () => save().catch((error) => log("Bounty keep: save failed: " + error.message));
 
   async function ready() {
     if (!current) await (starting ||= serial(restore));
@@ -138,46 +149,43 @@ export function keepForGood({ store, dir, build, log = console.error, checkEvery
             resolve();
           });
       });
-      if (res.statusCode < 400) await save().catch((error) => log("Bounty keep: save failed: " + error.message));
+      if (res.statusCode < 400) await saveQuietly();
     });
   }
 
   /** Save now, for changes made outside a request. */
   function changed() {
     return serial(async () => {
-      if (current) await save().catch((error) => log("Bounty keep: save failed: " + error.message));
+      if (current) await saveQuietly();
     });
   }
 
-  return { handle, changed, ready, get db() { return current?.db; } };
+  return { handle, changed, ready };
 }
 
-function closeQuietly(db) {
+function quietly(fn) {
   try {
-    db.close();
+    fn();
   } catch {
     /* already closed */
   }
 }
 
-/** A store held in memory, for tests and for trying the module out. */
+/** A store held in memory, for tests. */
 export function memoryStore() {
-  let snap = null;
+  let version = 0;
   const files = new Map();
   return {
     async version() {
-      return snap ? snap.version : 0;
+      return version;
     },
-    async load() {
-      return snap && { ...snap };
-    },
-    async save(data, from) {
-      if ((snap ? snap.version : 0) !== from) return null;
-      snap = { version: from + 1, data };
-      return snap.version;
+    async bump(from) {
+      if (version !== from) return null;
+      version += 1;
+      return version;
     },
     async files() {
-      return [...files.keys()];
+      return [...files.keys()].sort();
     },
     async getFile(path) {
       return files.get(path);
@@ -194,7 +202,7 @@ export function memoryStore() {
 /** The same store in Postgres. query(text, params) returns rows. */
 export async function postgresKeepStore(query) {
   await query(
-    "CREATE TABLE IF NOT EXISTS bounty_keep (id text PRIMARY KEY, version bigint NOT NULL, data text NOT NULL, saved_at timestamptz NOT NULL DEFAULT now())",
+    "CREATE TABLE IF NOT EXISTS bounty_keep (id text PRIMARY KEY, version bigint NOT NULL, saved_at timestamptz NOT NULL DEFAULT now())",
     [],
   );
   await query(
@@ -206,20 +214,16 @@ export async function postgresKeepStore(query) {
       const rows = await query("SELECT version FROM bounty_keep WHERE id = 'main'", []);
       return rows.length ? Number(rows[0].version) : 0;
     },
-    async load() {
-      const rows = await query("SELECT version, data FROM bounty_keep WHERE id = 'main'", []);
-      return rows.length ? { version: Number(rows[0].version), data: rows[0].data } : null;
-    },
-    async save(data, from) {
+    async bump(from) {
       const rows =
         from === 0
           ? await query(
-              "INSERT INTO bounty_keep (id, version, data) VALUES ('main', 1, $1) ON CONFLICT (id) DO NOTHING RETURNING version",
-              [data],
+              "INSERT INTO bounty_keep (id, version) VALUES ('main', 1) ON CONFLICT (id) DO NOTHING RETURNING version",
+              [],
             )
           : await query(
-              "UPDATE bounty_keep SET data = $1, version = version + 1, saved_at = now() WHERE id = 'main' AND version = $2 RETURNING version",
-              [data, from],
+              "UPDATE bounty_keep SET version = version + 1, saved_at = now() WHERE id = 'main' AND version = $1 RETURNING version",
+              [from],
             );
       return rows.length ? Number(rows[0].version) : null;
     },

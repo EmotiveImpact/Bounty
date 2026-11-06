@@ -7,6 +7,8 @@ process.env.BOUNTY_DATA_DIR ||= "/tmp/bounty-data";
 const { createApi } = await import("../apps/server/app.mjs");
 const { database, openDb, dataDir } = await import("../apps/server/db.mjs");
 const { keepForGood, neonKeepStore } = await import("../apps/server/keep.mjs");
+const { personalStores } = await import("../apps/server/personal.mjs");
+const { join } = await import("node:path");
 const { refreshOpenBounties } = await import("../apps/server/routes-bounties.mjs");
 const { accessConfig } = await import("../apps/server/access.mjs");
 const { freshPrices } = await import("../apps/server/demo.mjs");
@@ -22,10 +24,11 @@ try {
     );
   const { publicHosts, password, databaseUrl, inviteCode, operators } = accessConfig();
   const members = databaseUrl ? accounts(await neonStore(databaseUrl), { inviteCode }) : null;
-  // One API on one database file: the database, sample tips and the Open
-  // Prices check that runs before each request.
-  const build = (db, onImported = () => undefined) => {
-    const api = createApi(db, { publicHosts, password, members, operators });
+  // One API on one data folder: the shared database (deals, tips, sources),
+  // each member's own Stock and Money (personal.mjs), sample tips, and the
+  // Open Prices check that runs before each request.
+  const build = (db, { personal = null, onImported = () => undefined } = {}) => {
+    const api = createApi(db, { publicHosts, password, members, operators, personal });
     seedSampleTips(db);
     const beforeRequest = freshPrices(db, {
       // Not awaited: the import may finish during a change that is waiting
@@ -35,26 +38,38 @@ try {
         onImported();
       },
     });
-    return {
-      db,
-      handle: async (req, res) => {
-        await beforeRequest();
-        return api(req, res);
-      },
+    return async (req, res) => {
+      await beforeRequest();
+      return api(req, res);
     };
   };
   if (databaseUrl && process.env.BOUNTY_KEEP_DATA !== "off") {
-    // Members' records are copied to Neon after every change and back when
-    // Vercel starts a fresh instance (apps/server/keep.mjs).
+    // Everything in the data folder is copied to Neon after every change and
+    // back when Vercel starts a fresh instance (apps/server/keep.mjs).
+    const dir = dataDir();
     const keeper = keepForGood({
       store: await neonKeepStore(databaseUrl),
-      dir: dataDir(),
-      build: (file) => build(openDb(file), () => void keeper.changed()),
+      dir,
+      build: () => {
+        const db = openDb(join(dir, "desk.sqlite"));
+        const own = personalStores(dir);
+        return {
+          handle: build(db, { personal: own.personal, onImported: () => void keeper.changed() }),
+          checkpoint() {
+            db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+            own.checkpoint();
+          },
+          close() {
+            own.close();
+            db.close();
+          },
+        };
+      },
     });
     handler = keeper.handle;
   } else {
-    const app = build(database());
-    handler = app.handle;
+    const db = database();
+    handler = build(db, { personal: databaseUrl ? personalStores(dataDir()).personal : null });
   }
 } catch (error) {
   console.error("Bounty API not started: " + error.message);

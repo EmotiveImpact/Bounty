@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
-import { database } from "./db.mjs";
+import { database, dataDir } from "./db.mjs";
+import { personalStores } from "./personal.mjs";
 import { createApi } from "./app.mjs";
 import { accessConfig } from "./access.mjs";
 import { accounts, neonStore } from "./accounts.mjs";
@@ -17,7 +18,9 @@ const { listenHost, publicHosts, password, databaseUrl, inviteCode, operators } 
 const members = databaseUrl ? accounts(await neonStore(databaseUrl), { inviteCode }) : null;
 const db = database();
 seedSampleTips(db);
-createServer(createApi(db, { publicHosts, password, members, operators })).listen(port, listenHost, () =>
+// With accounts, each member's Stock and Money live in their own database.
+const personal = members ? personalStores(dataDir()).personal : null;
+createServer(createApi(db, { publicHosts, password, members, operators, personal })).listen(port, listenHost, () =>
   console.log(
     `Bounty API listening on ${listenHost}:${port}` +
       (publicHosts.length ? ` for ${publicHosts.join(", ")}` : "") +

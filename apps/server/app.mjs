@@ -66,24 +66,59 @@ export const OPERATOR_ROUTES = new Set([
   "POST /api/permissions",
 ]);
 
+// Each member's own records: Stock (the ledger) and Money (goals). With
+// member accounts and a personal(user) store, these routes run on that
+// member's own database, so members never see each other's trips or money.
+export const PERSONAL_MODULES = [planRoutes, ledgerRoutes];
+
+const toTable = (tuples) =>
+  tuples.map(([method, pattern, handler, options = {}]) => ({
+    method,
+    parts: pattern.split("/").filter(Boolean),
+    handler,
+    options: OPERATOR_ROUTES.has(`${method} ${pattern}`) ? { ...options, operator: true } : options,
+  }));
+
+// personal(user) returns { db, proofDir } for a signed-in member, or for
+// user null a database that is never written (signed-out visitors may read
+// and work things out, but every change needs a sign-in).
 export function createApi(
   db,
-  { modules = routeModules, publicHosts = [], password = null, members = null, operators = [] } = {},
+  {
+    modules = routeModules,
+    publicHosts = [],
+    password = null,
+    members = null,
+    operators = [],
+    personal = null,
+  } = {},
 ) {
   const allowedHosts = new Set([...LOCAL_HOSTS, ...publicHosts]);
   const operatorEmails = new Set(operators.map((e) => String(e).trim().toLowerCase()));
   const isOperator = (user) => !members || Boolean(user && operatorEmails.has(String(user.email).toLowerCase()));
-  const table = [...modules.flatMap((m) => m.routes(db)), ...plans.routes(db, members)]
-    .map(([method, pattern, handler, options = {}]) => ({
-      method,
-      parts: pattern.split("/").filter(Boolean),
-      handler,
-      options: OPERATOR_ROUTES.has(`${method} ${pattern}`) ? { ...options, operator: true } : options,
-    }));
-  function find(method, path) {
+  const own = Boolean(members && personal);
+  const shared = own ? modules.filter((m) => !PERSONAL_MODULES.includes(m)) : modules;
+  const table = toTable([...shared.flatMap((m) => m.routes(db)), ...plans.routes(db, members)]);
+  const personalTables = new Map();
+  function personalTable(user) {
+    const key = user ? String(user.id ?? user.email).toLowerCase() : "";
+    if (!personalTables.has(key)) {
+      const { db: mine, proofDir } = personal(user);
+      personalTables.set(
+        key,
+        toTable(
+          PERSONAL_MODULES.filter((m) => modules.includes(m)).flatMap((m) =>
+            m === ledgerRoutes ? m.routes(mine, { proofDir }) : m.routes(mine),
+          ),
+        ),
+      );
+    }
+    return personalTables.get(key);
+  }
+  function find(method, path, user, first = true) {
     const parts = path.split("/").filter(Boolean);
     let allowed = false;
-    for (const route of table) {
+    for (const route of first ? table : personalTable(user)) {
       if (route.parts.length !== parts.length) continue;
       const params = {};
       const ok = route.parts.every((part, i) => {
@@ -100,6 +135,10 @@ export function createApi(
       if (!ok) continue;
       if (route.method === method) return { route, params };
       allowed = true;
+    }
+    if (first && own) {
+      const mine = find(method, path, user, false);
+      return mine.route ? mine : { allowed: allowed || mine.allowed };
     }
     return { allowed };
   }
@@ -164,7 +203,9 @@ export function createApi(
           return send(200, { ok: true });
         }
       }
-      const found = find(method, url.pathname);
+      // The signed-in member, or null (always null without accounts).
+      const user = members ? await members.user(req) : null;
+      const found = find(method, url.pathname, user);
       if (!found.route)
         return found.allowed
           ? send(405, { error: "Method not allowed" })
@@ -173,8 +214,6 @@ export function createApi(
       // routes marked { read: true } that only work something out, are open.
       // Saving or changing anything needs a signed-in member.
       const reading = method === "GET" || method === "HEAD" || found.route.options.read === true;
-      // The signed-in member, or null (always null without accounts).
-      const user = members ? await members.user(req) : null;
       if (members && (!reading || found.route.options.operator)) {
         if (!user) return send(401, { signIn: true, error: "Sign in to save changes" });
         // Admin tools: operators only, reads included.

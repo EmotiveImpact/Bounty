@@ -15,9 +15,13 @@ async function instance(store, extra = {}) {
   const keeper = keepForGood({
     store,
     dir,
-    build: (file) => {
-      const db = openDb(file);
-      return { db, handle: createApi(db) };
+    build: () => {
+      const db = openDb(join(dir, "desk.sqlite"));
+      return {
+        handle: createApi(db),
+        checkpoint: () => db.exec("PRAGMA wal_checkpoint(TRUNCATE)"),
+        close: () => db.close(),
+      };
     },
     log: () => undefined,
     ...extra,
@@ -107,7 +111,7 @@ test("receipt and photo files are kept, and removed files are removed", async ()
   mkdirSync(join(a.dir, "proofs", "trip-1"), { recursive: true });
   writeFileSync(join(a.dir, "proofs", "trip-1", "receipt.jpg"), "receipt bytes");
   await a.keeper.changed();
-  assert.deepEqual(await store.files(), ["proofs/trip-1/receipt.jpg"]);
+  assert.ok((await store.files()).includes("proofs/trip-1/receipt.jpg"));
   await a.close();
 
   const b = await instance(store);
@@ -116,29 +120,44 @@ test("receipt and photo files are kept, and removed files are removed", async ()
   assert.equal(readFileSync(file, "utf8"), "receipt bytes");
   rmSync(file);
   await b.keeper.changed();
-  assert.deepEqual(await store.files(), []);
+  assert.ok(!(await store.files()).includes("proofs/trip-1/receipt.jpg"));
   assert.equal(existsSync(file), false);
   await b.close();
 });
 
-test("two saves from the same version: the second is refused and reloads", async () => {
+test("two saves from the same version: the second is refused", async () => {
   const store = memoryStore();
-  assert.equal(await store.save("x", 0), 1);
-  assert.equal(await store.save("y", 0), null);
-  assert.equal(await store.save("y", 1), 2);
+  assert.equal(await store.bump(0), 1);
+  assert.equal(await store.bump(0), null);
+  assert.equal(await store.bump(1), 2);
 });
 
-test("the Postgres store sends version-checked saves", async () => {
+test("only changed files are uploaded", async () => {
+  const store = memoryStore();
+  const puts = [];
+  const put = store.putFile;
+  store.putFile = async (path, data) => (puts.push(path), put(path, data));
+  const a = await instance(store);
+  await a.call("POST", "/api/goals/targets", goal("One"));
+  const first = puts.length;
+  assert.ok(first >= 1);
+  await a.keeper.changed();
+  assert.equal(puts.length, first, "nothing changed, nothing sent");
+  await a.close();
+});
+
+test("the Postgres store moves the version on only from the one it loaded", async () => {
   const sent = [];
-  const rows = [];
+  let row = null;
   const store = await postgresKeepStore(async (text, params) => {
     sent.push(text);
-    if (text.startsWith("INSERT INTO bounty_keep ")) return rows.length ? [] : (rows.push(params[0]), [{ version: "1" }]);
-    if (text.startsWith("UPDATE bounty_keep ")) return params[1] === 1 ? [{ version: "2" }] : [];
+    if (text.startsWith("INSERT INTO bounty_keep ")) return row ? [] : ((row = 1), [{ version: "1" }]);
+    if (text.startsWith("UPDATE bounty_keep ")) return params[0] === row ? [{ version: String(++row) }] : [];
     return [];
   });
-  assert.equal(await store.save("a", 0), 1);
-  assert.equal(await store.save("b", 0), null);
-  assert.equal(await store.save("b", 1), 2);
-  assert.ok(sent.some((t) => t.includes("WHERE id = 'main' AND version = $2")));
+  assert.equal(await store.bump(0), 1);
+  assert.equal(await store.bump(0), null);
+  assert.equal(await store.bump(1), 2);
+  assert.equal(await store.bump(1), null);
+  assert.ok(sent.some((t) => t.includes("WHERE id = 'main' AND version = $1")));
 });
