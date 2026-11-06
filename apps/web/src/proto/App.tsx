@@ -1146,11 +1146,15 @@ export default function ProtoApp({
     const rest = inView
       .filter((d) => !four.includes(d))
       .sort((a, b) => (b.unitProfit ?? -1e9) - (a.unitProfit ?? -1e9));
+    // Each find shows once on this page: a row skips what a row above it
+    // already shows (rows show five), so the page feels full, not looped.
+    const shown = new Set([...four, ...rest.slice(0, 5)].map((d) => d.sku));
     const fast = [...inView]
-      .filter((d) => d.salesPerWeek != null)
+      .filter((d) => d.salesPerWeek != null && !shown.has(d.sku))
       .sort((a, b) => (b.salesPerWeek ?? 0) - (a.salesPerWeek ?? 0));
+    for (const d of fast.slice(0, 5)) shown.add(d.sku);
     const gaps = [...inView]
-      .filter((d) => d.underSale !== null)
+      .filter((d) => d.underSale !== null && !shown.has(d.sku))
       .sort((a, b) => (b.underSale ?? 0) - (a.underSale ?? 0));
     const tip = bounties[0];
     return (
