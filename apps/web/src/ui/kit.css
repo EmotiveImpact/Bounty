@@ -487,3 +487,7 @@ input[type="file"].k-input { height: auto; padding: 10px 12px; font-size: 14px; 
   .k-row:has(> .k-slot) > .k-rv:empty, .k-row:has(> .k-slot) > span:empty { display: none; }
   .k-row .k-rt b { white-space: normal; }
 }
+
+/* A button for a step that cannot be undone, such as deleting an account. */
+.k-btn.k-danger { color: var(--k-loss); }
+.k-btn.main.k-danger { background: var(--k-loss); color: #fff; }

@@ -716,11 +716,15 @@ export function MemberForm({
   paidTierIds,
   member,
   onSaved,
+  planDecides = false,
 }: {
   tiers: Tier[];
   paidTierIds: string[];
   member: Member | null;
   onSaved: (m: Member) => void;
+  // Signed in, the member's plan sets their early access, so the hand-set
+  // paid tier is not shown or sent.
+  planDecides?: boolean;
 }) {
   const [name, setName] = useState(member?.name ?? "");
   const [locality, setLocality] = useState(member?.locality ?? "London");
@@ -762,8 +766,9 @@ export function MemberForm({
         .split(",")
         .map((p) => p.trim())
         .filter(Boolean),
-      paidTier: paidTier || null,
-      paidUntil: paidTier && paidUntil ? paidUntil : null,
+      ...(planDecides
+        ? {}
+        : { paidTier: paidTier || null, paidUntil: paidTier && paidUntil ? paidUntil : null }),
       rules: textToRules(rules),
       transport: transport || null,
       carryKg,
@@ -917,6 +922,9 @@ export function MemberForm({
           Use the Planner profile saved in this browser
         </button>
       </fieldset>
+      {planDecides ? (
+        <small className="muted">Your plan sets when tips reach you. Change it on Plans.</small>
+      ) : (
       <fieldset>
         <legend>Paid early access (recorded by the operator)</legend>
         <label>
@@ -940,6 +948,7 @@ export function MemberForm({
           Paying changes only when alerts and claims open for you. It never adds reputation points.
         </small>
       </fieldset>
+      )}
       <fieldset>
         <legend>Your stricter buying thresholds (optional)</legend>
         <small className="muted">

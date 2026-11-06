@@ -39,7 +39,7 @@ const strong = Object.freeze({
   variant: "Test",
   category: "general",
   shop: "Test shop",
-  area: "Leeds",
+  area: "London",
   miles: 1,
   buy: 1000,
   sales: [2900, 3000, 3100],
@@ -209,7 +209,7 @@ test("the alert gate gets the planned units, the demand and every blank cost or 
 
 test("area and the hourly target change the reason without inventing evidence", () => {
   assert.equal(run(knit, { area: "York" }).reason, REASONS.AREA);
-  assert.equal(run(knit, { area: "  leeds " }).reason === REASONS.AREA, false);
+  assert.equal(run(knit, { area: "  london " }).reason === REASONS.AREA, false);
   const slow = run(knit, { target: 100000 });
   assert.equal(slow.reason, REASONS.HOURLY);
   assert.equal(slow.fits, false);

@@ -9,4 +9,5 @@
 | [SOURCES.md](SOURCES.md) | Price and sales sources, credentials and import commands. |
 | [INTEGRATIONS.md](INTEGRATIONS.md) | Which source adapters have been checked, and how. |
 | [DEPLOY.md](DEPLOY.md) | Putting Bounty online: Vercel demo and the Railway option. |
+| [IMAGES.md](IMAGES.md) | Every image the website uses (crew, products, link preview) and the rules for crew pictures. |
 | [STALE.md](STALE.md) | Leftover old code and docs, with a suggested fix for each. |

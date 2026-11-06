@@ -2,6 +2,7 @@
 // welcome card, sign-in and the plans. Each spot has its own picture
 // (public/crew/<id>-<look>.jpg), always on white as in the campaign.
 import { CREW } from "./CrewScreen";
+import type { ReactNode } from "react";
 import "./crew-art.css";
 
 export type CrewId = "boss" | "scout" | "hauler" | "insider" | "fixer" | "negotiator";
@@ -20,7 +21,11 @@ export type CrewLook =
   | "fixer-handover"
   | "fixer-parcels"
   | "negotiator-deal"
-  | "negotiator-receipt";
+  | "negotiator-receipt"
+  | "scout-map"
+  | "scout-search"
+  | "negotiator-count"
+  | "fixer-tape";
 
 export function CrewArt({ look, className }: { look: CrewLook; className?: string }) {
   const id = look.split("-")[0];
@@ -29,5 +34,16 @@ export function CrewArt({ look, className }: { look: CrewLook; className?: strin
     <span className={"crew-art" + (className ? " " + className : "")}>
       <img src={`/crew/${look}.jpg`} alt={who ? who.name : ""} loading="lazy" decoding="async" />
     </span>
+  );
+}
+
+// While a screen waits for its figures: a character at work beside the
+// words, gently bobbing (still when reduced motion is asked for).
+export function CrewLoading({ look, children }: { look: CrewLook; children: ReactNode }) {
+  return (
+    <div className="crew-loading" role="status" aria-live="polite">
+      <CrewArt look={look} />
+      <p>{children}</p>
+    </div>
   );
 }

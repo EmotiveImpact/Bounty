@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { memoryDb, serve } from "./test-support.mjs";
+import { memoryDb, serve, memoryAccountsStore as memoryStore } from "./test-support.mjs";
 import { accounts, checkPassword, hashPassword, readCookie } from "./accounts.mjs";
 import { accessConfig } from "./access.mjs";
 
@@ -13,41 +13,18 @@ const echo = {
   ],
 };
 
-// The same shape as postgresStore, kept in memory.
-function memoryStore() {
-  const users = [];
-  const sessions = new Map();
-  return {
-    users,
-    sessions,
-    async userByEmail(email) {
-      return users.find((u) => u.email === email) || null;
-    },
-    async createUser({ email, name, passwordHash }) {
-      if (users.some((u) => u.email === email)) return null;
-      const user = { id: users.length + 1, email, name, password_hash: passwordHash };
-      users.push(user);
-      return { id: user.id, email, name };
-    },
-    async createSession({ hash, userId, expires }) {
-      sessions.set(hash, { userId, expires });
-    },
-    async sessionUser(hash) {
-      const s = sessions.get(hash);
-      if (!s || s.expires.getTime() <= Date.now()) return null;
-      const u = users.find((x) => x.id === s.userId);
-      return u ? { id: u.id, email: u.email, name: u.name } : null;
-    },
-    async deleteSession(hash) {
-      sessions.delete(hash);
-    },
-  };
-}
+// An Admin tool: marked for operators only.
+const admin = {
+  routes: () => [
+    ["GET", "/api/desk", () => ({ desk: true }), { operator: true }],
+    ["POST", "/api/desk", ({ body }) => body, { operator: true }],
+  ],
+};
 
-async function start(options = {}) {
+async function start(options = {}, operators = []) {
   const store = memoryStore();
   const members = accounts(store, { inviteCode: INVITE, ...options });
-  const api = await serve(memoryDb(), [echo], { members, password: null });
+  const api = await serve(memoryDb(), [echo, admin], { members, password: null, operators });
   const call = async (method, path, body, cookie) => {
     const res = await fetch(api.base + path, {
       method,
@@ -89,7 +66,7 @@ test("signed out, anyone can look around but every change asks to sign in", asyn
     assert.equal(write.status, 401);
     assert.equal(write.body.signIn, true);
     const me = await call("GET", "/api/auth/me");
-    assert.deepEqual(me, { status: 200, body: { required: true, user: null, inviteOpen: true }, setCookie: null });
+    assert.deepEqual(me, { status: 200, body: { required: true, user: null, inviteOpen: true, operator: false, mailOn: false }, setCookie: null });
     const res = await fetch(api.base + "/api/echo", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -114,7 +91,7 @@ test("sign up with the invite code, stay signed in, then sign out", async () => 
 
     const up = await call("POST", "/api/auth/signup", { email: " Edem@Example.co.uk ", password: "0123456789", invite: INVITE, name: "Edem" });
     assert.equal(up.status, 200);
-    assert.deepEqual(up.body.user, { email: "edem@example.co.uk", name: "Edem" });
+    assert.deepEqual(up.body.user, { email: "edem@example.co.uk", name: "Edem", verified: false });
     assert.match(up.setCookie, /^bounty_session=[\w-]{40,}; Path=\/; HttpOnly; SameSite=Lax; Max-Age=2592000$/);
     assert.ok(!up.setCookie.includes("Secure"), "plain http on this machine cannot keep a Secure cookie");
     const cookie = sessionCookie(up.setCookie);
@@ -122,7 +99,7 @@ test("sign up with the invite code, stay signed in, then sign out", async () => 
 
     assert.deepEqual((await call("POST", "/api/echo", { a: 1 }, cookie)).body, { a: 1 });
     const me = await call("GET", "/api/auth/me", undefined, cookie);
-    assert.deepEqual(me.body, { required: true, user: { email: "edem@example.co.uk", name: "Edem" }, inviteOpen: true });
+    assert.deepEqual(me.body, { required: true, user: { email: "edem@example.co.uk", name: "Edem", verified: false }, inviteOpen: true, operator: false, mailOn: false });
 
     const again = await call("POST", "/api/auth/signup", { email: "edem@example.co.uk", password: "0123456789", invite: INVITE });
     assert.equal(again.status, 409);
@@ -178,7 +155,7 @@ test("sign-up is closed without an invite code; sign-in writes still need JSON",
 test("without accounts the app reports that no sign-in is needed", async () => {
   const api = await serve(memoryDb(), [echo]);
   try {
-    assert.deepEqual(await api.call("GET", "/api/auth/me"), { status: 200, body: { required: false, user: null } });
+    assert.deepEqual(await api.call("GET", "/api/auth/me"), { status: 200, body: { required: false, user: null, operator: true } });
   } finally {
     await api.close();
   }
@@ -190,4 +167,117 @@ test("a database URL replaces the shared password for hosted use", () => {
   assert.equal(config.inviteCode, INVITE);
   assert.equal(config.password, null);
   assert.throws(() => accessConfig({ DATABASE_URL: "postgres://x", BOUNTY_INVITE_CODE: "short" }), /at least 8/);
+});
+
+test("Admin tools answer only a signed-in operator", async () => {
+  const { api, call } = await start({}, [" Boss@Example.co.uk "]);
+  try {
+    assert.equal((await call("GET", "/api/desk")).status, 401, "signed out: sign in first, even to read");
+    const member = sessionCookie(
+      (await call("POST", "/api/auth/signup", { email: "member@example.co.uk", password: "0123456789", invite: INVITE })).setCookie,
+    );
+    assert.equal((await call("GET", "/api/desk", undefined, member)).status, 403);
+    assert.equal((await call("POST", "/api/desk", { a: 1 }, member)).status, 403);
+    assert.equal((await call("GET", "/api/auth/me", undefined, member)).body.operator, false);
+    const boss = sessionCookie(
+      (await call("POST", "/api/auth/signup", { email: "boss@example.co.uk", password: "0123456789", invite: INVITE })).setCookie,
+    );
+    assert.equal((await call("GET", "/api/auth/me", undefined, boss)).body.operator, true);
+    assert.deepEqual((await call("GET", "/api/desk", undefined, boss)).body, { desk: true });
+    assert.deepEqual((await call("POST", "/api/desk", { a: 1 }, boss)).body, { a: 1 });
+    assert.deepEqual((await call("POST", "/api/echo", { a: 2 }, member)).body, { a: 2 }, "members still save their own changes");
+  } finally {
+    await api.close();
+  }
+});
+
+test("the real Admin routes are marked for operators", async () => {
+  const { OPERATOR_ROUTES } = await import("./app.mjs");
+  for (const r of ["POST /api/bounties", "POST /api/reports/:id/verify", "POST /api/audit/signoff", "GET /api/sources", "POST /api/permissions"])
+    assert.ok(OPERATOR_ROUTES.has(r), r);
+  assert.deepEqual(accessConfig({ BOUNTY_OPERATORS: "A@b.co, c@d.co ,," }).operators, ["a@b.co", "c@d.co"]);
+});
+
+test("every operator route names a real route", async () => {
+  const { OPERATOR_ROUTES, routeModules } = await import("./app.mjs");
+  const real = new Set(routeModules.flatMap((m) => m.routes(memoryDb())).map(([method, pattern]) => `${method} ${pattern}`));
+  for (const r of OPERATOR_ROUTES) assert.ok(real.has(r), r);
+});
+
+test("signed in, a scout profile is linked to the account and only that account acts as it", async () => {
+  const { routeModules } = await import("./app.mjs");
+  const { openDb } = await import("./db.mjs");
+  const store = memoryStore();
+  const members = accounts(store, { inviteCode: INVITE });
+  const api = await serve(openDb(":memory:"), routeModules, { members, password: null, operators: ["boss@example.co.uk"] });
+  const call = async (method, path, body, cookie) => {
+    const res = await fetch(api.base + path, {
+      method,
+      headers: { ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...(cookie ? { Cookie: cookie } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await res.text();
+    return { status: res.status, body: text ? JSON.parse(text) : null, setCookie: res.headers.get("set-cookie") };
+  };
+  const signUp = async (email) =>
+    sessionCookie((await call("POST", "/api/auth/signup", { email, password: "0123456789", invite: INVITE })).setCookie);
+  try {
+    const ana = await signUp("ana@example.co.uk");
+    const ben = await signUp("ben@example.co.uk");
+    const boss = await signUp("boss@example.co.uk");
+    assert.deepEqual((await call("GET", "/api/members/me", undefined, ana)).body, { member: null });
+    const made = await call("POST", "/api/members", { name: "Ana" }, ana);
+    assert.equal(made.status, 201);
+    const id = made.body.member.id;
+    assert.equal((await call("GET", "/api/members/me", undefined, ana)).body.member.id, id);
+    assert.equal((await call("POST", "/api/members", { name: "Ana again" }, ana)).body.member.id, id, "one profile per account");
+    assert.equal((await call("PATCH", `/api/members/${id}`, { name: "Ana K" }, ana)).status, 200);
+    assert.equal((await call("PATCH", `/api/members/${id}`, { name: "Not Ana" }, ben)).status, 403);
+    assert.equal((await call("GET", `/api/members/${id}/alerts`, undefined, ben)).status, 403);
+    assert.equal((await call("PATCH", `/api/members/${id}`, { name: "Ana" }, boss)).status, 200, "an operator may act as anyone");
+    assert.deepEqual((await call("GET", "/api/members/me")).body, { member: null }, "signed out: no profile");
+  } finally {
+    await api.close();
+  }
+});
+
+test("a plan sets the linked profile's tip timing and how many alert areas it may have", async () => {
+  const { routeModules } = await import("./app.mjs");
+  const { openDb } = await import("./db.mjs");
+  const store = memoryStore();
+  const members = accounts(store, { inviteCode: INVITE });
+  const api = await serve(openDb(":memory:"), routeModules, { members, password: null, operators: [] });
+  const call = async (method, path, body, cookie) => {
+    const res = await fetch(api.base + path, {
+      method,
+      headers: { ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...(cookie ? { Cookie: cookie } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await res.text();
+    return { status: res.status, body: text ? JSON.parse(text) : null, setCookie: res.headers.get("set-cookie") };
+  };
+  try {
+    const ana = sessionCookie(
+      (await call("POST", "/api/auth/signup", { email: "ana@example.co.uk", password: "0123456789", invite: INVITE })).setCookie,
+    );
+    assert.equal((await call("POST", "/api/plans/choose", { plan: "starter" }, ana)).status, 200);
+    const tooMany = await call("POST", "/api/members", { name: "Ana", alertLocalities: ["Camden", "Hackney"] }, ana);
+    assert.equal(tooMany.status, 400);
+    assert.match(tooMany.body.error, /Starter plan covers one area/);
+    const made = await call("POST", "/api/members", { name: "Ana", alertLocalities: ["Camden"], paidTier: "diamond" }, ana);
+    assert.equal(made.status, 201);
+    assert.equal(made.body.member.paid.tier, null, "a member cannot buy a tier by hand; Starter has no early access");
+    const id = made.body.member.id;
+    await call("POST", "/api/plans/choose", { plan: "plus" }, ana);
+    let me = (await call("GET", "/api/members/me", undefined, ana)).body.member;
+    assert.equal(me.paid.tier.id, "emerald", "Plus: tips 3 hours early");
+    assert.equal((await call("PATCH", `/api/members/${id}`, { alertLocalities: ["Camden", "Hackney", "Brixton"] }, ana)).status, 200);
+    assert.equal((await call("PATCH", `/api/members/${id}`, { alertLocalities: ["A", "B", "C", "D"] }, ana)).status, 400);
+    await call("POST", "/api/plans/choose", { plan: "fulltime" }, ana);
+    me = (await call("GET", "/api/members/me", undefined, ana)).body.member;
+    assert.equal(me.paid.tier.id, "diamond", "Full-time: the earliest tips");
+    assert.equal((await call("PATCH", `/api/members/${id}`, { alertLocalities: ["A", "B", "C", "D"] }, ana)).status, 200);
+  } finally {
+    await api.close();
+  }
 });

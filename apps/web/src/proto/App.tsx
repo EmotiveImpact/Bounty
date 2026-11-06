@@ -16,7 +16,7 @@ import {
   type Lens,
 } from "../api";
 import { BuyingRules, ItemTile, byMode } from "../Planner";
-import { CrewArt } from "./CrewArt";
+import { CrewArt, CrewLoading } from "./CrewArt";
 import { savedExtras, type Deal } from "../Deals";
 import { Ico } from "./icons";
 import MoneyScreen from "./Money";
@@ -31,6 +31,8 @@ import CrewScreen, { CrewBand } from "./CrewScreen";
 import { PageHead } from "../ui/kit";
 import { GoalsSettings } from "../Goals";
 import SignOff from "./SignOff";
+import AccountSettings from "./AccountSettings";
+import { Help, Privacy, SiteFoot, Terms } from "./LegalPages";
 import "./proto.css";
 import "./proto-extra.css";
 import "./proto-bold.css";
@@ -38,9 +40,8 @@ import "./proto-bold.css";
 // The logo in every slot. One place to change when the new logo arrives.
 function Wordmark() {
   return (
-    <span className="wordmark" aria-label="Bounty London">
+    <span className="wordmark" aria-label="Bounty">
       <b aria-hidden="true">BOUNTY</b>
-      <small aria-hidden="true">LONDON</small>
     </span>
   );
 }
@@ -65,7 +66,10 @@ export type View =
   | "blocks"
   | "admin"
   | "plans"
-  | "crew";
+  | "crew"
+  | "help"
+  | "terms"
+  | "privacy";
 
 // The address for each screen. The older screens keep their old names, so
 // links inside them such as #Planner still work.
@@ -85,6 +89,9 @@ const HASH: Record<View, string> = {
   admin: "Admin",
   plans: "Plans",
   crew: "Crew",
+  help: "Help",
+  terms: "Terms",
+  privacy: "Privacy",
 };
 /* When a find is saved the heart pops and a few short lines flick out
    around it, like Pinterest. Skipped for people who ask for reduced motion. */
@@ -136,6 +143,19 @@ function fromHash(): { view: View; sku: string | null } {
   const [name, sku] = h.split("/");
   const view = (Object.keys(HASH) as View[]).find((v) => HASH[v] === name);
   return view ? { view, sku: sku ?? null } : { view: "deals", sku: null };
+}
+
+// True when the address names a screen that does not exist, such as an
+// old or mistyped link. The app still opens on Deals, with a note.
+function unknownHash(): boolean {
+  let h = "";
+  try {
+    h = decodeURIComponent(location.hash.slice(1));
+  } catch {
+    return true;
+  }
+  const name = h.split("/")[0];
+  return name !== "" && !Object.values(HASH).includes(name);
 }
 
 const CAT_LABEL: Record<string, string> = {
@@ -198,15 +218,28 @@ type Report = { at: number; kind: "saw" | "gone" };
 export default function ProtoApp({
   legacy,
   account,
+  operator = true,
 }: {
   legacy: (view: View) => React.ReactNode;
+  // May use Admin. The server checks this too; here it only hides the way in.
+  operator?: boolean;
   // Member sign-in on a hosted pilot; absent on your own computer, where
   // there are no accounts. email is null while signed out.
-  account?: { email: string | null; signIn: () => void; signUp: () => void; signOut: () => void };
+  account?: {
+    email: string | null;
+    signIn: () => void;
+    signUp: () => void;
+    signOut: () => void;
+    // After the account is deleted (already signed out on the server).
+    signedOut?: () => void;
+    // After the email changes.
+    refresh?: () => void;
+  };
 }) {
   const first = fromHash();
   const [view, setView] = useState<View>(first.view);
   const [sku, setSku] = useState<string | null>(first.sku);
+  const [lost, setLost] = useState(unknownHash);
   const [deals, setDeals] = useState<Deal[] | null>(null);
   const [error, setError] = useState("");
   const [reload, setReload] = useState(0);
@@ -262,8 +295,6 @@ export default function ProtoApp({
     }),
   );
   const [listening, setListening] = useState(false);
-  const [seenA, setSeenA] = useState(false);
-  const [seenC, setSeenC] = useState(false);
   const [profile, setProfileState] = useState(loadProfile);
   const [bounties, setBounties] = useState<LiveTip[]>([]);
 
@@ -296,6 +327,7 @@ export default function ProtoApp({
       const h = fromHash();
       setView(h.view);
       setSku(h.sku);
+      setLost(unknownHash());
     };
     window.addEventListener("hashchange", on);
     return () => window.removeEventListener("hashchange", on);
@@ -342,6 +374,7 @@ export default function ProtoApp({
   const go = (v: View, itemSku: string | null = null) => {
     setPop(null);
     setProfOpen(false);
+    setLost(false);
     setView(v);
     setSku(itemSku);
     if (v !== "deals") {
@@ -659,7 +692,7 @@ export default function ProtoApp({
         <span className="grow" />
         <span className="pts">
           <span style={{ color: "var(--muted)" }}>Scout points · sample</span>
-          <b>460 · Trusted</b>£2 off at 500
+          <b>460 · Ruby</b>£2 off at 500
         </span>
       </span>
     </nav>
@@ -873,6 +906,9 @@ export default function ProtoApp({
           </span>
         </form>
         <div className="tools picons">
+          {/* Alerts and tip chat belong to an account, so signed-out
+              visitors see only Sign in and Sign up. */}
+          {!(account && !account.email) && (<>
           <span className="popwrap">
             <button
               type="button"
@@ -880,14 +916,12 @@ export default function ProtoApp({
               aria-label="Alerts"
               aria-expanded={pop === "alerts"}
               onClick={() => (
-                setPop(pop === "alerts" ? null : "alerts"),
-                setSeenA(true)
+                setPop(pop === "alerts" ? null : "alerts")
               )}
             >
               <Ico n="bell" />
-              {!seenA && top.length > 0 && (
-                <i className="cnt">{Math.min(3, top.length)}</i>
-              )}
+              {/* No count badge while alerts are only samples: a number
+                  here reads as real notifications. */}
             </button>
             {pop === "alerts" && (
               <div className="pop listpop">
@@ -930,12 +964,10 @@ export default function ProtoApp({
               aria-label="Tip chat"
               aria-expanded={pop === "chat"}
               onClick={() => (
-                setPop(pop === "chat" ? null : "chat"),
-                setSeenC(true)
+                setPop(pop === "chat" ? null : "chat")
               )}
             >
               <Ico n="chat" />
-              {!seenC && <i className="cnt">2</i>}
             </button>
             {pop === "chat" && (
               <div className="pop listpop">
@@ -943,7 +975,7 @@ export default function ProtoApp({
                   Tip chat <span className="badge sample-chip">Sample</span>
                 </b>
                 {CHATS.map(([n, l, m, w]) => (
-                  <button key={n} type="button" className="opt li">
+                  <div key={n} className="opt li">
                     <span className="avatar sm">
                       <span>{n[0]}</span>
                     </span>
@@ -953,7 +985,7 @@ export default function ProtoApp({
                       </small>
                       {m}
                     </span>
-                  </button>
+                  </div>
                 ))}
                 <small className="popnote">
                   Chat is coming. These messages are examples, not real members.
@@ -969,6 +1001,7 @@ export default function ProtoApp({
               </div>
             )}
           </span>
+          </>)}
           {/* Signed out: Sign in and Sign up only. Signed in (or no accounts
               on this copy): the avatar and its account menu only. */}
           {account && !account.email ? (
@@ -1018,7 +1051,7 @@ export default function ProtoApp({
                 <div className="pm-card">
                   <div className="pm-row">
                     <span>
-                      <span className="lvl trusted">Trusted</span>Scout points
+                      <span className="lvl trusted">Ruby</span>Scout points
                     </span>
                     <b>460</b>
                   </div>
@@ -1043,9 +1076,16 @@ export default function ProtoApp({
                   <button type="button" onClick={() => go("plans")}>
                     Plans
                   </button>
-                  <button type="button" onClick={() => go("admin")}>
-                    Admin (operators)
-                  </button>
+                  {operator && (
+                    <button type="button" onClick={() => go("admin")}>
+                      Admin (operators)
+                    </button>
+                  )}
+                  {account && !account.email && (
+                    <button type="button" onClick={account.signIn}>
+                      Sign in
+                    </button>
+                  )}
                   {account?.email && (
                     <button type="button" onClick={account.signOut}>
                       Sign out ({account.email})
@@ -1106,11 +1146,15 @@ export default function ProtoApp({
     const rest = inView
       .filter((d) => !four.includes(d))
       .sort((a, b) => (b.unitProfit ?? -1e9) - (a.unitProfit ?? -1e9));
+    // Each find shows once on this page: a row skips what a row above it
+    // already shows (rows show five), so the page feels full, not looped.
+    const shown = new Set([...four, ...rest.slice(0, 5)].map((d) => d.sku));
     const fast = [...inView]
-      .filter((d) => d.salesPerWeek != null)
+      .filter((d) => d.salesPerWeek != null && !shown.has(d.sku))
       .sort((a, b) => (b.salesPerWeek ?? 0) - (a.salesPerWeek ?? 0));
+    for (const d of fast.slice(0, 5)) shown.add(d.sku);
     const gaps = [...inView]
-      .filter((d) => d.underSale !== null)
+      .filter((d) => d.underSale !== null && !shown.has(d.sku))
       .sort((a, b) => (b.underSale ?? 0) - (a.underSale ?? 0));
     const tip = bounties[0];
     return (
@@ -1731,6 +1775,8 @@ export default function ProtoApp({
                   margin: "0 0 10px",
                   textTransform: "none",
                   fontSize: 18,
+                  display: "block",
+                  width: "100%",
                 }}
                 aria-label="Your name"
                 placeholder="Your name"
@@ -1844,15 +1890,20 @@ export default function ProtoApp({
           <PlanLine go={(v) => go(v)} wide />
         </div>
       </div>
+      {account?.email && (
+        <div style={{ marginTop: 20 }}>
+          <AccountSettings
+            onSignedOut={() => account.signedOut?.()}
+            onEmailChanged={() => account.refresh?.()}
+          />
+        </div>
+      )}
       <div className="legacy" style={{ marginTop: 20 }}>
-        <div className="planner goals">
+        <div className="planner goals prof-forms">
           <GoalsSettings />
           <BuyingRules />
         </div>
       </div>
-      <p className="sub" style={{ marginTop: 20, fontSize: 13 }}>
-        <a href="#Blocks">See the building blocks</a> the screens are made from.
-      </p>
     </>
   );
 
@@ -1924,6 +1975,8 @@ export default function ProtoApp({
         </span>
       </button>
     );
+    // Nothing on the trip and not out on it: keep the bar out of the way.
+    if (!tripOpen && !going && units === 0) return null;
     if (!tripOpen) return tab;
     if (signing)
       return (
@@ -2163,7 +2216,7 @@ export default function ProtoApp({
             </p>
             <input
               className="obin"
-              placeholder="e.g. LS1 4AP"
+              placeholder="e.g. SE1 7PB"
               value={postcode}
               autoComplete="postal-code"
               onChange={(e) => setPostcode(e.target.value)}
@@ -2258,8 +2311,21 @@ export default function ProtoApp({
   else if (view === "blocks") body = <Blocks />;
   else if (view === "scan") body = <Scan />;
   else if (view === "tips") body = <TipsScreen go={(v) => go(v)} />;
-  else if (view === "admin") body = <Admin />;
+  else if (view === "admin" || view === "sources")
+    body = operator ? (
+      <Admin />
+    ) : (
+      <div className="crew-note">
+        <p className="sub">
+          Admin is for Bounty's operators only. Sign in with an operator
+          account to use it.
+        </p>
+      </div>
+    );
   else if (view === "plans") body = <PlansScreen />;
+  else if (view === "help") body = <Help email={account?.email} />;
+  else if (view === "terms") body = <Terms />;
+  else if (view === "privacy") body = <Privacy />;
   else if (view === "crew") body = <CrewScreen go={(v) => go(v)} />;
   else if (view === "research")
     body = (
@@ -2314,18 +2380,7 @@ export default function ProtoApp({
         go={(v) => go(v)}
       />
     );
-  else
-    body = (
-      <>
-        <div className="titlebar">
-          <div>
-            <h1>{LEGACY_TITLE[view]}</h1>
-            <p>{LEGACY_LEAD[view]}</p>
-          </div>
-        </div>
-        <div className="legacy">{legacy(view)}</div>
-      </>
-    );
+
 
   return (
     <div ref={rootRef} className="bx side-yt" data-tab={view}>
@@ -2336,11 +2391,21 @@ export default function ProtoApp({
           {header}
           {onboarding}
           <main className="wrap">
+            {lost && (
+              <div className="crew-note crew-lost" role="status">
+                <CrewArt look="scout-map" />
+                <div>
+                  <p className="crew-lost-title">That page has wandered off.</p>
+                  <p className="sub">The link may be old or mistyped, so here are today's deals instead.</p>
+                </div>
+              </div>
+            )}
             {error && <p className="note">{error}</p>}
             {!deals && !error && (view === "deals" || view === "item") && (
-              <p className="sub">Loading deals…</p>
+              <CrewLoading look="scout-search">Looking for deals…</CrewLoading>
             )}
             {body}
+            <SiteFoot />
           </main>
           <nav className="phone-nav" aria-label="Sections">
             {(
@@ -2385,29 +2450,15 @@ type LiveTip = {
 };
 
 const CHATS: [string, string, string, string][] = [
-  ["Priya K.", "Top scout", "Still 8 left on the end aisle", "4 min"],
+  ["Priya K.", "Diamond", "Still 8 left on the end aisle", "4 min"],
   [
     "Local flippers",
     "12 members",
     "Anyone checked the retail park today?",
     "18 min",
   ],
-  ["Dan W.", "Trusted", "Thanks for confirming my tip!", "1 hr"],
+  ["Dan W.", "Sapphire", "Thanks for confirming my tip!", "1 hr"],
 ];
-
-const LEGACY_TITLE: Partial<Record<View, string>> = {
-  scan: "Scan",
-  tips: "Live tips",
-  research: "Research",
-  sources: "Sources",
-};
-const LEGACY_LEAD: Partial<Record<View, string>> = {
-  scan: "Scan or type a barcode and add the sticker price for a straight answer: buy, think or leave.",
-  tips: "Shelf tips with a set number of places, so each one stays worth the trip.",
-  research: "Match an offer to exact sold evidence before you buy.",
-  sources:
-    "Where prices come from, when they were checked and what is still sample.",
-};
 
 function MegaMenu({ go }: { go: (v: View) => void }) {
   const it = (k: View, l: string, sub: string) => (
@@ -2443,7 +2494,7 @@ function MegaMenu({ go }: { go: (v: View) => void }) {
         {it("crew", "The crew", "Top scouts and levels")}
         <div className="mmpts">
           <small>Scout points · sample</small>
-          <b>460 · Trusted</b>
+          <b>460 · Ruby</b>
           <span>£2 off at 500</span>
         </div>
       </div>

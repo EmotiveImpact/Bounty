@@ -13,6 +13,9 @@
 //   DATABASE_URL         Postgres (Neon) connection string for member
 //                        accounts; see accounts.mjs
 //   BOUNTY_INVITE_CODE   code new members enter to sign up
+//   BOUNTY_OPERATORS     comma-separated emails of the operators who may use
+//                        Admin (tips desk, sources, evidence, audit) when
+//                        member accounts are on; nobody else can
 //
 // On Vercel (VERCEL is set) the deployment's own host names, which Vercel
 // provides, are added to the public hosts, so only the password is needed.
@@ -55,7 +58,11 @@ export function accessConfig(env = process.env) {
       "Set DATABASE_URL (member accounts) or BOUNTY_PASSWORD before listening beyond this machine " +
         "or naming public hosts: one of them is what keeps the data private",
     );
-  return { listenHost, publicHosts: hosts, password: databaseUrl ? null : password, databaseUrl, inviteCode };
+  const operators = String(env.BOUNTY_OPERATORS || "")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+  return { listenHost, publicHosts: hosts, password: databaseUrl ? null : password, databaseUrl, inviteCode, operators };
 }
 
 const digest = (value) => createHash("sha256").update(value).digest();

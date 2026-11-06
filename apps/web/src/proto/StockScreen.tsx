@@ -30,7 +30,7 @@ import {
   type ChipTone,
   type MenuItem,
 } from "../ui/kit";
-import { CrewArt } from "./CrewArt";
+import { CrewArt, CrewLoading } from "./CrewArt";
 import { EXAMPLE_NOTE, EXAMPLE_TRIPS, type ExampleTrip } from "./examples";
 import "./stock.css";
 
@@ -633,7 +633,7 @@ function DetailsWindow({
           {err}
         </Notice>
       )}
-      {!d && !err && <p className="sk-p">Loading…</p>}
+      {!d && !err && <CrewLoading look="fixer-tape">Getting your stock ready…</CrewLoading>}
       {d && (
         <>
           <div className="sk-wfigs">

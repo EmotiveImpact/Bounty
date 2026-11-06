@@ -34,6 +34,8 @@ const shot = async (target, name) => {
 };
 // The value beside a label in a figures list.
 const figure = (scope, label) => scope.locator("dl.planner-figures dt", { hasText: label }).first().locator("xpath=following-sibling::dd[1]");
+// The same for figures inside a closed "See the figures" (not rendered, so read as text).
+const hiddenFigure = async (scope, label) => ((await figure(scope, label).textContent()) || "").replace(/\s+/g, " ").trim();
 
 test(
   "a blank public transport fare still gives a shortlist and baskets before travel, then a fare brings the figures after travel, at 390 and 1280 px",
@@ -41,7 +43,7 @@ test(
   async () => {
     // What the Planner's starting profile sends by public transport.
     const profile = {
-      area: "Leeds", budget: 10000, target: 1200, transport: "Public transport", carry: 5, quantity: 4,
+      area: "London", budget: 10000, target: 1200, transport: "Public transport", carry: 5, quantity: 4,
       fare: null, perMile: 45, extra: 0, storage: 10, feeRate: 0.13, feeFixed: 40, returnsRate: 0.05, rules: {},
     };
     const blank = await app.api("/api/plan", { method: "POST", body: profile });
@@ -53,91 +55,72 @@ test(
     const jacketFare = fare.body.trips.find((t) => t.sku === "jacket");
     const bottleOut = fare.body.rejected.find((r) => r.sku === "bottle");
 
-    await atWidths(browser, app.url + "/", async (page, width) => {
-      await page.getByRole("heading", { name: "Your buying profile" }).waitFor();
+    await atWidths(browser, app.url + "/#Planner", async (page, width) => {
+      // The full planner, with the basket plan under it, sits below My trip.
+      await page.getByRole("button", { name: "Show the full planner" }).click();
+      // The buying profile is edited in a window opened from its bar.
+      const editProfile = page.locator(".planner-profilebar").getByRole("button", { name: "Edit profile" });
+      const doneProfile = page.locator("#planner-profile").getByRole("button", { name: "Done" });
+      await editProfile.click();
       await page.getByRole("combobox", { name: /^Transport/ }).selectOption("Public transport");
       const fareField = page.getByLabel("Public transport return fare (£)");
       assert.equal(await fareField.inputValue(), "", "the fare starts blank");
-      await page.getByText(/^Your fare is not known yet\. Trips are still shortlisted/).waitFor();
+      await page.locator("#planner-profile").getByText(/A blank fare is never counted as free\. Trips are still shortlisted/).waitFor();
+      await doneProfile.click();
+      await page.locator(".planner-chips li.warn", { hasText: "Fare not entered" }).waitFor();
 
       // The shortlist: both items, ranked by profit per unit before the fare.
-      const cards = page.locator(".planner section .card");
+      const cards = page.locator("button.planner-trip");
+      await page.locator(".planner-ranking", { hasText: "Ranked by profit per unit before your fare" }).waitFor();
       await cards.filter({ hasText: "Children's waterproof jacket" }).waitFor();
       assert.equal(await cards.count(), 2);
       assert.match(await cards.nth(0).innerText(), /Children's waterproof jacket/);
       assert.match(await cards.nth(1).innerText(), /Insulated steel water bottle/);
-      await page.locator(".planner-ranking", { hasText: "Ranked by profit per unit before your fare" }).waitFor();
-      const card = await cards.nth(0).innerText();
-      for (const text of [
-        "Fits before your fare is added: 3 units",
-        "Travel cost still to be added",
-        "Fare: not known yet.",
-        `Cash needed: ${money(jacket.beforeTravel.cashRequired)} plus your fare.`,
-        `${money(jacket.beforeTravel.hourly)} an hour before your fare`,
-        `${money(jacket.beforeTravel.unitProfit)} profit per unit before your fare`,
-      ])
-        assert.ok(card.replace(/\s+/g, " ").includes(text), `card shows "${text}" at ${width}px: ${card}`);
-      assert.match(
-        (await cards.nth(1).innerText()).replace(/\s+/g, " "),
-        new RegExp(`${money(bottle.beforeTravel.unitProfit).replace(".", "\\.")} profit per unit before your fare`),
-      );
-      await page.locator(".planner-rejected summary", { hasText: "Not shortlisted: 3 offers outside your buying thresholds" }).waitFor();
+      for (const i of [0, 1]) await cards.nth(i).locator(".planner-fit", { hasText: "Fits before your fare is added" }).waitFor();
       await shot(page, `page-planner-blank-${width}.png`);
 
-      // The trip calculation: the travel is visible and not known yet; every
+      // The trip details: the travel is visible and not known yet; every
       // figure that needs it says so.
-      const trip = page.locator("article", { hasText: "03 / TRIP CALCULATION" });
+      const trip = page.locator("article.planner-detail");
       await trip.locator(".planner-travel-note", { hasText: "Travel cost still to be added" }).waitFor();
-      assert.equal(await figure(trip, "Travel (one journey)").innerText(), "not known yet");
-      assert.equal(await figure(trip, "Travel per unit").innerText(), "not known yet");
       assert.equal(await figure(trip, "Cash required before payout").innerText(), `${money(jacket.beforeTravel.cashRequired)} plus your fare`);
-      assert.equal(await figure(trip, "Contribution").innerText(), `${money(jacket.beforeTravel.contribution)} before your fare`);
       assert.equal(await figure(trip, "Earnings per hour").innerText(), `${money(jacket.beforeTravel.hourly)} an hour before your fare`);
-      await trip.getByText(`${money(jacket.beforeTravel.unitProfit)} profit per unit before your fare`).waitFor();
-      await trip.locator("ul.checks li.pass", { hasText: "Inside your buying thresholds before your fare" }).waitFor();
-      await trip.locator("ul.checks li.planner-pending", { hasText: "Travel cost still to be added" }).waitFor();
+      await trip.locator("ul.checks li.pass", { hasText: "Inside your buying thresholds before your fare" }).first().waitFor();
+      await trip.locator("ul.checks li.planner-pending", { hasText: "Travel cost still to be added" }).first().waitFor();
       // "What changes if I drive?": the public transport side is before its fare.
       const travelRow = trip.locator("table.planner-compare tr", { has: page.locator("th", { hasText: /^Travel cost$/ }) });
       assert.equal(await travelRow.locator("td").nth(0).innerText(), "not known yet");
-      const contributionRow = trip.locator("table.planner-compare tr", { has: page.locator("th", { hasText: /^Contribution$/ }) });
-      assert.equal(await contributionRow.locator("td").nth(0).innerText(), `${money(jacket.beforeTravel.contribution)} before your fare`);
-      assert.match(await contributionRow.locator("td").nth(2).innerText(), /before your fare$/);
-      await trip.getByText(/leave out the public transport fare, which is not known yet\. Once you enter it, each money difference moves in favour of the car/).waitFor();
+      await page.locator(".planner-rejected", { hasText: "3 offers outside your buying thresholds" }).waitFor();
+      assert.match((await page.locator(".planner-rejected").innerText()).replace(/\s+/g, " "), /even before your public transport fare/);
       await shot(trip, `trip-blank-${width}.png`);
 
-      // Goals: baskets before the fare under the cash limit, none recommended.
-      await page.locator("main > nav > button", { hasText: "Goals" }).click();
+      // The baskets, under the planner: before the fare and under the cash limit, none recommended.
       await page.getByRole("heading", { name: "Top baskets before your fare" }).waitFor();
       const first = page.locator(".planner-basket").first();
       assert.match(await first.innerText(), /3 × Children's waterproof jacket and 1 × Insulated steel water bottle/);
       await first.locator(".badge", { hasText: "Fare not known yet" }).waitFor();
-      assert.match(await figure(first, "Cash required before payout").innerText(), /^£[\d.,]+ plus your fare$/);
-      assert.match(await figure(first, "Contribution if every unit sells").innerText(), /^£[\d.,]+ before your fare$/);
-      assert.equal(await figure(first, "Travel (one journey)").innerText(), "not known yet");
-      assert.match(await figure(first, "Loss if nothing sells").innerText(), /before your fare$/);
-      assert.match((await first.innerText()).replace(/\s+/g, " "), /plus a share of your fare/);
+      assert.match(await hiddenFigure(first, "Cash required before payout"), /^£[\d.,]+ plus your fare$/);
+      assert.match(await hiddenFigure(first, "Contribution if every unit sells"), /^£[\d.,]+ before your fare$/);
+      assert.equal(await hiddenFigure(first, "Travel (one journey)"), "not known yet");
+      assert.match(await hiddenFigure(first, "Loss if nothing sells"), /before your fare$/);
       await page.getByText(/while your fare is not known yet, before it: these fail even before your fare/).waitFor();
-      await first.locator("ul.checks li.planner-pending", { hasText: "Travel cost still to be added" }).waitFor();
-      assert.equal(await page.locator(".badge", { hasText: "Best fit for your profile" }).count(), 0);
+      assert.equal(await page.locator(".planner-basket .badge", { hasText: "Best fit for your profile" }).count(), 0);
       await shot(first, `basket-blank-${width}.png`);
 
-      // Entering a fare: the figures after travel, exactly as before.
-      await page.locator("main > nav > button", { hasText: "Planner" }).click();
-      await page.getByLabel("Public transport return fare (£)").fill("4.50");
-      await cards.filter({ hasText: "Fits your profile: 3 units" }).waitFor();
+      // Entering a fare: the figures after travel, and the baskets follow without a reload.
+      await editProfile.click();
+      await fareField.fill("4.50");
+      await doneProfile.click();
+      await page.locator(".planner-head", { hasText: "1 trip shortlisted" }).first().waitFor();
       assert.equal(await cards.count(), 1, "the bottle falls below £5 a unit after its share of the fare");
-      assert.equal(await page.locator(".planner-ranking").count(), 0);
-      const tripFare = page.locator("article", { hasText: "03 / TRIP CALCULATION" });
-      assert.equal(await figure(tripFare, "Travel (one journey)").innerText(), money(450));
+      const tripFare = page.locator("article.planner-detail");
       assert.equal(await figure(tripFare, "Cash required before payout").innerText(), money(jacketFare.economics.cashRequired));
-      assert.equal(await figure(tripFare, "Contribution").innerText(), money(jacketFare.economics.contribution));
-      await tripFare.locator("ul.checks li.pass", { hasText: /^Inside your buying thresholds$/ }).waitFor();
-      await page.locator(".planner-rejected summary").click();
-      await page.locator(".planner-rejected li", { hasText: bottleOut.reasons[0] }).waitFor();
+      await tripFare.locator("ul.checks li.pass", { hasText: /^Inside your buying thresholds$/ }).first().waitFor();
+      await page.locator(".planner-rejected .planner-reason", { hasText: bottleOut.reasons[0] }).first().waitFor();
       await shot(page, `page-planner-fare-${width}.png`);
-      await page.locator("main > nav > button", { hasText: "Goals" }).click();
       await page.locator(".planner-basket .badge", { hasText: "Best fit for your profile" }).first().waitFor();
-      assert.equal(await page.locator(".badge", { hasText: "Fare not known yet" }).count(), 0);
+      assert.equal(await page.locator(".planner-basket .badge", { hasText: "Fare not known yet" }).count(), 0);
+      assert.equal(await page.locator(".planner-ranking").count(), 0, "no ranking before the fare, in the trips or the baskets");
     });
   },
 );

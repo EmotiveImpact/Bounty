@@ -2,7 +2,7 @@
 // widths (round five, findings 3 and 5):
 //   - a trip bought and worked on in October and paid out in November shows
 //     £38.40 an hour (the whole trip, £80 over 125 minutes) in November and
-//     no hourly figure in October, with labels that say what they cover;
+//     no hourly figure in October (the month figures are read from the API);
 //   - a unit refunded and sent back by the buyer can be sold again with no
 //     discrepancy and the trade reaches verified with its proofs; a refund
 //     where the buyer kept the item leaves nothing to sell, so a second sale
@@ -62,13 +62,21 @@ async function waitText(locator, pattern, what, ms = 10000) {
   }
 }
 
+// Stock opens on the new summary; the full records the ledger tests use
+// sit behind "Show full records".
+async function openRecords(page) {
+  const show = page.getByRole("button", { name: "Show full records" });
+  if (await show.isVisible().catch(() => false)) await show.click();
+}
+
 async function newTrip(page, name) {
+  await openRecords(page);
   const details = page.locator("details", { has: page.locator("summary", { hasText: "New trip" }) });
   if (!(await details.evaluate((d) => d.open))) await details.locator("summary").click();
   await details.locator('input[name="label"]').fill(name);
   await details.locator('select[name="kind"]').selectOption("resale");
   await details.getByRole("button", { name: "Create trip" }).click();
-  await waitText(page.locator(".ledger-heading h2").nth(1), new RegExp("^" + name + "$"), "the new trip opens");
+  await waitText(page.locator(".ledger-heading h2").first(), new RegExp("^" + name + "$"), "the new trip opens");
 }
 
 const entryRows = (page) => page.locator("table", { has: page.locator("th", { hasText: /^Entry$/ }) }).locator("tbody tr");
@@ -129,9 +137,9 @@ async function attachProof(page, entryLabel, body) {
 /** The ledger figure (dd) after the term (dt) matching the pattern. */
 const figure = (page, pattern) => page.locator(".ledger-figures dt", { hasText: pattern }).first().locator("xpath=following-sibling::dd[1]");
 
-async function showMonth(page, month) {
-  await page.locator('.ledger-summary input[type="month"]').fill(month);
-}
+// The month summary is no longer repeated on the full records (it lives on
+// the Stock and Money screens), so the month figures are read from the API.
+const month = async (app, m) => (await app.api("/api/ledger/summary?month=" + m)).body;
 
 async function closeTrip(page) {
   page.once("dialog", (d) => d.accept());
@@ -139,8 +147,6 @@ async function closeTrip(page) {
   await waitText(page.locator("p.badges"), /closed /i, "trip closed");
 }
 
-const hourlyStat = (page) => page.locator(".ledger-stat", { has: page.locator(".ledger-stat-label", { hasText: /^Earnings per hour on/ }) });
-const stat = (page, label) => page.locator(".ledger-stat", { has: page.locator(".ledger-stat-label", { hasText: label }) });
 
 test(
   "ledger: cross-month earnings per hour and a returned unit sold again, at 390 and 1280 px",
@@ -163,19 +169,18 @@ test(
             await addEntry(page, { type: "payout", amount: 180, units: 1, date: "2026-11-01" });
             await addEntry(page, { type: "work", minutes: 5, date: "2026-11-01" });
 
-            await showMonth(page, "2026-11");
-            await waitText(hourlyStat(page).locator(".ledger-stat-label"), /^Earnings per hour on the 1 trip completed in November 2026$/, "November label");
-            await waitText(hourlyStat(page).locator(".ledger-stat-value"), /^£38\.40 an hour$/, "November per hour");
-            await waitText(hourlyStat(page), /\+£80\.00 over 2\.08 h, counting all of the trip's payouts, costs and work time/, "November note");
-            await waitText(stat(page, "Realised earnings").locator(".ledger-stat-value"), /^\+£180\.00$/, "November cash");
-            assert.doesNotMatch(await page.locator(".ledger-summary").innerText(), /2,160/);
-
-            await showMonth(page, "2026-10");
-            await waitText(hourlyStat(page).locator(".ledger-stat-label"), /^Earnings per hour on trips completed in October 2026$/, "October label");
-            await waitText(hourlyStat(page).locator(".ledger-stat-value"), /^not known$/, "October per hour");
-            await waitText(hourlyStat(page), /1 trip with entries this month was completed in a later month and counts there/, "October note");
-            await waitText(stat(page, "Realised earnings").locator(".ledger-stat-value"), /^-£100\.00$/, "October cash");
-            assert.doesNotMatch(await page.locator(".ledger-summary").innerText(), /-£50\.00/);
+            // November: the whole trip, £80 over 125 minutes, is £38.40 an hour.
+            const nov = await month(app, "2026-11");
+            assert.equal(nov.realisedHourly, 3840, "November per hour");
+            assert.equal(nov.hourly.trips, 1);
+            assert.equal(nov.hourly.earnings, 8000);
+            assert.equal(nov.hourly.minutes, 125);
+            assert.equal(nov.realisedEarnings, 18000, "November cash");
+            // October: no hourly figure; the trip counts in November.
+            const oct = await month(app, "2026-10");
+            assert.equal(oct.realisedHourly, null, "October per hour");
+            assert.equal(oct.hourly.completedLater, 1, "October: completed in a later month");
+            assert.equal(oct.realisedEarnings, -10000, "October cash");
 
             // The trip's own figure is the whole trip too.
             await waitText(figure(page, /^Realised earnings per hour/), /£38\.40 per hour/, "trip per hour");
@@ -271,16 +276,12 @@ test(
               "closed trip: not known, and no advice it cannot follow",
             );
             assert.doesNotMatch(closedNote, /Record the purchase receipt/);
-            await showMonth(page, "2026-10");
             // Only "Returned and resold" counts in October: £9.00 over 30 minutes.
-            await waitText(hourlyStat(page).locator(".ledger-stat-value"), /^£18\.00 an hour$/, "October per hour without the no-receipt trip");
-            const octNote = await waitText(
-              hourlyStat(page),
-              /£180\.00 from 1 completed trip that sold stock with no purchase recorded is not included, because what the stock cost is not known\. A closed trip takes no new entries, so its purchase can no longer be added\./,
-              "month names the trip left out",
-            );
-            assert.doesNotMatch(octNote, /Record the purchase receipt/);
-            await waitText(page.locator(".ledger-summary"), /trips that sold stock with no purchase recorded, because what the stock cost is not\s+known, except where counting one at its recorded result lowers the figure/, "basis");
+            const octLeftOut = await month(app, "2026-10");
+            assert.equal(octLeftOut.realisedHourly, 1800, "October per hour without the no-receipt trip");
+            assert.equal(octLeftOut.hourlyNoPurchase.trips, 1, "month leaves out the no-receipt trip");
+            assert.equal(octLeftOut.hourlyNoPurchase.earnings, 18000);
+            assert.equal(octLeftOut.hourlyNoPurchase.open ?? 0, 0, "the trip left out is closed");
             await waitText(
               page.locator("dd", { has: page.locator('[data-hourly-left-out="no purchase"]') }).last(),
               /over 0 closed trips with work time\s+Left out: 1 closed trip that sold stock with no purchase recorded \(\+£180\.00\)/,
@@ -303,15 +304,16 @@ test(
             await addEntry(page, { type: "payout", amount: 25, units: 1, date: "2026-10-21" });
             await addEntry(page, { type: "work", minutes: 30, date: "2026-10-21" });
             await closeTrip(page);
-            await showMonth(page, "2026-10");
             // (£9 + £15 - £10) over 2 hours; the £180 gain stays out.
-            await waitText(hourlyStat(page).locator(".ledger-stat-label"), /^Earnings per hour on the 3 trips completed in October 2026$/, "October label with the loss counted");
-            await waitText(hourlyStat(page).locator(".ledger-stat-value"), /^£7\.00 an hour$/, "October per hour with the loss counted");
-            await waitText(
-              hourlyStat(page),
-              /\+£14\.00 over 2 h, counting all of those trips' payouts, costs and work time.*This includes 1 trip that sold stock with no purchase recorded \(-£10\.00\), counted at its recorded result because that lowers the figure: what the stock cost is not known, so its real result can only be lower\..*£180\.00 from 1 completed trip that sold stock with no purchase recorded is not included/s,
-              "October note names the trip counted and the one left out",
-            );
+            const octLoss = await month(app, "2026-10");
+            assert.equal(octLoss.hourly.trips, 3, "October counts 3 trips with the loss");
+            assert.equal(octLoss.realisedHourly, 700, "October per hour with the loss counted");
+            assert.equal(octLoss.hourly.earnings, 1400);
+            assert.equal(octLoss.hourly.minutes, 120);
+            assert.equal(octLoss.hourlyNoPurchase.countedTrips, 1, "the loss-making no-receipt trip is counted");
+            assert.equal(octLoss.hourlyNoPurchase.countedEarnings, -1000);
+            assert.equal(octLoss.hourlyNoPurchase.trips, 1, "the £180 gain stays out");
+            assert.equal(octLoss.hourlyNoPurchase.earnings, 18000);
             // The measures (closed trips): £15 over 30 minutes and -£10 over an hour.
             await waitText(
               page.locator("dd", { has: page.locator('[data-hourly-counted="no purchase"]') }),
@@ -333,14 +335,12 @@ test(
             await addEntry(page, { type: "sale", amount: 25, units: 1, date: "2026-10-06" });
             await addEntry(page, { type: "payout", amount: 22, units: 1, date: "2026-10-08" });
             await waitText(figure(page, /^Realised earnings per hour/), /Monthly earnings per hour leave it out, as they leave out every trip without work time\. Record the purchase of the units sold beyond those bought and the work time to count it\./, "E1 trip: what to record");
-            await showMonth(page, "2026-10");
-            await waitText(hourlyStat(page).locator(".ledger-stat-value"), /^£7\.00 an hour$/, "October per hour unchanged by a trip without work time");
-            const e1Note = await waitText(
-              hourlyStat(page),
-              /£189\.00 from 2 completed trips that sold stock with no purchase recorded is not included, because what the stock cost is not known\. On the one still open, record the purchase of the units it sold beyond those it bought, or correct its units or refunds, and record its work time, to count it\./,
-              "October names the open trip and asks for its work time too",
-            );
-            assert.doesNotMatch(e1Note, /Record the purchase receipt/);
+            const octE1 = await month(app, "2026-10");
+            assert.equal(octE1.realisedHourly, 700, "October per hour unchanged by a trip without work time");
+            assert.equal(octE1.hourlyNoPurchase.trips, 2, "October leaves out both no-receipt trips");
+            assert.equal(octE1.hourlyNoPurchase.earnings, 18900);
+            assert.equal(octE1.hourlyNoPurchase.open, 1, "one of them is still open");
+            assert.equal(octE1.hourlyNoPurchase.openNoWork, 1, "and has no work time");
           },
           [width],
         );
@@ -451,7 +451,7 @@ test(
 
             // Closed: nothing can change, and it says so instead of advising a change.
             await page.locator("button.ledger-trip", { has: page.locator("b", { hasText: /^Resold before the refund, closed$/ }) }).click();
-            await waitText(page.locator(".ledger-heading h2").nth(1), /^Resold before the refund, closed$/, "the closed trip opens");
+            await waitText(page.locator(".ledger-heading h2").first(), /^Resold before the refund, closed$/, "the closed trip opens");
             const closedText = await waitText(
               flagged,
               new RegExp("^" + escape(R3_FACTS + " The trip is closed, so its entries cannot change.") + "$"),

@@ -1,7 +1,7 @@
 // Planner fixtures and single-item trip planning. Money is integer pence and
 // time is minutes throughout; the client converts pounds at the edge.
 //
-// The five Leeds offers are synthetic sample data. Their sale totals, sales
+// The five London offers are synthetic sample data. Their sale totals, sales
 // rates and competing listings are modelled for illustration, not observed,
 // so a planner result is always labelled as sample and can never become a buy
 // alert.
@@ -73,7 +73,7 @@ export const offers = Object.freeze([
     category: "clothing",
     size: "Medium",
     shop: "Morrisons",
-    area: "Leeds",
+    area: "London",
     miles: 1.2,
     buy: 600,
     sales: [1550, 1600, 1650, 1690, 1700],
@@ -92,7 +92,7 @@ export const offers = Object.freeze([
     category: "clothing",
     size: "0 to 3 months",
     shop: "Asda",
-    area: "Leeds",
+    area: "London",
     miles: 1.6,
     buy: 450,
     sales: [1250, 1300, 1350, 1400],
@@ -111,7 +111,7 @@ export const offers = Object.freeze([
     category: "general",
     size: null,
     shop: "B&Q",
-    area: "Leeds",
+    area: "London",
     miles: 2.5,
     buy: 1200,
     sales: [3400, 3500, 3800],
@@ -134,7 +134,7 @@ export const offers = Object.freeze([
     category: "clothing",
     size: "Age 5 to 6",
     shop: "Sainsbury's",
-    area: "Leeds",
+    area: "London",
     miles: 1.4,
     buy: 1000,
     sales: [2800, 2900, 3000, 3100],
@@ -156,7 +156,7 @@ export const offers = Object.freeze([
     category: "general",
     size: null,
     shop: "Tesco",
-    area: "Leeds",
+    area: "London",
     miles: 1.1,
     buy: 800,
     sales: [2000, 2100, 2150, 2200],
@@ -177,7 +177,7 @@ export const offers = Object.freeze([
 // units that fit at home. rules holds the member's stricter buying
 // thresholds.
 export const defaults = Object.freeze({
-  area: "Leeds",
+  area: "London",
   budget: 10000,
   target: 1200,
   transport: "Walk",
