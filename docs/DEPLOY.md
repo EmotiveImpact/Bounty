@@ -33,6 +33,7 @@ Settings (read by `apps/server/access.mjs`):
 | --- | --- |
 | `DATABASE_URL` | Postgres (Neon) connection string; turns on member sign-in |
 | `BOUNTY_INVITE_CODE` | Code new members enter to sign up |
+| `BOUNTY_OPERATORS` | Comma-separated emails that may use Admin (tips desk, sources, evidence, audit). With member accounts on, nobody else can, so set it before relying on Admin |
 | `BOUNTY_PASSWORD` | Required whenever the API is reachable beyond this machine, unless `DATABASE_URL` is set |
 | `BOUNTY_PUBLIC_HOSTS` | Extra host names the API answers, besides localhost. On Vercel the deployment's own addresses are added automatically |
 | `BOUNTY_LISTEN_HOST` | Address to listen on (`0.0.0.0` in the Dockerfile) |

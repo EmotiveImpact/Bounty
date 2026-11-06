@@ -17,10 +17,10 @@ try {
       "add DATABASE_URL (a Neon connection string, for member sign-in) or BOUNTY_PASSWORD (16 or more characters) " +
         "in the Vercel project's environment variables, then redeploy",
     );
-  const { publicHosts, password, databaseUrl, inviteCode } = accessConfig();
+  const { publicHosts, password, databaseUrl, inviteCode, operators } = accessConfig();
   const members = databaseUrl ? accounts(await neonStore(databaseUrl), { inviteCode }) : null;
   const db = database();
-  const api = createApi(db, { publicHosts, password, members });
+  const api = createApi(db, { publicHosts, password, members, operators });
   seedSampleTips(db);
   const beforeRequest = freshPrices(db);
   handler = async (req, res) => {

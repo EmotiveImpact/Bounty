@@ -141,7 +141,8 @@ const TABLES = [
  storage_units INTEGER,
  seller_name TEXT,
  seller_key TEXT,
- seller_confirmed_at TEXT
+ seller_confirmed_at TEXT,
+ account_email TEXT
 )`,
     // transport, carry_kg and storage_units are the member's own trip
     // profile (round 5): how they travel (trip.mjs MODES), the most they can
@@ -154,10 +155,12 @@ const TABLES = [
     // collapsed), unique across members; matching uses only the key.
     // seller_confirmed_at is when the operator confirmed the name belongs to
     // the member, cleared whenever the name changes: until then their
-    // listings count in full.
+    // listings count in full. account_email links the scout profile to the
+    // signed-in account that made it (lower case, one profile per account);
+    // NULL for profiles made without accounts, on this computer.
     columns: [
       "id", "name", "locality", "paid_tier", "paid_until", "alerts_opt_in", "alert_localities", "rules", "created",
-      "transport", "carry_kg", "storage_units", "seller_name", "seller_key", "seller_confirmed_at",
+      "transport", "carry_kg", "storage_units", "seller_name", "seller_key", "seller_confirmed_at", "account_email",
     ],
     types: {
       alerts_opt_in: "INTEGER NOT NULL DEFAULT 0",
@@ -169,6 +172,7 @@ const TABLES = [
       seller_name: "TEXT",
       seller_key: "TEXT",
       seller_confirmed_at: "TEXT",
+      account_email: "TEXT",
     },
   },
   {
@@ -452,7 +456,8 @@ CREATE INDEX IF NOT EXISTS notices_bounty ON notices(bounty_id, kind, superseded
 CREATE INDEX IF NOT EXISTS promotion_answers_member ON promotion_answers(member_id, retailer);
 CREATE INDEX IF NOT EXISTS bounties_barcode ON bounties(barcode, status);
 CREATE INDEX IF NOT EXISTS claim_releases_claim ON claim_releases(claim_id);
-CREATE UNIQUE INDEX IF NOT EXISTS members_seller_key ON members(seller_key) WHERE seller_key IS NOT NULL;`);
+CREATE UNIQUE INDEX IF NOT EXISTS members_seller_key ON members(seller_key) WHERE seller_key IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS members_account ON members(account_email) WHERE account_email IS NOT NULL;`);
 }
 
 /**
@@ -844,8 +849,38 @@ export function memberView(db, member, { now }) {
 }
 
 /** Creates a local member profile. Alerts are off until the member opts in. */
-export function createMember(db, body, { now }) {
+/**
+ * Gives the scout profile linked to an account the early-access position
+ * its plan buys (plans.mjs tipTier). Payments are not switched on, so the
+ * position lasts while the plan is chosen (no end date). A plan without
+ * early access, or no plan, clears it. Earned levels are untouched.
+ */
+export function applyPlanTier(db, email, tipTier) {
+  if (!email) return;
+  const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'members'").get();
+  if (!exists) return;
+  const paid = tipTier && PAID_TIER_IDS.includes(tipTier) ? tipTier : null;
+  db.prepare("UPDATE members SET paid_tier = ?, paid_until = NULL WHERE account_email = ?").run(
+    paid,
+    String(email).toLowerCase(),
+  );
+}
+
+/** The scout profile linked to a signed-in account, or null. */
+export function memberForAccount(db, email) {
+  if (!email) return null;
+  return db.prepare("SELECT * FROM members WHERE account_email = ?").get(String(email).toLowerCase()) ?? null;
+}
+
+/**
+ * Creates a member. accountEmail links it to the signed-in account that
+ * made it; an account has at most one scout profile, so a second attempt
+ * returns the one it already has.
+ */
+export function createMember(db, body, { now, accountEmail = null }) {
   clock(now);
+  const existing = memberForAccount(db, accountEmail);
+  if (existing) return existing;
   const m = memberFields(body, null);
   uniqueSellerName(db, m.seller_key);
   const result = sellerWrite(() =>
@@ -860,7 +895,10 @@ export function createMember(db, body, { now }) {
         JSON.stringify(m.rules), now, m.transport, m.carry_kg, m.storage_units, m.seller_name, m.seller_key,
       ),
   );
-  return getMember(db, Number(result.lastInsertRowid));
+  const id = Number(result.lastInsertRowid);
+  if (accountEmail)
+    db.prepare("UPDATE members SET account_email = ? WHERE id = ?").run(String(accountEmail).toLowerCase(), id);
+  return getMember(db, id);
 }
 
 /** Updates name, locality, alert opt-in and localities, stricter thresholds, the trip profile or the paid tier. */

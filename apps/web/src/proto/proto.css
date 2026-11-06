@@ -845,11 +845,18 @@
   .pinfo .sub {
     color: var(--muted);
   }
+  /* Three prices always sit in one even row, so the phone never wraps
+     two and one. */
   .bigprice {
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 14px;
-    flex-wrap: wrap;
     margin: 18px 0;
+  }
+  @media (max-width: 640px) {
+    .bigprice { gap: 8px; }
+    .bigprice .bp { min-width: 0; padding: 12px 10px; }
+    .bigprice .bp b { font-size: 21px; }
   }
   .bp {
     background: var(--surface);
@@ -887,8 +894,12 @@
     padding: 12px 16px;
     margin-bottom: 16px;
   }
+  .walk {
+    gap: 12px;
+  }
   .walk b {
     font-size: 20px;
+    white-space: nowrap;
   }
   .btns {
     display: flex;
@@ -2672,6 +2683,7 @@
     margin-bottom: 4px;
   }
   .photobtn {
+    white-space: nowrap;
     color: var(--blue);
     font-weight: 600;
     font-size: 13px;

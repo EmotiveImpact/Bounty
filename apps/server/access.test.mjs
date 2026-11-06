@@ -33,6 +33,7 @@ test("the local default needs no password and no public hosts", () => {
     password: null,
     databaseUrl: null,
     inviteCode: null,
+    operators: [],
   });
 });
 

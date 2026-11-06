@@ -2,14 +2,11 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import "./style.css";
 import "./look.css";
-import Scan from "./Scan";
 import Planner from "./Planner";
 import { BasketSection } from "./Goals";
 import Research from "./Research";
 import { clearResearchDraft } from "./ResearchCalculator";
-import Bounties from "./Bounties";
 import Ledger from "./Ledger";
-import Sources from "./Sources";
 import ProtoApp, { type View } from "./proto/App";
 import SignIn, { type Member } from "./SignIn";
 import { reloadPlans } from "./plans";
@@ -31,17 +28,14 @@ function PlannerPage() {
 // Stock's full records, without the month summary and tax note that the
 // new Stock and Money screens already show.
 function StockRecords() {
-  return <Ledger bare />;
+  return <Ledger />;
 }
 
 // The older screens, shown inside the new shell until each is ported.
 const LEGACY: Partial<Record<View, React.ComponentType>> = {
-  scan: Scan,
   planner: PlannerPage,
   research: Research,
-  tips: Bounties,
   stock: StockRecords,
-  sources: Sources,
 };
 
 // Keeps a failure in one tab from blanking the whole page. onError lets a
@@ -88,28 +82,39 @@ function legacy(view: View) {
 // On a hosted pilot with member accounts the site opens for everyone, with a
 // Sign in button at the top. Saving a change while signed out opens the
 // sign-in window too. On your own computer there are no accounts.
-type Auth = { required: boolean; inviteOpen: boolean; member: Member | null };
+// operator: may use Admin. Without accounts (your own computer, or the
+// password-only demo) whoever is here is the operator.
+type Auth = { required: boolean; inviteOpen: boolean; member: Member | null; operator: boolean };
 
 function Root() {
-  const [auth, setAuth] = React.useState<Auth>({ required: false, inviteOpen: false, member: null });
+  const [auth, setAuth] = React.useState<Auth>({ required: false, inviteOpen: false, member: null, operator: true });
   const [signingIn, setSigningIn] = React.useState<false | "in" | "up">(false);
-  React.useEffect(() => {
+  const refresh = React.useCallback(() => {
     fetch("/api/auth/me")
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (data?.required)
-          setAuth({ required: true, inviteOpen: Boolean(data.inviteOpen), member: data.user ?? null });
+          setAuth({
+            required: true,
+            inviteOpen: Boolean(data.inviteOpen),
+            member: data.user ?? null,
+            operator: data.operator === true,
+          });
       })
       .catch(() => undefined);
+  }, []);
+  React.useEffect(() => {
+    refresh();
     const open = () => setSigningIn("in");
     window.addEventListener(SIGN_IN_EVENT, open);
     return () => window.removeEventListener(SIGN_IN_EVENT, open);
-  }, []);
+  }, [refresh]);
   const close = React.useCallback(() => setSigningIn(false), []);
   return (
     <>
       <ProtoApp
         legacy={legacy}
+        operator={auth.operator}
         account={
           auth.required
             ? {
@@ -122,7 +127,7 @@ function Root() {
                     headers: { "Content-Type": "application/json" },
                     body: "{}",
                   }).catch(() => undefined);
-                  setAuth({ ...auth, member: null });
+                  setAuth({ ...auth, member: null, operator: false });
                   reloadPlans();
                 },
               }
@@ -134,7 +139,9 @@ function Root() {
           startMode={signingIn}
           inviteOpen={auth.inviteOpen}
           onClose={close}
-          onSignedIn={(member) => (setAuth({ ...auth, required: true, member }), setSigningIn(false), reloadPlans())}
+          onSignedIn={(member) => (
+            setAuth({ ...auth, required: true, member }), setSigningIn(false), reloadPlans(), refresh()
+          )}
         />
       )}
     </>

@@ -123,6 +123,15 @@ export async function atWidths(browser, url, fn, widths = [390, 1280]) {
     const errors = [];
     page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
     page.on("pageerror", (e) => errors.push(String(e)));
+    // Skip the first-visit "Where do you hunt?" window; it would sit over
+    // every screen the tests use.
+    await page.addInitScript(() => {
+      try {
+        localStorage.setItem("bounty-onboarded", "true");
+      } catch {
+        // A page without storage still shows the window; tests then fail loudly.
+      }
+    });
     await page.goto(url);
     await fn(page, width);
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);

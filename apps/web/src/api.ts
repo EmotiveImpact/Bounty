@@ -101,7 +101,7 @@ export type Profile = {
   fareFree?: boolean; // true when public transport is free for this member (a bus pass)
 };
 export const initialProfile: Profile = {
-  area: "Leeds",
+  area: "London",
   budget: 100,
   target: 12,
   transport: "Walk",
@@ -163,7 +163,13 @@ export function saveProfile(profile: Profile, { edited = [] }: { edited?: readon
   } catch {
     /* storage unavailable: the profile lasts for this visit only */
   }
+  // Lets views on the same page that read the saved profile (the basket plan
+  // under the planner) update without a reload.
+  window.dispatchEvent(new Event(PROFILE_EVENT));
 }
+
+/** Fired after the Planner saves the profile. */
+export const PROFILE_EVENT = "bounty:profile";
 
 function savedMark(): unknown {
   try {

@@ -210,8 +210,11 @@ type Report = { at: number; kind: "saw" | "gone" };
 export default function ProtoApp({
   legacy,
   account,
+  operator = true,
 }: {
   legacy: (view: View) => React.ReactNode;
+  // May use Admin. The server checks this too; here it only hides the way in.
+  operator?: boolean;
   // Member sign-in on a hosted pilot; absent on your own computer, where
   // there are no accounts. email is null while signed out.
   account?: { email: string | null; signIn: () => void; signUp: () => void; signOut: () => void };
@@ -275,8 +278,6 @@ export default function ProtoApp({
     }),
   );
   const [listening, setListening] = useState(false);
-  const [seenA, setSeenA] = useState(false);
-  const [seenC, setSeenC] = useState(false);
   const [profile, setProfileState] = useState(loadProfile);
   const [bounties, setBounties] = useState<LiveTip[]>([]);
 
@@ -674,7 +675,7 @@ export default function ProtoApp({
         <span className="grow" />
         <span className="pts">
           <span style={{ color: "var(--muted)" }}>Scout points · sample</span>
-          <b>460 · Trusted</b>£2 off at 500
+          <b>460 · Ruby</b>£2 off at 500
         </span>
       </span>
     </nav>
@@ -898,14 +899,12 @@ export default function ProtoApp({
               aria-label="Alerts"
               aria-expanded={pop === "alerts"}
               onClick={() => (
-                setPop(pop === "alerts" ? null : "alerts"),
-                setSeenA(true)
+                setPop(pop === "alerts" ? null : "alerts")
               )}
             >
               <Ico n="bell" />
-              {!seenA && top.length > 0 && (
-                <i className="cnt">{Math.min(3, top.length)}</i>
-              )}
+              {/* No count badge while alerts are only samples: a number
+                  here reads as real notifications. */}
             </button>
             {pop === "alerts" && (
               <div className="pop listpop">
@@ -948,12 +947,10 @@ export default function ProtoApp({
               aria-label="Tip chat"
               aria-expanded={pop === "chat"}
               onClick={() => (
-                setPop(pop === "chat" ? null : "chat"),
-                setSeenC(true)
+                setPop(pop === "chat" ? null : "chat")
               )}
             >
               <Ico n="chat" />
-              {!seenC && <i className="cnt">2</i>}
             </button>
             {pop === "chat" && (
               <div className="pop listpop">
@@ -961,7 +958,7 @@ export default function ProtoApp({
                   Tip chat <span className="badge sample-chip">Sample</span>
                 </b>
                 {CHATS.map(([n, l, m, w]) => (
-                  <button key={n} type="button" className="opt li">
+                  <div key={n} className="opt li">
                     <span className="avatar sm">
                       <span>{n[0]}</span>
                     </span>
@@ -971,7 +968,7 @@ export default function ProtoApp({
                       </small>
                       {m}
                     </span>
-                  </button>
+                  </div>
                 ))}
                 <small className="popnote">
                   Chat is coming. These messages are examples, not real members.
@@ -1037,7 +1034,7 @@ export default function ProtoApp({
                 <div className="pm-card">
                   <div className="pm-row">
                     <span>
-                      <span className="lvl trusted">Trusted</span>Scout points
+                      <span className="lvl trusted">Ruby</span>Scout points
                     </span>
                     <b>460</b>
                   </div>
@@ -1062,9 +1059,16 @@ export default function ProtoApp({
                   <button type="button" onClick={() => go("plans")}>
                     Plans
                   </button>
-                  <button type="button" onClick={() => go("admin")}>
-                    Admin (operators)
-                  </button>
+                  {operator && (
+                    <button type="button" onClick={() => go("admin")}>
+                      Admin (operators)
+                    </button>
+                  )}
+                  {account && !account.email && (
+                    <button type="button" onClick={account.signIn}>
+                      Sign in
+                    </button>
+                  )}
                   {account?.email && (
                     <button type="button" onClick={account.signOut}>
                       Sign out ({account.email})
@@ -1750,6 +1754,8 @@ export default function ProtoApp({
                   margin: "0 0 10px",
                   textTransform: "none",
                   fontSize: 18,
+                  display: "block",
+                  width: "100%",
                 }}
                 aria-label="Your name"
                 placeholder="Your name"
@@ -1864,14 +1870,11 @@ export default function ProtoApp({
         </div>
       </div>
       <div className="legacy" style={{ marginTop: 20 }}>
-        <div className="planner goals">
+        <div className="planner goals prof-forms">
           <GoalsSettings />
           <BuyingRules />
         </div>
       </div>
-      <p className="sub" style={{ marginTop: 20, fontSize: 13 }}>
-        <a href="#Blocks">See the building blocks</a> the screens are made from.
-      </p>
     </>
   );
 
@@ -1943,6 +1946,8 @@ export default function ProtoApp({
         </span>
       </button>
     );
+    // Nothing on the trip and not out on it: keep the bar out of the way.
+    if (!tripOpen && !going && units === 0) return null;
     if (!tripOpen) return tab;
     if (signing)
       return (
@@ -2182,7 +2187,7 @@ export default function ProtoApp({
             </p>
             <input
               className="obin"
-              placeholder="e.g. LS1 4AP"
+              placeholder="e.g. SE1 7PB"
               value={postcode}
               autoComplete="postal-code"
               onChange={(e) => setPostcode(e.target.value)}
@@ -2277,7 +2282,17 @@ export default function ProtoApp({
   else if (view === "blocks") body = <Blocks />;
   else if (view === "scan") body = <Scan />;
   else if (view === "tips") body = <TipsScreen go={(v) => go(v)} />;
-  else if (view === "admin") body = <Admin />;
+  else if (view === "admin" || view === "sources")
+    body = operator ? (
+      <Admin />
+    ) : (
+      <div className="crew-note">
+        <p className="sub">
+          Admin is for Bounty's operators only. Sign in with an operator
+          account to use it.
+        </p>
+      </div>
+    );
   else if (view === "plans") body = <PlansScreen />;
   else if (view === "crew") body = <CrewScreen go={(v) => go(v)} />;
   else if (view === "research")
@@ -2333,18 +2348,7 @@ export default function ProtoApp({
         go={(v) => go(v)}
       />
     );
-  else
-    body = (
-      <>
-        <div className="titlebar">
-          <div>
-            <h1>{LEGACY_TITLE[view]}</h1>
-            <p>{LEGACY_LEAD[view]}</p>
-          </div>
-        </div>
-        <div className="legacy">{legacy(view)}</div>
-      </>
-    );
+
 
   return (
     <div ref={rootRef} className="bx side-yt" data-tab={view}>
@@ -2413,29 +2417,15 @@ type LiveTip = {
 };
 
 const CHATS: [string, string, string, string][] = [
-  ["Priya K.", "Top scout", "Still 8 left on the end aisle", "4 min"],
+  ["Priya K.", "Diamond", "Still 8 left on the end aisle", "4 min"],
   [
     "Local flippers",
     "12 members",
     "Anyone checked the retail park today?",
     "18 min",
   ],
-  ["Dan W.", "Trusted", "Thanks for confirming my tip!", "1 hr"],
+  ["Dan W.", "Sapphire", "Thanks for confirming my tip!", "1 hr"],
 ];
-
-const LEGACY_TITLE: Partial<Record<View, string>> = {
-  scan: "Scan",
-  tips: "Live tips",
-  research: "Research",
-  sources: "Sources",
-};
-const LEGACY_LEAD: Partial<Record<View, string>> = {
-  scan: "Scan or type a barcode and add the sticker price for a straight answer: buy, think or leave.",
-  tips: "Shelf tips with a set number of places, so each one stays worth the trip.",
-  research: "Match an offer to exact sold evidence before you buy.",
-  sources:
-    "Where prices come from, when they were checked and what is still sample.",
-};
 
 function MegaMenu({ go }: { go: (v: View) => void }) {
   const it = (k: View, l: string, sub: string) => (
@@ -2471,7 +2461,7 @@ function MegaMenu({ go }: { go: (v: View) => void }) {
         {it("crew", "The crew", "Top scouts and levels")}
         <div className="mmpts">
           <small>Scout points · sample</small>
-          <b>460 · Trusted</b>
+          <b>460 · Ruby</b>
           <span>£2 off at 500</span>
         </div>
       </div>

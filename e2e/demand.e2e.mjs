@@ -107,7 +107,7 @@ test(
   { skip: !chromium && "Playwright is not installed" },
   async () => {
     await setUp();
-    await atWidths(browser, app.url + "/#Bounties", async (page, width) => {
+    await atWidths(browser, app.url + "/#Admin", async (page, width) => {
       const card = page.locator("article.bounty:not(.closed)");
       const earlier = card.locator("section.earlier", { hasText: "Units from earlier bounties for this item" });
       if (width === 390) {
@@ -123,7 +123,7 @@ test(
         );
         await earlier.getByText("Without them the distribution cap would be 4 units.").waitFor();
         await earlier.getByText(/records them as sold or returned, or the operator records a reconciliation with a reason/).waitFor();
-        await earlier.getByText(/^Ann bought 3 units through bounty 1 on .*: 3 units not yet recorded as sold or returned\.$/).waitFor();
+        await earlier.getByText(/^Ann bought 3 units through bounty \d+ on .*: 3 units not yet recorded as sold or returned\.$/).waitFor();
         assert.equal(await card.locator("dd").filter({ hasText: /^1 unit$/ }).count() > 0, true, "the cap is 1 unit");
         await earlier.getByLabel("Units to release").fill("1");
         await earlier.getByLabel("Reason (kept with the time)").fill("Ann sent the eBay order number for 1 sale");
@@ -139,7 +139,7 @@ test(
         // Ann, who bought them, records a sale on the replacement's card.
         await page.getByLabel("Acting as").selectOption({ label: "Ann" });
         await earlier.waitFor();
-        await earlier.getByText(/^You bought 3 units through bounty 1 on .*: 2 units not yet recorded as sold or returned\. So far 1 reconciled by the operator\.$/).waitFor();
+        await earlier.getByText(/^You bought 3 units through bounty \d+ on .*: 2 units not yet recorded as sold or returned\. So far 1 reconciled by the operator\.$/).waitFor();
         assert.equal(await earlier.getByRole("button", { name: "Record reconciliation" }).count(), 0, "members cannot reconcile");
         await earlier.getByLabel("Units sold").fill("1");
         await earlier.getByRole("button", { name: "Record sold or returned" }).click();

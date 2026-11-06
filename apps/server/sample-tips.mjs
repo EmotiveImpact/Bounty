@@ -48,7 +48,7 @@ export function seedSampleTips(db, { now = new Date().toISOString(), log = conso
           title,
           variant,
           retailer,
-          locality: "Leeds",
+          locality: "London",
           availableUnits: places,
           salesPerWeek,
           sellWindowWeeks,
