@@ -2,7 +2,7 @@
 // account menu, not the main navigation. Tips desk (create tips, act as any
 // member, verify shelf reports, send alerts), Sources, the evidence register
 // and the audit sign-off. The tools themselves are unchanged.
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import Audit, { type AuditHandover } from "../Audit";
 import Bounties from "../Bounties";
 import Research, { EvidenceRegister } from "../Research";
@@ -12,6 +12,72 @@ import "./admin.css";
 import "./legacy-kit.css";
 
 type Tab = "tips" | "members" | "sources" | "evidence" | "check" | "audit";
+
+type HelpMessage = {
+  id: number;
+  created: string;
+  topic: string;
+  email: string;
+  name: string | null;
+  message: string;
+  account_email: string | null;
+  done_at: string | null;
+};
+const TOPIC: Record<string, string> = {
+  question: "Question",
+  account: "Can't get in",
+  "wrong-price": "Wrong price",
+  "bad-tip": "Bad tip",
+  other: "Other",
+};
+
+// Messages from the Help page, newest first, done ones last.
+function HelpInbox() {
+  const [list, setList] = useState<HelpMessage[] | null>(null);
+  const load = () =>
+    fetch("/api/help")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => setList(d?.messages ?? []))
+      .catch(() => setList([]));
+  useEffect(() => {
+    void load();
+  }, []);
+  async function done(id: number) {
+    await fetch(`/api/help/${id}/done`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    void load();
+  }
+  return (
+    <Card>
+      <h3 style={{ marginTop: 0 }}>Messages from Help</h3>
+      {!list ? (
+        <p className="adm-sub">Loading…</p>
+      ) : list.length === 0 ? (
+        <p className="adm-sub">No messages yet.</p>
+      ) : (
+        <div className="adm-inbox">
+          {list.map((m) => (
+            <div key={m.id} className={m.done_at ? "adm-msg done" : "adm-msg"}>
+              <div className="adm-msghead">
+                <b>{TOPIC[m.topic] ?? m.topic}</b>
+                <span>
+                  {m.name ? m.name + " · " : ""}
+                  <a href={"mailto:" + m.email}>{m.email}</a>
+                  {m.account_email ? " · member" : ""} · {new Date(m.created).toLocaleString("en-GB")}
+                </span>
+              </div>
+              <p>{m.message}</p>
+              {!m.done_at && (
+                <Button size="sm" onClick={() => void done(m.id)}>
+                  Mark as answered
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
 
 // Members: help someone back in while account emails are not switched on.
 // Makes a one-use reset link (24 hours) to send them by hand.
@@ -82,7 +148,16 @@ export default function Admin() {
         onChange={setTab}
         tabs={[
           { value: "tips", label: "Tips desk", content: wrap(<Bounties />) },
-          { value: "members", label: "Members", content: <MemberHelp /> },
+          {
+            value: "members",
+            label: "Members",
+            content: (
+              <div className="adm-members">
+                <HelpInbox />
+                <MemberHelp />
+              </div>
+            ),
+          },
           { value: "sources", label: "Sources", content: wrap(<Sources />) },
           { value: "evidence", label: "Evidence register", content: wrap(<EvidenceRegister />) },
           {

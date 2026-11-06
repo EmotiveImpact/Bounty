@@ -9,8 +9,9 @@ import * as audit from "./audit.mjs";
 import * as goals from "./goals.mjs";
 import * as bounties from "./bounties.mjs";
 import * as ledger from "./ledger.mjs";
+import * as help from "./help.mjs";
 
-export const schemaModules = [evidence, audit, goals, bounties, ledger];
+export const schemaModules = [evidence, audit, goals, bounties, ledger, help];
 
 // The API, the import worker and the loop may open the same file at the same
 // moment. The busy timeout is set before anything that takes a lock, and the

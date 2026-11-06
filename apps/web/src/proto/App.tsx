@@ -32,6 +32,7 @@ import { PageHead } from "../ui/kit";
 import { GoalsSettings } from "../Goals";
 import SignOff from "./SignOff";
 import AccountSettings from "./AccountSettings";
+import { Help, Privacy, SiteFoot, Terms } from "./LegalPages";
 import "./proto.css";
 import "./proto-extra.css";
 import "./proto-bold.css";
@@ -65,7 +66,10 @@ export type View =
   | "blocks"
   | "admin"
   | "plans"
-  | "crew";
+  | "crew"
+  | "help"
+  | "terms"
+  | "privacy";
 
 // The address for each screen. The older screens keep their old names, so
 // links inside them such as #Planner still work.
@@ -85,6 +89,9 @@ const HASH: Record<View, string> = {
   admin: "Admin",
   plans: "Plans",
   crew: "Crew",
+  help: "Help",
+  terms: "Terms",
+  privacy: "Privacy",
 };
 /* When a find is saved the heart pops and a few short lines flick out
    around it, like Pinterest. Skipped for people who ask for reduced motion. */
@@ -2312,6 +2319,9 @@ export default function ProtoApp({
       </div>
     );
   else if (view === "plans") body = <PlansScreen />;
+  else if (view === "help") body = <Help email={account?.email} />;
+  else if (view === "terms") body = <Terms />;
+  else if (view === "privacy") body = <Privacy />;
   else if (view === "crew") body = <CrewScreen go={(v) => go(v)} />;
   else if (view === "research")
     body = (
@@ -2391,6 +2401,7 @@ export default function ProtoApp({
               <CrewLoading look="scout-search">Looking for deals…</CrewLoading>
             )}
             {body}
+            <SiteFoot />
           </main>
           <nav className="phone-nav" aria-label="Sections">
             {(
