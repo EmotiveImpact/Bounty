@@ -117,11 +117,13 @@ export async function startApp({ env = {} } = {}) {
  * Opens a page at each width in turn, runs fn(page, width) and fails on a
  * console error or horizontal overflow. Returns nothing; throws on failure.
  */
-export async function atWidths(browser, url, fn, widths = [390, 1280]) {
+export async function atWidths(browser, url, fn, widths = [390, 1280], { expectedConsoleErrors = [] } = {}) {
   for (const width of widths) {
     const page = await browser.newPage({ viewport: { width, height: 900 } });
     const errors = [];
-    page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+    page.on("console", (m) => {
+      if (m.type() === "error" && !expectedConsoleErrors.some(pattern => pattern.test(m.text()))) errors.push(m.text());
+    });
     page.on("pageerror", (e) => errors.push(String(e)));
     // Skip the first-visit "Where do you hunt?" window; it would sit over
     // every screen the tests use.

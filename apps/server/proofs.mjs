@@ -2,15 +2,15 @@
 // listings and payout statements. Files are written to one directory on this
 // computer, named by the SHA-256 of the stored bytes, readable only by the
 // current user. Nothing in the API serves these files back: listings carry
-// metadata (hash, size, type, label) only, so proof contents never leave the
-// machine through Bounty.
+// metadata (hash, size, type, label) only. Hosted installations include these
+// private files in their durable Neon snapshots; they are not device-only.
 //
 // Photos are stripped of embedded metadata (Exif GPS location, device and
 // time) before they are hashed and stored, so the stored file and its hash
 // describe the cleaned image. PDFs are stored unchanged: their document
 // properties (author, creation software, dates) are kept, and the UI says so.
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { stripMetadata } from "./metadata.mjs";
 
@@ -113,11 +113,25 @@ export function writeProof(dir, { content, sha256, bytes, metadataRemoved }) {
   try {
     writeFileSync(file, content, { mode: 0o600, flag: "wx" });
   } catch (error) {
-    // Same hash means same content: the existing file already holds it.
+    // An earlier process may have stopped after creating a partial file.
+    // The filename alone does not prove that the stored bytes are complete.
     if (error.code !== "EEXIST") throw error;
+    let fd;
+    try {
+      if (!lstatSync(file).isFile()) throw Error("Not a regular file");
+      fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || stat.size !== bytes || stat.size > MAX_PROOF_BYTES ||
+          createHash("sha256").update(readFileSync(fd)).digest("hex") !== sha256)
+        throw Error("Stored content does not match its fingerprint");
+      // Tighten the verified inode, never a different file reached by a link.
+      fchmodSync(fd, 0o600);
+    } catch {
+      throw new ProofError("The existing proof could not be verified. Its file was kept unchanged. Contact support before retrying.");
+    } finally { if (fd !== undefined) closeSync(fd); }
     existed = true;
   }
-  chmodSync(file, 0o600);
+  if (!existed) chmodSync(file, 0o600);
   return { sha256, bytes, metadataRemoved, existed };
 }
 

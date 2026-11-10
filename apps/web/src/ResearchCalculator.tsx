@@ -1005,6 +1005,7 @@ export function ResearchCalculator({
   // moved on it is shown as out of date and never tracked or drafted.
   const [result, setResult] = useState<{ data: Estimate; key: string } | null>(null);
   const [error, setError] = useState("");
+  const [requestId, setRequestId] = useState(() => crypto.randomUUID());
   const [notice, setNotice] = useState("");
   const [refresh, setRefresh] = useState(0);
   const sequence = useRef(0);
@@ -1189,6 +1190,7 @@ export function ResearchCalculator({
     setNotice("");
     try {
       const saved = await api<{ id: number | string }>("ledger/trips", {
+        requestId,
         label:
           (o.title + (o.retailer ? " at " + o.retailer : "")).slice(0, 120 - suffix.length) + suffix,
         source: "research",
@@ -1204,6 +1206,7 @@ export function ResearchCalculator({
           ...(current.payout?.date ? { payoutBy: current.payout.date } : {}),
         },
       });
+      setRequestId(crypto.randomUUID());
       setNotice(
         "Tracked in the ledger as trip " +
           saved.id +

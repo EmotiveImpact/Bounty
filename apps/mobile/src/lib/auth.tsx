@@ -1,15 +1,17 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
+import { AppState } from "react-native";
+import { createSession } from "./session";
 import { api } from "./api";
 import type { Member } from "./types";
 
 // Who is signed in, using the same member accounts as the website. Anyone
 // can look around; saving anything needs a member.
 
-type Me = { required: boolean; user: Member | null; inviteOpen?: boolean };
-
 type Auth = {
   /** Still asking the server who is signed in. */
   checking: boolean;
+  error: string;
+  sessionKey: string;
   user: Member | null;
   /** A member is signed in, or the server has no accounts (a local test server). */
   signedIn: boolean;
@@ -24,52 +26,28 @@ type Auth = {
 const AuthContext = createContext<Auth | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [checking, setChecking] = useState(true);
-  const [me, setMe] = useState<Me>({ required: true, user: null });
-
-  const refresh = useCallback(async () => {
-    try {
-      setMe(await api<Me>("auth/me"));
-    } catch {
-      // Offline: stay as we were, and let screens show their own message.
-    } finally {
-      setChecking(false);
-    }
-  }, []);
+  const [session] = useState(() => createSession(api));
+  const { checking, error, me } = useSyncExternalStore(session.subscribe, session.getSnapshot, session.getSnapshot);
 
   useEffect(() => {
-    let live = true;
-    api<Me>("auth/me")
-      .then((m) => live && setMe(m))
-      .catch(() => {})
-      .finally(() => live && setChecking(false));
-    return () => {
-      live = false;
-    };
-  }, []);
+    void session.refresh();
+    const subscription = AppState.addEventListener("change", state => {
+      if (state === "active") void session.refresh();
+    });
+    return () => subscription.remove();
+  }, [session]);
 
-  const value = useMemo<Auth>(
-    () => ({
-      checking,
-      user: me.user,
-      signedIn: !!me.user || me.required === false,
-      inviteOpen: me.inviteOpen === true,
-      refresh,
-      async signIn(email, password) {
-        const r = await api<{ user: Member }>("auth/signin", { email: email.trim(), password });
-        setMe((m) => ({ ...m, user: r.user }));
-      },
-      async signUp({ email, password, name, invite }) {
-        const r = await api<{ user: Member }>("auth/signup", { email: email.trim(), password, name: name.trim(), invite: invite.trim() });
-        setMe((m) => ({ ...m, user: r.user }));
-      },
-      async signOut() {
-        await api("auth/signout", {});
-        setMe((m) => ({ ...m, user: null }));
-      },
-    }),
-    [checking, me, refresh],
-  );
+  const value = useMemo<Auth>(() => ({
+    checking, error,
+    user: me.user,
+    signedIn: !error && (!!me.user || me.required === false),
+    sessionKey: me.user ? "member:" + me.user.id : me.required === false ? "local" : "guest",
+    inviteOpen: me.inviteOpen === true,
+    refresh: session.refresh,
+    signIn: session.signIn,
+    signUp: session.signUp,
+    signOut: session.signOut,
+  }), [checking, error, me, session]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

@@ -83,4 +83,4 @@ export type Summary = {
 
 export type Goals = { targetType: "income" | "savings"; monthlyTarget: number };
 
-export type Member = { email: string; name: string | null };
+export type Member = { id: string; email: string; name: string | null };

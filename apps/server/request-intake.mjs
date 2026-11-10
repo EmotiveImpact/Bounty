@@ -4,7 +4,8 @@ import { HttpError } from './http.mjs';
 const READS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 export function requestIntake({ timeoutMs = 10000, maxRequests = 32,
-  maxBytes = 16 * 1024 * 1024, maxBodyBytes = 7 * 1024 * 1024 } = {}) {
+  maxBytes = 16 * 1024 * 1024, maxBodyBytes = 7 * 1024 * 1024,
+  maxChunks = 4096 } = {}) {
   let requests = 0;
   let buffered = 0;
   return async function receive(req) {
@@ -32,6 +33,9 @@ export function requestIntake({ timeoutMs = 10000, maxRequests = 32,
       for (;;) {
         const { done, value } = await Promise.race([iterator.next(), deadline]);
         if (done) break;
+        // Byte budgets alone miss the arrays and pending promise callbacks
+        // retained by millions of tiny (or empty) chunks.
+        if (chunks.length >= maxChunks) throw new HttpError(413, 'Request is too fragmented. Try again.');
         const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
         if (bytes + chunk.length > maxBodyBytes) throw new HttpError(413, 'Request too large');
         if (buffered + chunk.length > maxBytes) throw new HttpError(503, 'Bounty is busy. Try again shortly.');

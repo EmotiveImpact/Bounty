@@ -2647,7 +2647,7 @@ export function BountyCard({
                       {r.photo && (
                         <small className="muted">
                           {r.photo.label}: {r.photo.mediaType}, {Math.ceil(r.photo.bytes / 1024)} KB, SHA-256{" "}
-                          {r.photo.sha256.slice(0, 12)}. Kept on this computer only.
+                          {r.photo.sha256.slice(0, 12)}. Kept in Bounty’s private storage.
                         </small>
                       )}
                     </>

@@ -31,3 +31,12 @@ test('an interrupted stream never returns a request and releases its reservation
   await assert.rejects(receive({ method: 'POST', headers: {}, async *[Symbol.asyncIterator]() { yield '1234'; throw Error('interrupted'); } }), /interrupted/);
   const recovered = await receive(request(['{}'])); recovered.release();
 });
+
+test('tiny and empty chunks cannot bypass the intake memory budget', async () => {
+  const receive = requestIntake({ maxRequests: 1, maxChunks: 4 });
+  await assert.rejects(receive(request(['', '', '', '', ''])), { status: 413 });
+  await assert.rejects(receive(request(['1', '2', '3', '4', '5'])), { status: 413 });
+  const recovered = await receive(request(['{', '}']));
+  assert.deepEqual(await readJson(recovered.req), {});
+  recovered.release();
+});
