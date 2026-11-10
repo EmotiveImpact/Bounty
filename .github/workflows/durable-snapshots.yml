@@ -1,0 +1,30 @@
+name: Durable snapshot checks
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  synthetic-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: npm run build
+      - name: Native PostgreSQL failure and restart lab
+        run: |
+          npm install --prefix "$RUNNER_TEMP/bounty-pg-lab" --no-save --ignore-scripts embedded-postgres@18.6.0-beta.19
+          BOUNTY_PG_LAB_MODULE="$RUNNER_TEMP/bounty-pg-lab/node_modules/embedded-postgres/dist/index.js" node --test tools/keep-postgres-lab.mjs
+      - name: Browser regression suite with synthetic data
+        run: |
+          npm install --prefix "$RUNNER_TEMP/bounty-browser" --no-save --ignore-scripts playwright@1.65.0
+          node "$RUNNER_TEMP/bounty-browser/node_modules/playwright/cli.js" install --with-deps chromium
+          NODE_PATH="$RUNNER_TEMP/bounty-browser/node_modules" npm run e2e

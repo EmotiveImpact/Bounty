@@ -9,15 +9,14 @@ const { database, openDb, dataDir } = await import("../apps/server/db.mjs");
 const { keepForGood, neonKeepStore } = await import("../apps/server/keep.mjs");
 const { personalStores } = await import("../apps/server/personal.mjs");
 const { join } = await import("node:path");
-const { refreshOpenBounties } = await import("../apps/server/routes-bounties.mjs");
 const { accessConfig } = await import("../apps/server/access.mjs");
 const { freshPrices } = await import("../apps/server/demo.mjs");
 const { seedSampleTips } = await import("../apps/server/sample-tips.mjs");
 const { accounts, neonStore } = await import("../apps/server/accounts.mjs");
 const { mailer } = await import("../apps/server/mail.mjs");
+const { retryStart } = await import("../apps/server/retry-start.mjs");
 
-let handler;
-try {
+export default retryStart(async () => {
   if (!process.env.DATABASE_URL && !process.env.BOUNTY_PASSWORD)
     throw Error(
       "add DATABASE_URL (a Neon connection string, for member sign-in) or BOUNTY_PASSWORD (16 or more characters) " +
@@ -28,17 +27,12 @@ try {
   // One API on one data folder: the shared database (deals, tips, sources),
   // each member's own Stock and Money (personal.mjs), sample tips, and the
   // Open Prices check that runs before each request.
-  const build = (db, { personal = null, forget = null, onImported = () => undefined } = {}) => {
+  const build = (db, { personal = null, forget = null, durable = false } = {}) => {
     const api = createApi(db, { publicHosts, password, members, operators, personal, forget });
     seedSampleTips(db);
-    const beforeRequest = freshPrices(db, {
-      // Not awaited: the import may finish during a change that is waiting
-      // on it, and saving waits for that change to end.
-      refresh: async (d, o) => {
-        await refreshOpenBounties(d, o);
-        onImported();
-      },
-    });
+    // Durable mode owns the cache for the entire request, including imports.
+    // No detached import may write while a snapshot is saved or restored.
+    const beforeRequest = freshPrices(db, durable ? { wait: null } : {});
     return async (req, res) => {
       await beforeRequest();
       return api(req, res);
@@ -55,7 +49,7 @@ try {
         const db = openDb(join(dir, "desk.sqlite"));
         const own = personalStores(dir);
         return {
-          handle: build(db, { personal: own.personal, forget: own.forget, onImported: () => void keeper.changed() }),
+          handle: build(db, { personal: own.personal, forget: own.forget, durable: true }),
           checkpoint() {
             db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
             own.checkpoint();
@@ -67,18 +61,10 @@ try {
         };
       },
     });
-    handler = keeper.handle;
+    return keeper.handle;
   } else {
     const db = database();
     const own = databaseUrl ? personalStores(dataDir()) : null;
-    handler = build(db, { personal: own?.personal ?? null, forget: own?.forget ?? null });
+    return build(db, { personal: own?.personal ?? null, forget: own?.forget ?? null });
   }
-} catch (error) {
-  console.error("Bounty API not started: " + error.message);
-  handler = (req, res) => {
-    res.writeHead(503, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
-    res.end(JSON.stringify({ error: "Bounty is not set up yet: " + error.message }));
-  };
-}
-
-export default (req, res) => handler(req, res);
+});

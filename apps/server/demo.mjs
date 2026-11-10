@@ -37,6 +37,11 @@ export function freshPrices(db, { run = importOpenPrices, refresh = refreshOpenB
         .finally(() => {
           running = null;
         });
-    if (running) await Promise.race([running, delay(wait, undefined, { ref: false })]);
+    // A durable snapshot owner must keep the request lock until all database
+    // work finishes. A timed-out import must never mutate a replaced cache.
+    if (running) {
+      if (wait === null) await running;
+      else await Promise.race([running, delay(wait, undefined, { ref: false })]);
+    }
   };
 }

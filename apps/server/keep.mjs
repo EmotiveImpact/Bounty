@@ -1,51 +1,65 @@
-// Keeps members' records for good on the hosted site.
-//
-// On Vercel the API's data folder (the shared SQLite database, each member's
-// own database, receipts and shelf photos) lives in the function's temporary
-// storage, which is emptied whenever Vercel starts a fresh instance. This
-// module copies changed files to Postgres (Neon) after every change, and
-// copies them all back when an instance starts. Sign-in already lives in
-// Neon (accounts.mjs).
-//
-// How it stays consistent between instances:
-// - Postgres holds one version number for the whole folder.
-// - Changes (anything but GET, HEAD, OPTIONS) run one at a time per instance.
-//   Before a change the instance checks the version and reloads if another
-//   instance saved since. After a successful change it uploads the files that
-//   changed, then moves the version on only if it is still the one it loaded.
-//   If that fails (two instances saved in the same moment) it logs it and
-//   reloads on the next request.
-// - Reads check the version at most every few seconds.
-// Databases are small (a few hundred KB, tens of KB gzipped), so copying a
-// changed file whole is quick. This suits a pilot; Postgres tables are the
-// long-term route (docs/STALE.md).
+// Durable snapshots for the hosted pilot. A successful response is released
+// only after its SQLite databases and files have committed together in Neon.
+// See docs/DURABLE-WRITES.md for the protocol and the deployment gate.
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 const READS = new Set(["GET", "HEAD", "OPTIONS"]);
-// SQLite's side files are folded into the database by a checkpoint first.
 const SKIP = /-(wal|shm|journal)$/;
-
 const digest = (buf) => createHash("sha256").update(buf).digest("hex");
+class SnapshotConflict extends Error {}
+
+function validPath(path) {
+  return typeof path === "string" && path.length > 0 && !/[\\:\0]/.test(path) &&
+    path.split("/").every((part) => part && part !== "." && part !== "..");
+}
+
+// The API emits a single JSON response through these three methods. This is
+// deliberately not a ServerResponse proxy: no socket or flush method is exposed
+// that could publish success or cookies before the durable commit.
+function bufferedResponse(limit) {
+  const headers = new Map();
+  return {
+    statusCode: 200,
+    body: null,
+    setHeader(name, value) { headers.set(name.toLowerCase(), value); },
+    writeHead(status, values = {}) {
+      this.statusCode = status;
+      for (const [name, value] of Object.entries(values)) this.setHeader(name, value);
+      return this;
+    },
+    end(value = "") {
+      if (this.body !== null) throw Error("Response already ended");
+      this.body = Buffer.from(value);
+      if (this.body.length > limit) throw Error("Buffered response is too large");
+    },
+    publish(res) {
+      if (this.body === null) throw Error("API did not finish its response");
+      if (res.destroyed) return;
+      res.writeHead(this.statusCode, Object.fromEntries(headers));
+      res.end(this.body);
+    },
+  };
+}
 
 /**
- * Wraps the API so the data folder survives restarts.
- * store: see memoryStore / postgresKeepStore. dir: the data folder.
- * build() opens the data in dir and returns { handle(req, res), checkpoint(), close() }.
- * Returns { handle, changed } (changed() saves after work done outside a
- * request, such as the Open Prices import).
+ * build() opens dir and returns { handle(req, res), checkpoint(), close() }.
+ * All work using those handles must finish before handle resolves. Reads,
+ * imports and writes share one queue, so none can see or save an uncommitted
+ * mutation. External work must use change(fn), never mutate then notify.
+ * store.snapshot() reads a consistent { version, files } object;
+ * store.commit(version, puts, drops) atomically returns the next version or null.
  */
-export function keepForGood({ store, dir, build, log = console.error, checkEvery = 5000, now = Date.now }) {
+export function keepForGood({ store, dir, build, log = console.error, checkEvery = 5000, now = Date.now,
+  maxResponseBytes = 16 * 1024 * 1024 }) {
   let current = null;
   let version = 0;
   let checked = 0;
   let known = new Map();
-  let starting = null;
   let queue = Promise.resolve();
 
-  // One at a time: changes, reloads and saves never overlap on one instance.
   function serial(fn) {
     const run = queue.then(fn);
     queue = run.catch(() => undefined);
@@ -65,187 +79,217 @@ export function keepForGood({ store, dir, build, log = console.error, checkEvery
     walk(dir);
     return out;
   }
+  const place = (root, path) => join(root, ...path.split("/"));
 
-  const place = (path) => join(dir, ...path.split("/"));
+  function invalidate() {
+    const old = current;
+    current = null;
+    checked = 0;
+    // The cache is unusable until a complete remote restore succeeds. Keep its
+    // files until then; an outage must not destroy the last local copy.
+    old?.close();
+  }
 
   async function restore() {
-    const latest = await store.version();
-    const old = current;
-    rmSync(dir, { recursive: true, force: true });
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    known = new Map();
-    for (const path of await store.files()) {
-      if (path.split("/").includes("..")) continue;
-      const buf = gunzipSync(Buffer.from(await store.getFile(path), "base64"));
-      mkdirSync(dirname(place(path)), { recursive: true, mode: 0o700 });
-      writeFileSync(place(path), buf, { mode: 0o600 });
-      known.set(path, digest(buf));
+    const snapshot = await store.snapshot();
+    const hashes = new Map();
+    mkdirSync(dirname(dir), { recursive: true, mode: 0o700 });
+    const stage = mkdtempSync(join(dirname(dir), ".bounty-restore-"));
+    const backup = stage + "-previous";
+    let moved = false;
+    try {
+      for (const [path, data] of Object.entries(snapshot.files)) {
+        if (!validPath(path) || SKIP.test(path)) throw Error("Invalid snapshot path");
+        const buf = gunzipSync(Buffer.from(data, "base64"));
+        mkdirSync(dirname(place(stage, path)), { recursive: true, mode: 0o700 });
+        writeFileSync(place(stage, path), buf, { mode: 0o600 });
+        hashes.set(path, digest(buf));
+      }
+      // No open request or importer can still own these handles. Decode the
+      // entire snapshot before closing or replacing the previous cache.
+      invalidate();
+      if (existsSync(dir)) { renameSync(dir, backup); moved = true; }
+      try {
+        renameSync(stage, dir);
+        current = build();
+      } catch (error) {
+        rmSync(dir, { recursive: true, force: true });
+        if (moved) { renameSync(backup, dir); moved = false; }
+        throw error;
+      }
+      known = hashes;
+      version = snapshot.version;
+      checked = now();
+      if (moved) rmSync(backup, { recursive: true, force: true });
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
     }
-    version = latest;
-    current = build();
-    checked = now();
-    // A read that started on the old data may still be running; close it a
-    // little later. Its files are already unlinked, so nothing mixes.
-    if (old) setTimeout(() => quietly(() => old.close()), 30000).unref?.();
+  }
+
+  async function readyInsideQueue() {
+    // A rejected restore is never memoised; the next request can retry.
+    if (!current) await restore();
   }
 
   async function freshen(force) {
     if (!force && now() - checked < checkEvery) return;
     const latest = await store.version();
-    checked = now();
     if (latest !== version) await restore();
+    checked = now();
   }
 
   async function save() {
     current.checkpoint();
-    const here = new Map(localFiles().map((path) => [path, readFileSync(place(path))]));
-    let changes = 0;
-    for (const [path, buf] of here) {
+    const hashes = new Map();
+    const puts = [];
+    for (const path of localFiles()) {
+      const buf = readFileSync(place(dir, path));
       const hash = digest(buf);
-      if (known.get(path) === hash) continue;
-      await store.putFile(path, gzipSync(buf).toString("base64"));
-      known.set(path, hash);
-      changes += 1;
+      hashes.set(path, hash);
+      if (known.get(path) !== hash) puts.push({ path, data: gzipSync(buf).toString("base64") });
     }
-    for (const path of [...known.keys()])
-      if (!here.has(path)) {
-        await store.dropFile(path);
-        known.delete(path);
-        changes += 1;
-      }
-    if (!changes) return true;
-    const next = await store.bump(version);
-    if (next == null) {
-      log("Bounty keep: another instance saved at the same moment; reloading on the next request");
-      checked = 0;
-      version = -1;
-      return false;
-    }
+    const drops = [...known.keys()].filter((path) => !hashes.has(path));
+    if (!puts.length && !drops.length) return;
+    // The store performs the compare-and-swap AND all file changes in one
+    // transaction. A losing writer changes neither files nor version.
+    const next = await store.commit(version, puts, drops);
+    if (next === null) throw new SnapshotConflict("Snapshot changed on another instance");
     version = next;
-    return true;
+    known = hashes;
   }
 
-  const saveQuietly = () => save().catch((error) => log("Bounty keep: save failed: " + error.message));
-
-  async function ready() {
-    if (!current) await (starting ||= serial(restore));
+  function discard() {
+    try { invalidate(); } catch (error) { log("Bounty keep: close failed: " + error.message); }
   }
 
-  async function handle(req, res) {
-    await ready();
-    if (READS.has(req.method)) {
-      if (now() - checked >= checkEvery) await serial(() => freshen(false)).catch(log);
-      return current.handle(req, res);
-    }
+  function handle(req, res) {
     return serial(async () => {
-      await freshen(true).catch(log);
-      await new Promise((resolve) => {
-        res.once("finish", resolve);
-        res.once("close", resolve);
-        Promise.resolve()
-          .then(() => current.handle(req, res))
-          .catch((error) => {
-            log("Bounty keep: request failed: " + error.message);
-            resolve();
-          });
-      });
-      if (res.statusCode < 400) await saveQuietly();
+      try {
+        await readyInsideQueue();
+        await freshen(!READS.has(req.method));
+        // These operations change accounts in independent Postgres tables AND
+        // snapshot files. Until a common transaction exists, refuse them before
+        // either store is changed. Never leave an account deleted but its
+        // receipts restored, or its profile linked to the previous email.
+        const path = new URL(req.url, "http://localhost").pathname;
+        if (req.method === "POST" && ["/api/account/email", "/api/account/delete"].includes(path)) {
+          res.writeHead(503, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+          res.end(JSON.stringify({ code: "account_change_unavailable", error: "Email changes and account deletion are temporarily unavailable. Your account and records have not been changed." }));
+          return;
+        }
+        const response = bufferedResponse(maxResponseBytes);
+        await current.handle(req, response);
+        if (response.body === null) throw Error("API did not finish its response");
+        if (response.statusCode < 400) await save();
+        else discard(); // A refused handler may have made partial local edits.
+        response.publish(res);
+      } catch (error) {
+        discard();
+        log("Bounty keep: request not confirmed: " + error.message);
+        if (res.headersSent || res.destroyed) return;
+        const conflict = error instanceof SnapshotConflict;
+        res.writeHead(conflict ? 409 : 503, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+        res.end(JSON.stringify({
+          code: conflict ? "snapshot_conflict" : "save_not_confirmed",
+          error: conflict
+            ? "Your records changed during this request. Reload them before trying again."
+            : "We could not confirm this request completed. Check your records before trying again.",
+        }));
+      }
     });
   }
 
-  /** Save now, for changes made outside a request. */
-  function changed() {
+  function change(fn) {
     return serial(async () => {
-      if (current) await saveQuietly();
+      try {
+        await readyInsideQueue();
+        await freshen(true);
+        await fn(current);
+        await save();
+      } catch (error) {
+        discard();
+        throw error;
+      }
     });
   }
 
-  return { handle, changed, ready };
+  return { handle, change, ready: () => serial(readyInsideQueue), close: () => serial(invalidate) };
 }
 
-function quietly(fn) {
-  try {
-    fn();
-  } catch {
-    /* already closed */
-  }
-}
-
-/** A store held in memory, for tests. */
+/** In-memory atomic store for synthetic tests. No production credentials. */
 export function memoryStore() {
   let version = 0;
-  const files = new Map();
+  let files = {};
   return {
-    async version() {
-      return version;
-    },
-    async bump(from) {
+    async version() { return version; },
+    async snapshot() { return { version, files: { ...files } }; },
+    async commit(from, puts, drops) {
       if (version !== from) return null;
-      version += 1;
-      return version;
-    },
-    async files() {
-      return [...files.keys()].sort();
-    },
-    async getFile(path) {
-      return files.get(path);
-    },
-    async putFile(path, data) {
-      files.set(path, data);
-    },
-    async dropFile(path) {
-      files.delete(path);
+      const next = Object.assign(Object.create(null), files);
+      for (const { path, data } of puts) next[path] = data;
+      for (const path of drops) delete next[path];
+      files = next;
+      return ++version;
     },
   };
 }
 
-/** The same store in Postgres. query(text, params) returns rows. */
+/** query(text, params) executes one PostgreSQL statement and returns rows. */
 export async function postgresKeepStore(query) {
-  await query(
-    "CREATE TABLE IF NOT EXISTS bounty_keep (id text PRIMARY KEY, version bigint NOT NULL, saved_at timestamptz NOT NULL DEFAULT now())",
-    [],
-  );
-  await query(
-    "CREATE TABLE IF NOT EXISTS bounty_keep_files (path text PRIMARY KEY, data text NOT NULL, saved_at timestamptz NOT NULL DEFAULT now())",
-    [],
-  );
+  let initialising = null;
+  function ready() {
+    return initialising ||= (async () => {
+      await query("CREATE TABLE IF NOT EXISTS bounty_keep (id text PRIMARY KEY, version bigint NOT NULL, saved_at timestamptz NOT NULL DEFAULT now())", []);
+      await query("CREATE TABLE IF NOT EXISTS bounty_keep_files (path text PRIMARY KEY, data text NOT NULL, saved_at timestamptz NOT NULL DEFAULT now())", []);
+      // Non-destructive adoption of the existing format, including version 0.
+      await query("INSERT INTO bounty_keep (id, version) VALUES ('main', 0) ON CONFLICT (id) DO NOTHING", []);
+    })().catch((error) => { initialising = null; throw error; });
+  }
+  const asVersion = (value) => {
+    const n = Number(value);
+    if (!Number.isSafeInteger(n) || n < 0) throw Error("Invalid snapshot version");
+    return n;
+  };
   return {
     async version() {
+      await ready();
       const rows = await query("SELECT version FROM bounty_keep WHERE id = 'main'", []);
-      return rows.length ? Number(rows[0].version) : 0;
+      if (!rows.length) throw Error("Snapshot version is missing");
+      return asVersion(rows[0].version);
     },
-    async bump(from) {
-      const rows =
-        from === 0
-          ? await query(
-              "INSERT INTO bounty_keep (id, version) VALUES ('main', 1) ON CONFLICT (id) DO NOTHING RETURNING version",
-              [],
-            )
-          : await query(
-              "UPDATE bounty_keep SET version = version + 1, saved_at = now() WHERE id = 'main' AND version = $1 RETURNING version",
-              [from],
-            );
-      return rows.length ? Number(rows[0].version) : null;
+    async snapshot() {
+      await ready();
+      // One MVCC statement snapshot for the manifest and every file. Separate
+      // version/list/file calls can assemble files from different commits.
+      const rows = await query(`SELECT version,
+        COALESCE((SELECT jsonb_object_agg(path, data) FROM bounty_keep_files), '{}'::jsonb) AS files
+        FROM bounty_keep WHERE id = 'main'`, []);
+      if (!rows.length) throw Error("Snapshot version is missing");
+      return { version: asVersion(rows[0].version), files: rows[0].files };
     },
-    async files() {
-      return (await query("SELECT path FROM bounty_keep_files ORDER BY path", [])).map((r) => r.path);
-    },
-    async getFile(path) {
-      return (await query("SELECT data FROM bounty_keep_files WHERE path = $1", [path]))[0]?.data;
-    },
-    async putFile(path, data) {
-      await query(
-        "INSERT INTO bounty_keep_files (path, data) VALUES ($1, $2) ON CONFLICT (path) DO UPDATE SET data = EXCLUDED.data, saved_at = now()",
-        [path, data],
-      );
-    },
-    async dropFile(path) {
-      await query("DELETE FROM bounty_keep_files WHERE path = $1", [path]);
+    async commit(from, puts, drops) {
+      await ready();
+      // All DML is gated by the version UPDATE's returned row, in one implicit
+      // transaction. PostgreSQL rechecks the predicate after a concurrent
+      // updater commits. No row means no file writes or deletions can occur.
+      const rows = await query(`WITH advanced AS (
+          UPDATE bounty_keep SET version = version + 1, saved_at = now()
+          WHERE id = 'main' AND version = $1 RETURNING version
+        ), uploaded AS (
+          INSERT INTO bounty_keep_files (path, data)
+          SELECT incoming.path, incoming.data FROM jsonb_to_recordset($2::jsonb) AS incoming(path text, data text)
+          CROSS JOIN advanced
+          ON CONFLICT (path) DO UPDATE SET data = EXCLUDED.data, saved_at = now()
+          RETURNING path
+        ), removed AS (
+          DELETE FROM bounty_keep_files USING advanced
+          WHERE path = ANY($3::text[]) RETURNING path
+        ) SELECT version FROM advanced`, [from, JSON.stringify(puts), drops]);
+      return rows.length ? asVersion(rows[0].version) : null;
     },
   };
 }
 
-/** The Postgres store for a Neon connection string. */
 export async function neonKeepStore(url) {
   const { neon } = await import("@neondatabase/serverless");
   const sql = neon(url);
