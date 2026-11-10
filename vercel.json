@@ -4,7 +4,8 @@
   "git": {
     "deploymentEnabled": {
       "fix/durable-snapshot-recovery": false,
-      "fix/launch-security-and-records": false
+      "fix/launch-security-and-records": false,
+      "fix/security-boundaries": false
     }
   },
   "installCommand": "npm ci",
