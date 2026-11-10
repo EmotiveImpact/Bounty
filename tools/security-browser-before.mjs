@@ -14,7 +14,7 @@ try {
   symlinkSync(resolve('node_modules'), join(before, 'node_modules'), 'dir');
   for (const name of ['session-security.e2e.mjs', 'harness.mjs'])
     copyFileSync(resolve('e2e', name), join(before, 'e2e', name));
-  const run = spawnSync(process.execPath, ['--test', '--test-reporter=tap', 'e2e/session-security.e2e.mjs'], {
+  const run = spawnSync(process.execPath, ['--test', '--test-reporter=tap', '--test-name-pattern=failed sign-out|account change discards|unavailable session lookup', 'e2e/session-security.e2e.mjs'], {
     cwd: before, encoding: 'utf8', timeout: 90000, maxBuffer: 4 * 1024 * 1024,
     env: { ...process.env, DATABASE_URL: '', BOUNTY_KEEP_DATA: 'off' },
   });

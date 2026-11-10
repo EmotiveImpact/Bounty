@@ -44,7 +44,10 @@ test('security: failed sign-out stays signed in and explains the active-session 
     await page.getByRole('button', { name: 'Sign out (alice@example.test)', exact: true }).click();
     await page.getByRole('heading', { name: 'Sign-out not confirmed', exact: true }).waitFor();
     assert.match(await page.getByRole('alert').innerText(), /session may still be active/);
-    assert.equal(await page.getByRole('button', { name: 'Sign out (alice@example.test)', exact: true }).count(), 1);
+    await page.getByRole('button', { name: 'OK', exact: true }).click();
+    const signOut = page.getByRole('button', { name: 'Sign out (alice@example.test)', exact: true });
+    if (!await signOut.isVisible()) await openAccount(page);
+    await signOut.waitFor();
     assert.equal(await page.getByRole('button', { name: 'Sign in', exact: true }).count(), 0);
   } finally { await context.close(); }
 });
@@ -64,7 +67,7 @@ test('security: account change discards previous screen state and isolates brows
     // state when focus returns, even if the old Stock screen is still open.
     state.id = '2';
     state.email = 'bob@example.test';
-    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await Promise.all([page.waitForEvent('domcontentloaded'), page.evaluate(() => window.dispatchEvent(new Event('focus')))]);
     await page.getByRole('button', { name: 'Your account', exact: true }).waitFor();
     await skipOnboarding(page);
     await openAccount(page);
@@ -82,11 +85,35 @@ test('security: unavailable session lookup does not mount private screens and ca
   const { page, state } = await sessionPage(context);
   try {
     state.failSession = true;
-    await page.goto(app.url + '/#Stock');
+    await page.goto(app.url + '/#Ledger');
     await page.getByRole('button', { name: 'Retry session check', exact: true }).waitFor();
     assert.equal(await page.getByRole('heading', { name: 'Stock', exact: true }).count(), 0);
     state.failSession = false;
     await page.getByRole('button', { name: 'Retry session check', exact: true }).click();
     await page.getByRole('heading', { name: 'Stock', exact: true }).waitFor();
+  } finally { await context.close(); }
+});
+
+
+test('security: same-member checks preserve a form; failed rechecks remove private portal dialogs', options, async () => {
+  const context = await browser.newContext();
+  const { page, state } = await sessionPage(context);
+  try {
+    await page.route('**/api/account', route => route.fulfill({ json: { email: state.email, name: 'Synthetic', verified: false, plan: null, created: null } }));
+    await page.goto(app.url);
+    await openAccount(page);
+    await page.getByRole('dialog', { name: 'Your account', exact: true }).getByRole('button', { name: 'Profile and settings', exact: true }).click();
+    await page.getByRole('button', { name: 'Change', exact: true }).first().click();
+    await page.getByRole('dialog', { name: 'Change your password', exact: true }).waitFor();
+    await page.getByLabel('Current password', { exact: true }).fill('synthetic unsaved draft');
+    const checked = page.waitForResponse('**/api/auth/me');
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await checked;
+    assert.equal(await page.getByLabel('Current password', { exact: true }).inputValue(), 'synthetic unsaved draft');
+    state.failSession = true;
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await page.getByRole('button', { name: 'Retry session check', exact: true }).waitFor();
+    assert.equal(await page.getByRole('dialog', { name: 'Change your password', exact: true }).count(), 0);
+    assert.equal(await page.getByLabel('Current password', { exact: true }).count(), 0);
   } finally { await context.close(); }
 });

@@ -90,6 +90,7 @@ type Auth = { required: boolean; inviteOpen: boolean; member: Member | null; ope
 function Root() {
   const [auth, setAuth] = React.useState<Auth>({ required: false, inviteOpen: false, member: null, operator: false });
   const [loaded, setLoaded] = React.useState(false);
+  const sessionChecked = React.useRef(false);
   const [checking, setChecking] = React.useState(true);
   const [sessionError, setSessionError] = React.useState("");
   const [signOutError, setSignOutError] = React.useState("");
@@ -126,7 +127,7 @@ function Root() {
   }, []);
   const refresh = React.useCallback(async () => {
     const sequence = ++checkSequence.current;
-    setChecking(true);
+    if (!sessionChecked.current) setChecking(true);
     setSessionError("");
     try {
       const res = await fetch("/api/auth/me", { cache: "no-store" });
@@ -134,21 +135,36 @@ function Root() {
       if (typeof data?.required !== "boolean" || (data.required && data.user && data.user.id == null)) throw Error("We couldn’t check your session. Retry before opening your records.");
       if (sequence !== checkSequence.current) return;
       if (!await initialisePrivateStorage(data.required, data.user?.id == null ? null : String(data.user.id))) {
+        setLoaded(false);
+        setChecking(true);
         window.location.reload();
         return;
       }
       if (sequence !== checkSequence.current) return;
       setAuth({ required: data.required, inviteOpen: Boolean(data.inviteOpen), member: data.user ?? null, operator: data.operator === true });
+      sessionChecked.current = true;
       setLoaded(true);
       setChecking(false);
     } catch {
-      if (sequence === checkSequence.current) setSessionError("We couldn’t check your session. Retry before opening your records.");
+      if (sequence === checkSequence.current) {
+        sessionChecked.current = false;
+        setLoaded(false);
+        setChecking(true);
+        setSessionError("We couldn’t check your session. Retry before opening your records.");
+      }
     }
   }, []);
   React.useEffect(() => {
     void refresh();
     const open = () => { setSigningIn("in"); void refresh(); };
-    const changed = (event: StorageEvent) => { if (event.key === SESSION_CHANGED) void refresh(); };
+    const changed = (event: StorageEvent) => {
+      if (event.key === SESSION_CHANGED) {
+        sessionChecked.current = false;
+        setLoaded(false);
+        setChecking(true);
+        void refresh();
+      }
+    };
     const visible = () => { if (document.visibilityState === "visible") void refresh(); };
     const restored = (event: PageTransitionEvent) => { if (event.persisted) void refresh(); };
     window.addEventListener(SIGN_IN_EVENT, open);
@@ -168,6 +184,7 @@ function Root() {
   }, [refresh]);
   const changedSession = () => {
     checkSequence.current++;
+    setLoaded(false);
     setChecking(true);
     announceSessionChange();
     window.location.reload();
@@ -181,7 +198,7 @@ function Root() {
           {sessionError && <Button onClick={() => void refresh()}>Retry session check</Button>}
         </div>
       )}
-      {loaded && <div hidden={checking} style={{ display: checking ? "none" : "contents" }}><ProtoApp
+      {loaded && <ProtoApp
         legacy={(view) => legacy(view, auth.operator)}
         operator={auth.operator}
         account={
@@ -209,7 +226,7 @@ function Root() {
               }
             : undefined
         }
-      /></div>}
+      />}
       {signOutError && <Window open onOpenChange={(open) => !open && setSignOutError("")} title="Sign-out not confirmed"
         footer={<Button onClick={() => setSignOutError("")}>OK</Button>}>
         <p role="alert">{signOutError}</p>
