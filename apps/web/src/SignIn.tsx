@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import "./SignIn.css";
 import { CrewArt } from "./proto/CrewArt";
 
-export type Member = { email: string; name: string | null };
+export type Member = { id: string; email: string; name: string | null };
 
 // Other ways in. Each one needs its own developer app (Google Cloud, Reddit
 // app preferences, Meta for Developers, Apple Developer) before it can work,

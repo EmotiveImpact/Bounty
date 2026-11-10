@@ -1,3 +1,4 @@
+import { privateLocal } from "./private-storage";
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { api, barcodeText, dateTime, loadMemberRules, money, toPence, type MemberRules, type RuleKey } from "./api";
 import { TRANSPORTS, TRANSPORT_WORDS, savedTripProfile } from "./ResearchCalculator";
@@ -607,15 +608,15 @@ function todayInput() {
 
 function readStorage(key: string): string | null {
   try {
-    return localStorage.getItem(key);
+    return privateLocal.getItem(key);
   } catch {
     return null;
   }
 }
 function writeStorage(key: string, value: string | null) {
   try {
-    if (value === null) localStorage.removeItem(key);
-    else localStorage.setItem(key, value);
+    if (value === null) privateLocal.removeItem(key);
+    else privateLocal.setItem(key, value);
   } catch {
     /* storage unavailable: the choice lasts for this visit only */
   }

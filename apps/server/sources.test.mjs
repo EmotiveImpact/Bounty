@@ -542,3 +542,18 @@ test("Awin keeps the claimed previous price and RRP from structured columns only
   }
   assert.equal(claimedPence({ toString: () => "5" }), null);
 });
+
+
+test("Awin refuses ambiguous and prototype-related feed headers", () => {
+  const fields = 'aw_product_id,product_name,currency,search_price';
+  for (const extra of ['search_price', '__proto__', 'constructor', 'prototype']) {
+    assert.throws(() => awin(fields + ',' + extra + '\n1,Kettle,GBP,10,0.01'), /duplicate or reserved/);
+  }
+});
+
+test("CSV parser duplicate prototype headers cannot replace a record prototype", async () => {
+  const { parse } = await import('csv-parse/sync');
+  const [row] = parse('__proto__,__proto__\na,b', { columns: true, group_columns_by_name: true });
+  assert.equal(Object.getPrototypeOf(row), Object.prototype);
+  assert.deepEqual(row.__proto__, ['a', 'b']);
+});

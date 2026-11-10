@@ -14,11 +14,11 @@ test('Admin stays closed while role lookup is pending and for an ordinary member
   const pending = new Promise(r => { release = r; });
   await page.route('**/api/auth/me', async route => {
     await pending;
-    await route.fulfill({ json: { required: true, operator: false, user: { email: 'synthetic@example.test' } } });
+    await route.fulfill({ json: { required: true, operator: false, user: { id: '1', email: 'synthetic@example.test' } } });
   });
   try {
     await page.goto(app.url + '/#Admin');
-    await page.getByText("Admin is for Bounty's operators only.", { exact: false }).waitFor();
+    await page.getByText("Checking your session…", { exact: true }).waitFor();
     assert.equal(await page.getByRole('heading', { name: 'Admin', exact: true }).count(), 0);
     release();
     await page.waitForLoadState('networkidle');

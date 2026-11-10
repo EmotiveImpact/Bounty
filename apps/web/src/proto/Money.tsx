@@ -1,3 +1,4 @@
+import { privateLocal } from "../private-storage";
 // The Money screen, built from the building blocks (src/ui/kit.tsx)
 // (Simple: calm figures; Pro: charts and the working behind them). Every
 // figure here comes from the ledger: payouts, receipts, expenses and refunds
@@ -61,7 +62,7 @@ type Targets = { targets: Target[]; basis: string };
 const EXAMPLES_KEY = "bounty.stock.examples";
 function readShowExamples() {
   try {
-    return localStorage.getItem(EXAMPLES_KEY) !== "hide";
+    return privateLocal.getItem(EXAMPLES_KEY) !== "hide";
   } catch {
     return true;
   }
@@ -78,7 +79,7 @@ function ExampleMonth() {
   const toggle = () =>
     setShow((v) => {
       try {
-        localStorage.setItem(EXAMPLES_KEY, v ? "hide" : "show");
+        privateLocal.setItem(EXAMPLES_KEY, v ? "hide" : "show");
       } catch {
         // Still works for this visit.
       }

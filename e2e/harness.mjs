@@ -64,7 +64,7 @@ export async function startApp({ env = {} } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), "bounty-e2e-"));
   const apiPort = await freePort();
   const webPort = await freePort();
-  const childEnv = { ...process.env, BOUNTY_DATA_DIR: dataDir, PORT: String(apiPort), ...env };
+  const childEnv = { ...process.env, ...env, DATABASE_URL: "", BOUNTY_KEEP_DATA: "off", BOUNTY_DATA_DIR: dataDir, PORT: String(apiPort) };
   const apiProc = spawn(process.execPath, ["apps/server/api.mjs"], { cwd: ROOT, env: childEnv, stdio: "ignore" });
   const viteScript = `
     import { createServer } from "vite";

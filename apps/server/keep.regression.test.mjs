@@ -363,3 +363,44 @@ test('durability: initial local files are retained separately when a remote snap
   assert.equal(readFileSync(join(dir, 'remote-receipt.txt'), 'utf8'), 'remote receipt');
   assert.equal(readFileSync(join(backup, 'local-receipt.txt'), 'utf8'), 'local record for review');
 });
+
+test('security: a partial network body holds neither the queue nor a transaction', async (t) => {
+  const { request } = await import('node:http');
+  let entered = 0;
+  const a = await instance(t, memoryStore(), { transaction: async fn => { entered++; return fn(); } });
+  let finish;
+  const slow = new Promise((resolve, reject) => {
+    const req = request(a.base + '/api/goals/targets', { method: 'POST', headers: { 'content-type': 'application/json' } }, res => {
+      res.resume(); res.on('end', () => resolve(res.statusCode));
+    });
+    req.on('error', reject);
+    req.write('{"name":');
+    finish = () => req.end('"Synthetic slow sender","amount":50000,"start":"2026-01-01"}');
+  });
+  await new Promise(r => setTimeout(r, 40));
+  const earlyTransactions = entered;
+  const fast = a.call('GET');
+  const earlyRead = await Promise.race([fast.then(() => true), new Promise(r => setTimeout(() => r(false), 150))]);
+  finish();
+  assert.equal(await slow, 201);
+  assert.equal((await fast).status, 200);
+  assert.equal(earlyTransactions, 0, 'a network sender must not own the global write lock');
+  assert.equal(earlyRead, true, 'another member can read while the first body is unfinished');
+});
+
+test('security: partial body expires with 408 and a later write succeeds', async (t) => {
+  const { request } = await import('node:http');
+  let entered = 0;
+  const a = await instance(t, memoryStore(), { intakeOptions: { timeoutMs: 40 }, transaction: async fn => { entered++; return fn(); } });
+  const status = await new Promise((resolve, reject) => {
+    const req = request(a.base + '/api/goals/targets', { method: 'POST', headers: { 'content-type': 'application/json' } }, res => {
+      res.resume(); res.on('end', () => resolve(res.statusCode));
+    });
+    req.on('error', reject);
+    req.setTimeout(1000, () => req.destroy(Error('Synthetic timeout guard')));
+    req.write('{');
+  });
+  assert.equal(status, 408);
+  assert.equal(entered, 0);
+  assert.equal((await a.call('POST', undefined, goal('After slow sender'))).status, 201);
+});

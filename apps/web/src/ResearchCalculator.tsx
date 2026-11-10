@@ -1,3 +1,4 @@
+import { privateLocal, privateSession } from "./private-storage";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
@@ -596,7 +597,7 @@ export function savedTripProfile() {
   try {
     const edited = editedTripFields();
     if (!edited.length) return out;
-    const raw = JSON.parse(localStorage.getItem("bounty-profile") || "{}");
+    const raw = JSON.parse(privateLocal.getItem("bounty-profile") || "{}");
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
     const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null);
     if (edited.includes("transport") && typeof raw.transport === "string" && (TRANSPORTS as readonly string[]).includes(raw.transport))
@@ -925,7 +926,7 @@ type Draft = {
 const isText = (v: unknown): v is string => typeof v === "string";
 function loadDraft(): Draft | null {
   try {
-    const raw = sessionStorage.getItem(DRAFT_KEY);
+    const raw = privateSession.getItem(DRAFT_KEY);
     if (!raw) return null;
     const d = JSON.parse(raw) as Partial<Draft>;
     if (!d || typeof d !== "object") return null;
@@ -961,7 +962,7 @@ function loadDraft(): Draft | null {
 }
 function saveDraft(draft: Draft) {
   try {
-    sessionStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+    privateSession.setItem(DRAFT_KEY, JSON.stringify(draft));
   } catch {
     /* storage unavailable: the draft lasts while the page is open */
   }
@@ -969,7 +970,7 @@ function saveDraft(draft: Draft) {
 /** Forgets the saved Research inputs, for example after the tab failed. */
 export function clearResearchDraft() {
   try {
-    sessionStorage.removeItem(DRAFT_KEY);
+    privateSession.removeItem(DRAFT_KEY);
   } catch {
     /* nothing stored */
   }
@@ -1216,7 +1217,7 @@ export function ResearchCalculator({
   function draftBounty() {
     if (!current || !request || typeof request === "string") return;
     try {
-      localStorage.setItem(
+      privateLocal.setItem(
         "bounty-draft",
         JSON.stringify({
           estimate: request,

@@ -1,13 +1,17 @@
-// The dev server must never hand out local data: the database, ledger
-// proofs and shelf photos live in .data/ inside the project by default, so
-// they are denied alongside Vite's own defaults. A BOUNTY_DATA_DIR inside
-// the project should also be named .data.
+// Deny the configured private store even when its directory is not .data.
+import { resolve } from "node:path";
+import { realpathSync, existsSync } from "node:fs";
+const store = resolve(process.env.BOUNTY_DATA_DIR || ".data");
+const privatePaths = [...new Set([store, ...(existsSync(store) ? [realpathSync(store)] : [])])];
+const literalGlob = path => path.replaceAll("\\", "/").replace(/[?*\[\]{}()!+@]/g, "\\$&");
+
 export default {
   server: {
     host: "127.0.0.1",
     proxy: { "/api": "http://127.0.0.1:4174" },
     fs: {
       deny: [
+        ...privatePaths.map(path => literalGlob(path) + "/**"),
         ".env",
         ".env.*",
         "*.{crt,pem}",

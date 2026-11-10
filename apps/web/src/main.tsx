@@ -10,7 +10,7 @@ import Ledger from "./Ledger";
 import ProtoApp, { type View } from "./proto/App";
 import SignIn, { type Member } from "./SignIn";
 import { Button, Window } from "./ui/kit";
-import { reloadPlans } from "./plans";
+import { initialisePrivateStorage, announceSessionChange, SESSION_CHANGED } from "./private-storage";
 import { SIGN_IN_EVENT } from "./api";
 
 // The trip planner, with the several-items basket plan under it. Money has
@@ -89,6 +89,12 @@ type Auth = { required: boolean; inviteOpen: boolean; member: Member | null; ope
 
 function Root() {
   const [auth, setAuth] = React.useState<Auth>({ required: false, inviteOpen: false, member: null, operator: false });
+  const [loaded, setLoaded] = React.useState(false);
+  const [checking, setChecking] = React.useState(true);
+  const [sessionError, setSessionError] = React.useState("");
+  const [signOutError, setSignOutError] = React.useState("");
+  const signingOut = React.useRef(false);
+  const checkSequence = React.useRef(0);
   const [signingIn, setSigningIn] = React.useState<false | "in" | "up">(false);
   // Links in account emails: #reset=<token> and #verify=<token>.
   const [resetToken, setResetToken] = React.useState<string | null>(null);
@@ -118,34 +124,64 @@ function Root() {
       })
       .catch(() => setConfirmed({ ok: false, text: "We couldn’t reach Bounty. Try the link again in a moment." }));
   }, []);
-  const refresh = React.useCallback(() => {
-    fetch("/api/auth/me")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (typeof data?.required === "boolean")
-          setAuth({
-            required: data.required,
-            inviteOpen: Boolean(data.inviteOpen),
-            member: data.user ?? null,
-            operator: data.operator === true,
-          });
-      })
-      .catch(() => undefined);
+  const refresh = React.useCallback(async () => {
+    const sequence = ++checkSequence.current;
+    setChecking(true);
+    setSessionError("");
+    try {
+      const res = await fetch("/api/auth/me", { cache: "no-store" });
+      const data = res.ok ? await res.json() : null;
+      if (typeof data?.required !== "boolean" || (data.required && data.user && data.user.id == null)) throw Error("We couldn’t check your session. Retry before opening your records.");
+      if (sequence !== checkSequence.current) return;
+      if (!await initialisePrivateStorage(data.required, data.user?.id == null ? null : String(data.user.id))) {
+        window.location.reload();
+        return;
+      }
+      if (sequence !== checkSequence.current) return;
+      setAuth({ required: data.required, inviteOpen: Boolean(data.inviteOpen), member: data.user ?? null, operator: data.operator === true });
+      setLoaded(true);
+      setChecking(false);
+    } catch {
+      if (sequence === checkSequence.current) setSessionError("We couldn’t check your session. Retry before opening your records.");
+    }
   }, []);
   React.useEffect(() => {
-    refresh();
-    const open = () => setSigningIn("in");
+    void refresh();
+    const open = () => { setSigningIn("in"); void refresh(); };
+    const changed = (event: StorageEvent) => { if (event.key === SESSION_CHANGED) void refresh(); };
+    const visible = () => { if (document.visibilityState === "visible") void refresh(); };
+    const restored = (event: PageTransitionEvent) => { if (event.persisted) void refresh(); };
     window.addEventListener(SIGN_IN_EVENT, open);
     window.addEventListener("bounty:auth-changed", refresh);
+    window.addEventListener("storage", changed);
+    window.addEventListener("focus", refresh);
+    window.addEventListener("pageshow", restored);
+    document.addEventListener("visibilitychange", visible);
     return () => {
       window.removeEventListener(SIGN_IN_EVENT, open);
       window.removeEventListener("bounty:auth-changed", refresh);
+      window.removeEventListener("storage", changed);
+      window.removeEventListener("focus", refresh);
+      window.removeEventListener("pageshow", restored);
+      document.removeEventListener("visibilitychange", visible);
     };
   }, [refresh]);
+  const changedSession = () => {
+    checkSequence.current++;
+    setChecking(true);
+    announceSessionChange();
+    window.location.reload();
+  };
   const close = React.useCallback(() => setSigningIn(false), []);
   return (
     <>
-      <ProtoApp
+      {checking && (
+        <div style={{ padding: 24 }} role={sessionError ? "alert" : "status"}>
+          <p>{sessionError || "Checking your session…"}</p>
+          {sessionError && <Button onClick={() => void refresh()}>Retry session check</Button>}
+        </div>
+      )}
+      {loaded && <div hidden={checking} style={{ display: checking ? "none" : "contents" }}><ProtoApp
         legacy={(view) => legacy(view, auth.operator)}
         operator={auth.operator}
         account={
@@ -155,20 +191,29 @@ function Root() {
                 signIn: () => setSigningIn("in"),
                 signUp: () => setSigningIn("up"),
                 signOut: async () => {
-                  await fetch("/api/auth/signout", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: "{}",
-                  }).catch(() => undefined);
-                  setAuth({ ...auth, member: null, operator: false });
-                  reloadPlans();
+                  if (signingOut.current) return;
+                  signingOut.current = true;
+                  setSignOutError("");
+                  try {
+                    const res = await fetch("/api/auth/signout", {
+                      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+                    });
+                    if (!res.ok) throw Error("Sign-out was not confirmed");
+                    changedSession();
+                  } catch {
+                    setSignOutError("Bounty could not confirm sign-out. Your session may still be active. Try signing out again before leaving this device.");
+                  } finally { signingOut.current = false; }
                 },
-                signedOut: () => (setAuth({ ...auth, member: null, operator: false }), reloadPlans()),
+                signedOut: changedSession,
                 refresh,
               }
             : undefined
         }
-      />
+      /></div>}
+      {signOutError && <Window open onOpenChange={(open) => !open && setSignOutError("")} title="Sign-out not confirmed"
+        footer={<Button onClick={() => setSignOutError("")}>OK</Button>}>
+        <p role="alert">{signOutError}</p>
+      </Window>}
       {confirmed && (
         <Window
           open
@@ -189,9 +234,7 @@ function Root() {
           resetToken={resetToken ?? undefined}
           inviteOpen={auth.inviteOpen}
           onClose={() => (close(), setResetToken(null))}
-          onSignedIn={(member) => (
-            setAuth({ ...auth, required: true, member }), setSigningIn(false), setResetToken(null), reloadPlans(), refresh()
-          )}
+          onSignedIn={changedSession}
         />
       )}
     </>

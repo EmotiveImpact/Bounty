@@ -1,3 +1,4 @@
+import { privateSession } from "./private-storage";
 import React, { useEffect, useRef, useState } from "react";
 import { api, loadLens, money, percent, saveLens, toPence, type Lens } from "./api";
 import { savedExtras, type Deal } from "./Deals";
@@ -63,7 +64,7 @@ const canUseCamera = typeof navigator !== "undefined" && Boolean(navigator.media
 const TALLY_KEY = "bounty-scan-tally";
 function loadTally(): Taken[] {
   try {
-    const v = JSON.parse(sessionStorage.getItem(TALLY_KEY) ?? "[]");
+    const v = JSON.parse(privateSession.getItem(TALLY_KEY) ?? "[]");
     return Array.isArray(v) ? v : [];
   } catch {
     return [];
@@ -71,7 +72,7 @@ function loadTally(): Taken[] {
 }
 function saveTally(t: Taken[]) {
   try {
-    sessionStorage.setItem(TALLY_KEY, JSON.stringify(t));
+    privateSession.setItem(TALLY_KEY, JSON.stringify(t));
   } catch {
     // The tally still works for this visit.
   }

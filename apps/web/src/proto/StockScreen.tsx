@@ -1,3 +1,4 @@
+import { privateLocal } from "../private-storage";
 // Stock, built from the building blocks (src/ui/kit.tsx). Each open trip is
 // one card with one main button for its next step (a sale, the money
 // arriving, closing it), everything else under More, and the full detail in
@@ -176,7 +177,7 @@ type Open =
 const EXAMPLES_KEY = "bounty.stock.examples";
 function readShowExamples() {
   try {
-    return localStorage.getItem(EXAMPLES_KEY) !== "hide";
+    return privateLocal.getItem(EXAMPLES_KEY) !== "hide";
   } catch {
     return true;
   }
@@ -204,7 +205,7 @@ function Stock({ legacy, go }: { legacy: React.ReactNode; go: (v: "money" | "dea
   const toggleExamples = () =>
     setExamples((v) => {
       try {
-        localStorage.setItem(EXAMPLES_KEY, v ? "hide" : "show");
+        privateLocal.setItem(EXAMPLES_KEY, v ? "hide" : "show");
       } catch {
         // Still works for this visit.
       }

@@ -155,3 +155,19 @@ test('launch mining: knowing an operator email and invite code is not proof of m
   assert.equal(moved.user.verified, false);
   assert.equal((await api.call('GET', '/api/sources', undefined, operator)).status, 403);
 });
+
+
+test('security: confirmation emails share a bounded budget across instances and recover', async () => {
+  const store = memoryAccountsStore();
+  let clock = Date.now(), delivered = 0;
+  const options = { inviteCode: invite, now: () => clock, mail: { on: true, send: async () => { delivered++; return true; } } };
+  const a = accounts(store, options), b = accounts(store, options);
+  await a.signUp({ email: 'synthetic@example.test', password, invite });
+  const user = await store.userByEmail('synthetic@example.test');
+  for (let i = 0; i < 3; i++) assert.equal(await [a, b][i % 2].sendVerify(user, 'https://example.test'), true);
+  await assert.rejects(b.sendVerify(user, 'https://example.test'), { status: 429 });
+  assert.equal(delivered, 3);
+  clock += 3600001;
+  assert.equal(await b.sendVerify(user, 'https://example.test'), true);
+  assert.equal(delivered, 4);
+});
