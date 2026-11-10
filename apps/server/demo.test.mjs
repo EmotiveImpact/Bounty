@@ -49,3 +49,25 @@ test("one import runs at a time, then bounties are re-checked, and failures neve
   await failing();
   assert.deepEqual(logged, ["Open Prices import failed: offline"]);
 });
+
+test("durable imports stay inside the caller's lock until refresh has finished", async () => {
+  const db = openDb();
+  let finishRun;
+  let finishRefresh;
+  let returned = false;
+  const before = freshPrices(db, {
+    run: () => new Promise((r) => { finishRun = r; }),
+    refresh: () => new Promise((r) => { finishRefresh = r; }),
+    wait: null,
+  });
+  const request = before().then(() => { returned = true; });
+  await new Promise((r) => setTimeout(r, 25));
+  assert.equal(returned, false);
+  finishRun();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(returned, false);
+  finishRefresh();
+  await request;
+  assert.equal(returned, true);
+  db.close();
+});

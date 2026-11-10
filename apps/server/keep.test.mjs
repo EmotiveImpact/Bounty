@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { keepForGood, memoryStore, postgresKeepStore } from "./keep.mjs";
+import { keepForGood, memoryStore } from "./keep.mjs";
 import { openDb } from "./db.mjs";
 import { createApi } from "./app.mjs";
 
@@ -42,6 +42,7 @@ async function instance(store, extra = {}) {
     },
     async close() {
       await new Promise((resolve) => server.close(resolve));
+      await keeper.close();
       rmSync(dir, { recursive: true, force: true });
     },
   };
@@ -108,56 +109,43 @@ test("receipt and photo files are kept, and removed files are removed", async ()
   const store = memoryStore();
   const a = await instance(store);
   await a.call("GET", "/api/goals/targets");
-  mkdirSync(join(a.dir, "proofs", "trip-1"), { recursive: true });
-  writeFileSync(join(a.dir, "proofs", "trip-1", "receipt.jpg"), "receipt bytes");
-  await a.keeper.changed();
-  assert.ok((await store.files()).includes("proofs/trip-1/receipt.jpg"));
+  await a.keeper.change(() => {
+    mkdirSync(join(a.dir, "proofs", "trip-1"), { recursive: true });
+    writeFileSync(join(a.dir, "proofs", "trip-1", "receipt.jpg"), "receipt bytes");
+  });
+  assert.ok(Object.hasOwn((await store.snapshot()).files, "proofs/trip-1/receipt.jpg"));
   await a.close();
 
   const b = await instance(store);
   await b.call("GET", "/api/goals/targets");
   const file = join(b.dir, "proofs", "trip-1", "receipt.jpg");
   assert.equal(readFileSync(file, "utf8"), "receipt bytes");
-  rmSync(file);
-  await b.keeper.changed();
-  assert.ok(!(await store.files()).includes("proofs/trip-1/receipt.jpg"));
+  await b.keeper.change(() => rmSync(file));
+  assert.ok(!Object.hasOwn((await store.snapshot()).files, "proofs/trip-1/receipt.jpg"));
   assert.equal(existsSync(file), false);
   await b.close();
 });
 
 test("two saves from the same version: the second is refused", async () => {
   const store = memoryStore();
-  assert.equal(await store.bump(0), 1);
-  assert.equal(await store.bump(0), null);
-  assert.equal(await store.bump(1), 2);
+  assert.equal(await store.commit(0, [], []), 1);
+  assert.equal(await store.commit(0, [], []), null);
+  assert.equal(await store.commit(1, [], []), 2);
 });
 
 test("only changed files are uploaded", async () => {
   const store = memoryStore();
   const puts = [];
-  const put = store.putFile;
-  store.putFile = async (path, data) => (puts.push(path), put(path, data));
+  const commit = store.commit;
+  store.commit = async (from, changes, drops) => {
+    puts.push(...changes.map((c) => c.path));
+    return commit(from, changes, drops);
+  };
   const a = await instance(store);
   await a.call("POST", "/api/goals/targets", goal("One"));
   const first = puts.length;
   assert.ok(first >= 1);
-  await a.keeper.changed();
+  await a.keeper.change(() => {});
   assert.equal(puts.length, first, "nothing changed, nothing sent");
   await a.close();
-});
-
-test("the Postgres store moves the version on only from the one it loaded", async () => {
-  const sent = [];
-  let row = null;
-  const store = await postgresKeepStore(async (text, params) => {
-    sent.push(text);
-    if (text.startsWith("INSERT INTO bounty_keep ")) return row ? [] : ((row = 1), [{ version: "1" }]);
-    if (text.startsWith("UPDATE bounty_keep ")) return params[0] === row ? [{ version: String(++row) }] : [];
-    return [];
-  });
-  assert.equal(await store.bump(0), 1);
-  assert.equal(await store.bump(0), null);
-  assert.equal(await store.bump(1), 2);
-  assert.equal(await store.bump(1), null);
-  assert.ok(sent.some((t) => t.includes("WHERE id = 'main' AND version = $1")));
 });
