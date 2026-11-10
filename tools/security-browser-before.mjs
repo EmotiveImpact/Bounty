@@ -8,8 +8,10 @@ import { join, resolve } from 'node:path';
 const parent = '5e33fd0e79ff5c313415ec8976d340a28720d4c7';
 const before = mkdtempSync(join(tmpdir(), 'bounty-security-before-'));
 try {
-  const archive = execFileSync('git', ['archive', parent]);
-  const unpack = spawnSync('tar', ['-x', '-C', before], { input: archive });
+  const archive = join(before, 'synthetic-parent.tar');
+  execFileSync('git', ['archive', '--output=' + archive, parent]);
+  const unpack = spawnSync('tar', ['-xf', archive, '-C', before]);
+  rmSync(archive);
   assert.equal(unpack.status, 0, unpack.stderr?.toString());
   symlinkSync(resolve('node_modules'), join(before, 'node_modules'), 'dir');
   for (const name of ['session-security.e2e.mjs', 'harness.mjs'])
