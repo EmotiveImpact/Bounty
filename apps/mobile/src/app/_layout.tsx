@@ -10,6 +10,7 @@ import { StatusBar } from "expo-status-bar";
 import { useEffect } from "react";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { MenuProvider } from "@/ui/side-menu";
+import { Button, Card, Screen, Title, Txt } from "@/ui/kit";
 import { colours } from "@/ui/theme";
 
 SplashScreen.preventAutoHideAsync();
@@ -33,16 +34,25 @@ export default function RootLayout() {
 // Signed out, the app opens on the welcome screen with sign in and sign up.
 // Signed in, it opens on Deals. The splash stays up until we know which.
 function Screens() {
-  const { checking, signedIn } = useAuth();
+  const { checking, signedIn, error, refresh, sessionKey } = useAuth();
 
   useEffect(() => {
     if (!checking) SplashScreen.hideAsync();
   }, [checking]);
 
   if (checking) return null;
+  if (error) return (
+    <MenuProvider enabled={false}>
+      <Screen><Card>
+        <Title>Reconnect to your account</Title>
+        <Txt accessibilityRole="alert">{error}</Txt>
+        <Button label="Try again" onPress={() => void refresh()} />
+      </Card></Screen>
+    </MenuProvider>
+  );
 
   return (
-    <MenuProvider enabled={signedIn}>
+    <MenuProvider key={sessionKey} enabled={signedIn}>
       <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: colours.canvas } }}>
         <Stack.Screen name="index" />
         <Stack.Protected guard={signedIn}>

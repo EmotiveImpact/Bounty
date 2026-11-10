@@ -19,6 +19,8 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm audit --audit-level=moderate
       - run: npm test
+      - name: Reproduce ledger and mobile state failures on the isolated parent
+        run: node tools/account-retry-before.mjs
       - run: npm run build
       - name: Mobile static checks
         working-directory: apps/mobile

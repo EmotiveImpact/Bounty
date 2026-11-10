@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { poundsText } from "../money-input";
 import { api, money } from "../api";
 import { readBase64 } from "../Ledger";
 import type { Deal } from "../Deals";
@@ -22,10 +23,8 @@ function today() {
 
 /** Whole pence from a pounds field, or null when it is not a price. */
 export function pence(value: string): number | null {
-  const v = value.trim().replace(/^£/, "");
-  if (!/^\d{1,6}(\.\d{1,2})?$/.test(v)) return null;
-  const p = Math.round(Number(v) * 100);
-  return p > 0 ? p : null;
+  const amount = poundsText(value);
+  return amount !== null && amount > 0 && amount <= 99999999 ? amount : null;
 }
 
 /** A whole number of units from 1 to 999, or null. */
@@ -53,6 +52,8 @@ export default function SignOff({
       paid: (d.buy / 100).toFixed(2),
     })),
   );
+  const [requestId] = useState(() => crypto.randomUUID());
+  const [date] = useState(today);
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -77,18 +78,19 @@ export default function SignOff({
     setBusy(true);
     setError("");
     try {
-      const date = today();
       const shops = [...new Set(rows.map((r) => r.deal.shop))].join(", ");
       const { id } = await api<{ id: number }>("ledger/trips", {
+        requestId,
         label: `Trip ${date} · ${shops}`.slice(0, 120),
         source: "manual",
         kind: "resale",
       });
       const entryIds: number[] = [];
-      for (const r of parsed) {
+      for (const [index, r] of parsed.entries()) {
         const res = await api<{ id: number }>(
           "ledger/trips/" + id + "/entries",
           {
+            requestId: requestId + "_" + index,
             type: "receipt",
             amount: (r.n as number) * (r.p as number),
             units: r.n,

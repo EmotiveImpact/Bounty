@@ -469,3 +469,96 @@ test(
     }
   },
 );
+
+// A real server commits the synthetic write, then the browser loses its reply.
+// Retrying the still-open form must use the same intent.
+test('ledger: lost acknowledgements do not duplicate money or stock',
+  { skip: !chromium && 'Playwright is not installed', timeout: 180000 }, async () => {
+    const app = await startApp();
+    try {
+      await atWidths(browser, app.url + '/#Ledger', async page => {
+        await openRecords(page);
+        const details = page.locator('details', { has: page.locator('summary', { hasText: 'New trip' }) });
+        await details.locator('summary').click();
+        await details.locator('input[name="label"]').fill('Synthetic lost reply ' + page.viewportSize().width);
+        let loseTrip = true;
+        await page.route('**/api/ledger/trips', async route => {
+          if (route.request().method() !== 'POST' || !loseTrip) return route.continue();
+          loseTrip = false;
+          const committed = await route.fetch(); assert.equal(committed.status(), 201);
+          await route.abort('failed');
+        });
+        await details.getByRole('button', { name: 'Create trip' }).click();
+        await details.getByRole('alert').waitFor();
+        await details.getByRole('button', { name: 'Create trip' }).click();
+        await waitText(page.locator('.ledger-heading h2').first(), /Synthetic lost reply/, 'retried trip');
+        const trips = (await app.api('/api/ledger/trips')).body.trips;
+        const match = trips.filter(t => t.label === 'Synthetic lost reply ' + page.viewportSize().width);
+        assert.equal(match.length, 1);
+        const id = match[0].id;
+        let loseEntry = true;
+        await page.route('**/api/ledger/trips/' + id + '/entries', async route => {
+          if (!loseEntry) return route.continue();
+          loseEntry = false;
+          const committed = await route.fetch(); assert.equal(committed.status(), 201);
+          await route.abort('failed');
+        });
+        const form = page.getByRole('group', { name: 'Add an entry' });
+        await form.locator('select').first().selectOption('receipt');
+        await form.locator('input[name="amount"]').fill('12.50');
+        await form.locator('input[name="units"]').fill('1');
+        await form.locator('input[name="occurred"]').fill('2026-01-01');
+        await form.getByRole('button', { name: 'Save entry' }).click();
+        await form.getByRole('alert').waitFor();
+        await form.getByRole('button', { name: 'Save entry' }).click();
+        await waitText(entryRows(page), /12.50/, 'retried receipt');
+        const result = (await app.api('/api/ledger/trips/' + id)).body;
+        assert.equal(result.entries.length, 1);
+        assert.equal(result.entries[0].amount, 1250);
+        // An acknowledged, reset form represents a genuinely new entry.
+        await addEntry(page, { type: 'receipt', amount: 12.50, units: 1, date: '2026-01-01' });
+        assert.equal((await app.api('/api/ledger/trips/' + id)).body.entries.length, 2);
+      }, undefined, { expectedConsoleErrors: [/Failed to load resource: net::ERR_FAILED/] });
+    } finally { app.stop(); }
+  });
+
+test('stock: malformed prices are rejected and retrying a failed proof keeps one receipt',
+  { skip: !chromium && 'Playwright is not installed', timeout: 180000 }, async () => {
+    const app = await startApp();
+    try {
+      await atWidths(browser, app.url + '/#Ledger', async page => {
+        const label = 'Synthetic proof retry ' + page.viewportSize().width;
+        const { body: { id } } = await app.api('/api/ledger/trips', {
+          method: 'POST', body: JSON.stringify({ label, source: 'manual', kind: 'resale' }),
+        });
+        await page.reload();
+        const card = page.locator('.sk-card', { has: page.getByRole('button', { name: label, exact: true }) });
+        await card.getByRole('button', { name: 'Add what you bought', exact: true }).click();
+        const dialog = page.getByRole('dialog');
+        await dialog.getByLabel('Item', { exact: true }).fill('Synthetic kettle');
+        await dialog.getByLabel('You paid in total', { exact: true }).fill('1,2');
+        await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+        await dialog.getByText('Type the amount in pounds, like 9.50.', { exact: true }).waitFor();
+        assert.equal((await app.api('/api/ledger/trips/' + id)).body.entries.length, 0);
+        await dialog.getByLabel('You paid in total', { exact: true }).fill('12.50');
+        await dialog.locator('input[name="proof"]').setInputFiles({
+          name: 'synthetic.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4\n%synthetic retry\n%%EOF\n'),
+        });
+        let refuse = true;
+        await page.route('**/api/ledger/trips/' + id + '/proofs', route => {
+          if (!refuse) return route.continue();
+          refuse = false;
+          return route.fulfill({ status: 503, json: { error: 'Synthetic proof outage' } });
+        });
+        await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+        await dialog.getByText('Entry saved; proof not attached.', { exact: true }).waitFor();
+        assert.equal((await app.api('/api/ledger/trips/' + id)).body.entries.length, 1);
+        await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+        await dialog.waitFor({ state: 'hidden' });
+        const result = (await app.api('/api/ledger/trips/' + id)).body;
+        assert.equal(result.entries.length, 1);
+        assert.equal(result.entries[0].amount, 1250);
+        assert.equal(result.proofs.length, 1);
+      }, undefined, { expectedConsoleErrors: [/Failed to load resource: the server responded with a status of 503/] });
+    } finally { app.stop(); }
+  });

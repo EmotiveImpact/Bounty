@@ -134,6 +134,7 @@ export function MenuProvider({ enabled, children }: { enabled: boolean; children
 function MenuList({ onClose }: { onClose: () => void }) {
   const { user, signOut } = useAuth();
   const [leaving, setLeaving] = useState(false);
+  const [signOutError, setSignOutError] = useState("");
 
   const go = async (page: string) => {
     onClose();
@@ -142,8 +143,11 @@ function MenuList({ onClose }: { onClose: () => void }) {
   const out = async () => {
     setLeaving(true);
     try {
-      onClose();
+      setSignOutError("");
       await signOut();
+      onClose();
+    } catch (error) {
+      setSignOutError((error as Error).message);
     } finally {
       setLeaving(false);
     }
@@ -186,6 +190,7 @@ function MenuList({ onClose }: { onClose: () => void }) {
           <Text style={styles.note}>These open the Bounty website for now, until each has its own phone screen.</Text>
         </ScrollView>
 
+        {signOutError ? <Text accessibilityRole="alert">Sign-out was not confirmed. {signOutError}</Text> : null}
         <Pressable accessibilityRole="button" onPress={out} disabled={leaving} style={({ pressed }) => [styles.item, pressed && { backgroundColor: colours.panel }]}>
           <View style={[styles.icon, { backgroundColor: colours.panel }]}>
             <Icon name="out" size={20} />

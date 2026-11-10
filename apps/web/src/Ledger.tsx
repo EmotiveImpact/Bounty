@@ -5,7 +5,8 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import { api, hours, money, percent, toPence } from "./api";
+import { poundsText } from "./money-input";
+import { api, hours, money, percent } from "./api";
 import "./Ledger.css";
 
 // Shapes returned by server/routes-ledger.mjs. Money is integer pence.
@@ -314,6 +315,7 @@ export default function Ledger() {
 }
 
 function NewTripForm({ onCreated }: { onCreated: (id: number) => void }) {
+  const [requestId, setRequestId] = useState(() => crypto.randomUUID());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   async function submit(e: FormEvent<HTMLFormElement>) {
@@ -324,12 +326,14 @@ function NewTripForm({ onCreated }: { onCreated: (id: number) => void }) {
     setError("");
     try {
       const saved = await api<{ id: number }>("ledger/trips", {
+        requestId,
         label: String(f.get("label") || "").trim(),
         source: "manual",
         kind: f.get("kind"),
         reference: String(f.get("reference") || "").trim() || undefined,
       });
       form.reset();
+      setRequestId(crypto.randomUUID());
       onCreated(saved.id);
     } catch (err) {
       setError((err as Error).message);
@@ -1076,6 +1080,7 @@ function EntriesTable({
 }
 
 function EntryForm({ trip, onSaved }: { trip: Trip; onSaved: () => void }) {
+  const [requestId, setRequestId] = useState(() => crypto.randomUUID());
   const types = ENTRY_TYPES[trip.kind];
   const [type, setType] = useState<EntryType>(types[0]);
   // Refunds: whether the buyer sent the item back. Nothing is chosen for the
@@ -1095,6 +1100,7 @@ function EntryForm({ trip, onSaved }: { trip: Trip; onSaved: () => void }) {
     const f = new FormData(form);
     const value = (name: string) => String(f.get(name) ?? "").trim();
     const body: Record<string, unknown> = {
+      requestId,
       type,
       occurred: value("occurred"),
       reference: value("reference") || undefined,
@@ -1102,10 +1108,10 @@ function EntryForm({ trip, onSaved }: { trip: Trip; onSaved: () => void }) {
     };
     if (type === "work") body.minutes = Math.round(Number(value("minutes")));
     else {
-      const pounds = Number(value("amount"));
-      if (!Number.isFinite(pounds) || pounds <= 0)
+      const amount = poundsText(value("amount"));
+      if (amount === null || amount <= 0)
         return setError("Enter an amount in pounds above zero.");
-      body.amount = toPence(pounds);
+      body.amount = amount;
     }
     if (type === "refund") {
       if (!refundKind) return setError("Say whether the buyer sent the item back.");
@@ -1118,6 +1124,7 @@ function EntryForm({ trip, onSaved }: { trip: Trip; onSaved: () => void }) {
     try {
       await api("ledger/trips/" + trip.id + "/entries", body);
       form.reset();
+      setRequestId(crypto.randomUUID());
       setType(types[0]);
       setRefundKind("");
       onSaved();

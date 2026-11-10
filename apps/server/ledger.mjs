@@ -10,6 +10,7 @@
 // usual price on things bought for the home) are never earnings or proceeds.
 import { bool, fail, int, isoDate, londonDate, oneOf, text, transaction } from "./http.mjs";
 import { removesMetadata } from "./proofs.mjs";
+import { createHash } from "node:crypto";
 
 export const TRIP_SOURCES = Object.freeze(["planner", "research", "bounty", "manual"]);
 export const TRIP_KINDS = Object.freeze(["resale", "household"]);
@@ -117,6 +118,12 @@ export function schema(db, { now = new Date() } = {}) {
     db.exec(`CREATE TABLE IF NOT EXISTS ledger_purchase_requests (
       request_id TEXT PRIMARY KEY, payload TEXT NOT NULL,
       trip_id INTEGER NOT NULL REFERENCES ledger_trips(id), entry_id INTEGER NOT NULL
+    )`);
+    // Retain tombstones even when a mistaken entry is removed: an old retry
+    // must never recreate it. Existing account/receipt rows are untouched.
+    db.exec(`CREATE TABLE IF NOT EXISTS ledger_write_requests (
+      request_id TEXT NOT NULL, operation TEXT NOT NULL, payload_hash TEXT NOT NULL,
+      result_id INTEGER NOT NULL, PRIMARY KEY(request_id, operation)
     )`);
     migrateToAutoincrement(db);
     // After the rebuild above (which only ever runs on databases made before
@@ -1344,6 +1351,36 @@ export function countWhereLower(base, trips) {
 const isObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 const absent = (value) => value === undefined || value === null || value === "";
 
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (!isObject(value)) return value;
+  return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
+}
+
+function retryWrite(db, operation, table, input, write) {
+  if (!isObject(input)) fail("Send a JSON object");
+  // Older clients remain compatible. All shipped web creation forms supply
+  // an identifier; callers without one do not receive retry guarantees.
+  if (input.requestId === undefined) return write();
+  if (typeof input.requestId !== "string" || !/^[A-Za-z0-9_-]{16,120}$/.test(input.requestId))
+    fail("Supply a valid save request identifier");
+  const { requestId, ...payload } = input;
+  const hash = createHash("sha256").update(JSON.stringify(canonical(payload))).digest("hex");
+  return transaction(db, () => {
+    const previous = db.prepare("SELECT * FROM ledger_write_requests WHERE request_id = ? AND operation = ?").get(requestId, operation);
+    if (previous) {
+      if (previous.payload_hash !== hash)
+        fail("This save was already recorded with different details. Check Stock before recording another entry.", 409);
+      if (!db.prepare(`SELECT id FROM ${table} WHERE id = ?`).get(previous.result_id))
+        fail("This saved entry has since been removed. Check Stock before recording another entry.", 409);
+      return previous.result_id;
+    }
+    const id = write();
+    db.prepare("INSERT INTO ledger_write_requests VALUES (?, ?, ?, ?)").run(requestId, operation, hash, id);
+    return id;
+  });
+}
+
 /**
  * Validates the predictions stored with a trip (all integer pence/minutes).
  * sample: true when the prediction came from sample or illustrative figures,
@@ -1371,6 +1408,10 @@ function predictedInput(value, source) {
  * never count as realised cash. Returns the new id.
  */
 export function createTrip(db, input, { now = new Date() } = {}) {
+  return retryWrite(db, "trip", "ledger_trips", input, () => createTripOnce(db, input, { now }));
+}
+
+function createTripOnce(db, input, { now }) {
   if (!isObject(input)) fail("Send a JSON object");
   const label = text(input.label, "label", 120);
   const source = oneOf(input.source, "source", TRIP_SOURCES);
@@ -1429,6 +1470,10 @@ function unitsInput(value, type, kind, itemReturned = null) {
  * refund's date. Returns the new id.
  */
 export function addEntry(db, tripId, input, { now = new Date() } = {}) {
+  return retryWrite(db, "entry:" + tripId, "ledger_entries", input, () => addEntryOnce(db, tripId, input, { now }));
+}
+
+function addEntryOnce(db, tripId, input, { now }) {
   const trip = requireTrip(db, tripId);
   if (trip.legacy)
     fail("Legacy totals cannot take new entries. Create a new trip for new activity.", 409);

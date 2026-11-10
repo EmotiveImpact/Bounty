@@ -5,7 +5,8 @@ import { privateLocal } from "../private-storage";
 // a window. Every action is a dated ledger entry, so Money updates from it.
 // The older full records (proofs, checks, editing) open below on request.
 import React, { useEffect, useRef, useState } from "react";
-import { api, money, toPence } from "../api";
+import { poundsText } from "../money-input";
+import { api, money } from "../api";
 import { readBase64 } from "../Ledger";
 import {
   Button,
@@ -718,6 +719,8 @@ function EntryWindow({
   onClose: () => void;
   onSaved: (text: string, undo?: () => Promise<unknown>) => void;
 }) {
+  const [requestId] = useState(() => crypto.randomUUID());
+  const [entryRecorded, setEntryRecorded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [errs, setErrs] = useState<Record<string, string>>({});
   const [cost, setCost] = useState("Postage");
@@ -732,15 +735,15 @@ function EntryWindow({
     const f = new FormData(ev.currentTarget);
     const v = (k: string) => String(f.get(k) ?? "").trim();
     const bad: Record<string, string> = {};
-    const body: Record<string, unknown> = { type: action, occurred: v("date") || today() };
+    const body: Record<string, unknown> = { requestId, type: action, occurred: v("date") || today() };
     if (action === "work") {
       const mins = Math.round(Number(v("hours")) * 60);
       if (!Number.isFinite(mins) || mins < 1) bad.hours = "Say how long in hours, like 1.5.";
       else body.minutes = mins;
     } else {
-      const pounds = Number(v("amount").replace(/[£,\s]/g, ""));
-      if (!v("amount") || !Number.isFinite(pounds) || pounds <= 0) bad.amount = "Type the amount in pounds, like 9.50.";
-      else body.amount = toPence(pounds);
+      const amount = poundsText(v("amount"));
+      if (amount === null || amount <= 0) bad.amount = "Type the amount in pounds, like 9.50.";
+      else body.amount = amount;
     }
     if (withUnits && v("units")) {
       const n = Number(v("units"));
@@ -760,6 +763,7 @@ function EntryWindow({
     setBusy(true);
     try {
       const r = await api<{ id: number }>("ledger/trips/" + trip.id + "/entries", body);
+      setEntryRecorded(true);
       const withFile = !!(file && file.size);
       if (withFile)
         await api("ledger/trips/" + trip.id + "/proofs", {
@@ -882,8 +886,8 @@ function EntryWindow({
           </Field>
         )}
         {errs.form && (
-          <Notice tone="loss" title="Not saved.">
-            {errs.form}
+          <Notice tone="loss" title={entryRecorded ? "Entry saved; proof not attached." : "Save not confirmed."}>
+            {errs.form} {entryRecorded ? "Retry with the same details to attach the proof to this entry." : "Retry with the same details, or check Stock before starting another entry."}
           </Notice>
         )}
       </form>

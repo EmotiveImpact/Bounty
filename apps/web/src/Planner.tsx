@@ -1199,6 +1199,7 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile })
     before: number | null | undefined,
     options?: Parameters<typeof fareDependent>[3],
   ) => fareDependent(known, before, pending, options);
+  const [requestId, setRequestId] = useState(() => crypto.randomUUID());
   const [ledger, setLedger] = useState({ busy: false, notice: "" });
   const failing = t.alert.checks.filter((c) => !c.ok).length;
   // Display only: short forms for the headline figures; the fare notice below explains a gap.
@@ -1210,6 +1211,7 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile })
     setLedger({ busy: true, notice: "" });
     try {
       const saved = await api<{ id: number | string }>("ledger/trips", {
+        requestId,
         label: (t.name + " at " + t.shop + " (sample)").slice(0, 120),
         source: "planner",
         kind: "resale",
@@ -1224,6 +1226,7 @@ function TripView({ trip: t, profile }: { trip: Trip; profile: PlannerProfile })
           sample: true,
         },
       });
+      setRequestId(crypto.randomUUID());
       setLedger({
         busy: false,
         notice:
