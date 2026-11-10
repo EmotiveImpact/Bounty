@@ -103,7 +103,7 @@ test('security: same-member checks preserve a form; failed rechecks remove priva
     await page.goto(app.url);
     await openAccount(page);
     await page.getByRole('dialog', { name: 'Your account', exact: true }).getByRole('button', { name: 'Profile and settings', exact: true }).click();
-    await page.getByRole('button', { name: 'Change', exact: true }).first().click();
+    await page.locator('.k-row').filter({ has: page.getByText('Password', { exact: true }) }).getByRole('button', { name: 'Change', exact: true }).click();
     await page.getByRole('dialog', { name: 'Change your password', exact: true }).waitFor();
     await page.getByLabel('Current password', { exact: true }).fill('synthetic unsaved draft');
     const checked = page.waitForResponse('**/api/auth/me');
