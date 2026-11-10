@@ -5,7 +5,8 @@
     "deploymentEnabled": {
       "fix/durable-snapshot-recovery": false,
       "fix/launch-security-and-records": false,
-      "fix/security-boundaries": false
+      "fix/security-boundaries": false,
+      "fix/account-abuse-and-ledger-retries": false
     }
   },
   "installCommand": "npm ci",
