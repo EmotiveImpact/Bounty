@@ -6,6 +6,7 @@ import { fail, int, londonDate, reply } from "./http.mjs";
 import { dataDir } from "./db.mjs";
 import {
   addEntry,
+  recordPurchase,
   checkProofTarget,
   closeTrip,
   createTrip,
@@ -39,6 +40,10 @@ function idParam(value, name = "id") {
 export function routes(db, { proofDir, now = () => new Date() } = {}) {
   const proofs = () => proofDir || join(dataDir(), "proofs");
   return [
+    ["POST", "/api/ledger/purchases", ({ body }) => {
+      const result = recordPurchase(db, body, { now: now() });
+      return reply(result.created ? 201 : 200, result);
+    }],
     ["GET", "/api/ledger/trips", () => ({ trips: listTrips(db) })],
     [
       "POST",

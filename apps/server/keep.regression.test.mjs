@@ -341,3 +341,25 @@ test("durability: two members' Stock, Money and receipt bytes survive a fresh in
   assert.deepEqual(readFileSync(join(b.dir, receiptPath)), originalBytes);
   assert.ok(existsSync(join(memberDir(b.dir, { id: "synthetic-b" }), "desk.sqlite")));
 });
+
+test('durability: an empty remote store cannot erase pre-existing local records at first restore', async (t) => {
+  const a = await instance(t, memoryStore());
+  writeFileSync(join(a.dir, 'synthetic-legacy-receipt.txt'), 'retain this local receipt');
+  await assert.rejects(a.keeper.ready(), /empty remote snapshot cannot replace/);
+  assert.equal(readFileSync(join(a.dir, 'synthetic-legacy-receipt.txt'), 'utf8'), 'retain this local receipt');
+});
+
+test('durability: initial local files are retained separately when a remote snapshot replaces the cache', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'bounty-initial-copy-synthetic-'));
+  const dir = join(root, 'cache');
+  mkdirSync(dir); writeFileSync(join(dir, 'local-receipt.txt'), 'local record for review');
+  const store = memoryStore();
+  await store.commit(0, [{ path: 'remote-receipt.txt', data: gzipSync('remote receipt').toString('base64') }], []);
+  let backup;
+  const keeper = keepForGood({ dir, store, log(message) { backup = message.split(' at ')[1]; },
+    build: () => ({ handle() {}, checkpoint() {}, close() {} }) });
+  t.after(async () => { await keeper.close(); rmSync(root, { recursive: true, force: true }); });
+  await keeper.ready();
+  assert.equal(readFileSync(join(dir, 'remote-receipt.txt'), 'utf8'), 'remote receipt');
+  assert.equal(readFileSync(join(backup, 'local-receipt.txt'), 'utf8'), 'local record for review');
+});

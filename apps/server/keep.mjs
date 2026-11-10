@@ -53,8 +53,10 @@ function bufferedResponse(limit) {
  * store.commit(version, puts, drops) atomically returns the next version or null.
  */
 export function keepForGood({ store, dir, build, log = console.error, checkEvery = 5000, now = Date.now,
+  transaction = null,
   maxResponseBytes = 16 * 1024 * 1024 }) {
   let current = null;
+  let restored = false;
   let version = 0;
   let checked = 0;
   let known = new Map();
@@ -92,6 +94,9 @@ export function keepForGood({ store, dir, build, log = console.error, checkEvery
 
   async function restore() {
     const snapshot = await store.snapshot();
+    if (!restored && !Object.keys(snapshot.files).length && localFiles().length)
+      throw Error("An empty remote snapshot cannot replace existing local records. Review and back up the local store before migration.");
+    const preserveInitialCache = !restored && localFiles().length > 0;
     const hashes = new Map();
     mkdirSync(dirname(dir), { recursive: true, mode: 0o700 });
     const stage = mkdtempSync(join(dirname(dir), ".bounty-restore-"));
@@ -117,10 +122,12 @@ export function keepForGood({ store, dir, build, log = console.error, checkEvery
         if (moved) { renameSync(backup, dir); moved = false; }
         throw error;
       }
+      restored = true;
       known = hashes;
       version = snapshot.version;
       checked = now();
-      if (moved) rmSync(backup, { recursive: true, force: true });
+      if (moved && preserveInitialCache) log("Bounty keep: preserved initial local records at " + backup);
+      else if (moved) rmSync(backup, { recursive: true, force: true });
     } finally {
       rmSync(stage, { recursive: true, force: true });
     }
@@ -167,21 +174,26 @@ export function keepForGood({ store, dir, build, log = console.error, checkEvery
       try {
         await readyInsideQueue();
         await freshen(!READS.has(req.method));
-        // These operations change accounts in independent Postgres tables AND
-        // snapshot files. Until a common transaction exists, refuse them before
-        // either store is changed. Never leave an account deleted but its
-        // receipts restored, or its profile linked to the previous email.
-        const path = new URL(req.url, "http://localhost").pathname;
-        if (req.method === "POST" && ["/api/account/email", "/api/account/delete"].includes(path)) {
-          res.writeHead(503, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-          res.end(JSON.stringify({ code: "account_change_unavailable", error: "Email changes and account deletion are temporarily unavailable. Your account and records have not been changed." }));
-          return;
-        }
         const response = bufferedResponse(maxResponseBytes);
-        await current.handle(req, response);
-        if (response.body === null) throw Error("API did not finish its response");
-        if (response.statusCode < 400) await save();
-        else discard(); // A refused handler may have made partial local edits.
+        const run = async () => {
+          const path = new URL(req.url, "http://localhost").pathname;
+          if (!transaction && req.method === "POST" && ["/api/account/email", "/api/account/delete", "/api/plans/choose"].includes(path)) {
+            response.writeHead(503, { "Content-Type": "application/json" });
+            response.end(JSON.stringify({ code: "account_change_unavailable", error: "Account changes require a coordinated durable store." }));
+            return;
+          }
+          await current.handle(req, response);
+          if (response.body === null) throw Error("API did not finish its response");
+          if (response.statusCode >= 400) throw response;
+          await save();
+        };
+        try {
+          if (transaction && !READS.has(req.method)) await transaction(run);
+          else await run();
+        } catch (error) {
+          if (error !== response) throw error;
+          discard();
+        }
         response.publish(res);
       } catch (error) {
         discard();
@@ -251,6 +263,7 @@ export async function postgresKeepStore(query) {
     return n;
   };
   return {
+    ready,
     async version() {
       await ready();
       const rows = await query("SELECT version FROM bounty_keep WHERE id = 'main'", []);

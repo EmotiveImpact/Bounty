@@ -367,7 +367,14 @@ export function routes(db, options = {}) {
     return `${created ? "Bounty created" : "Evidence re-checked"} as ${tier}, but it cannot send alerts or take claims: ${why.join("; ") || "the buy-alert checks do not pass"}.${hiddenNote}`;
   };
 
-  const viewerOf = (url) => resolveViewer(db, url.searchParams.get("viewer"));
+  const viewerOf = (url, user, operator, accountsOn) => {
+    if (!accountsOn || operator) return resolveViewer(db, url.searchParams.get("viewer"));
+    const requested = url.searchParams.get("viewer");
+    const mine = memberForAccount(db, user?.email);
+    if (requested && requested !== "public" && (!mine || requested !== String(mine.id)))
+      fail("You can only view tips as your own scout profile", user ? 403 : 401);
+    return mine ? { kind: "member", member: mine } : { kind: "public" };
+  };
 
   const isCount = (v) => Number.isSafeInteger(v) && v >= 0;
   const units = (n) => `${n} unit${n === 1 ? "" : "s"}`;
@@ -465,9 +472,9 @@ export function routes(db, options = {}) {
     const input = { ...body };
     delete input.paidTier;
     delete input.paidUntil;
-    const areas = plan?.areas ?? null;
+    const areas = plan ? plan.areas : 0;
     if (areas !== null && Array.isArray(input.alertLocalities) && new Set(input.alertLocalities.map((a) => String(a).trim().toLowerCase())).size > areas)
-      fail(
+      fail(!plan ? "Choose a plan before adding alert areas." :
         `Your ${plan.name} plan covers ${areas === 1 ? "one area" : `${areas} areas`}. ` +
           (plan.id === "starter" ? "Plus covers 3 and Full-time any number." : "Full-time covers any number."),
       );
@@ -491,10 +498,14 @@ export function routes(db, options = {}) {
     [
       "GET",
       "/api/members",
-      () => {
+      ({ user, operator, accountsOn }) => {
         const now = clock();
         return {
-          members: listMembers(db).map((m) => memberView(db, m, { now })),
+          members: listMembers(db).map((m) => {
+            const view = memberView(db, m, { now });
+            if (!accountsOn || operator || m.account_email === user?.email) return view;
+            return { id: view.id, name: view.name, locality: view.locality, earned: view.earned };
+          }),
           tiers: MEMBERSHIP.tiers,
           paidTierIds: MEMBERSHIP.paidTierIds,
           reputation: REPUTATION_RULES,
@@ -521,7 +532,7 @@ export function routes(db, options = {}) {
         // Signed in, the new profile is linked to the account (one each) and
         // gets the early access its plan buys.
         const made = createMember(db, input, { now, accountEmail: user?.email ?? null });
-        if (user && !operator) applyPlanTier(db, user.email, plan?.tipTier ?? null);
+        if (user && !operator) applyPlanTier(db, user.email, plan?.tipTier ?? null, plan ? plan.areas : 0);
         const member = user && !operator ? requireMember(db, made.id) : made;
         return reply(201, { member: memberView(db, member, { now }), notice: TERMS.privacy });
       },
@@ -596,7 +607,8 @@ export function routes(db, options = {}) {
     [
       "GET",
       "/api/members/:id/alerts",
-      ({ params, body, user, operator }) => {
+      ({ params, body, user, operator, accountsOn }) => {
+        if (accountsOn && !user) fail("Sign in to read your alerts", 401);
         ownProfile(user, operator, params.id);
         const memberId = pathId(params.id, "Member");
         const now = clock();
@@ -612,18 +624,18 @@ export function routes(db, options = {}) {
     [
       "GET",
       "/api/bounties",
-      ({ url }) => {
+      ({ url, user, operator, accountsOn }) => {
         const now = clock();
-        const viewer = viewerOf(url);
+        const viewer = viewerOf(url, user, operator, accountsOn);
         return { bounties: listBounties(db, { viewer, now }), rules: BOUNTY_RULES, terms: TERMS };
       },
     ],
     [
       "GET",
       "/api/bounties/:id",
-      ({ params, url }) => {
+      ({ params, url, user, operator, accountsOn }) => {
         const now = clock();
-        const viewer = viewerOf(url);
+        const viewer = viewerOf(url, user, operator, accountsOn);
         return { bounty: bountyView(db, requireBounty(db, pathId(params.id, "Bounty")), { viewer, now }) };
       },
     ],

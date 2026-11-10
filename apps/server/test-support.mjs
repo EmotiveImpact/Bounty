@@ -43,6 +43,16 @@ export function memoryAccountsStore() {
   return {
     users,
     sessions,
+    limits: new Map(),
+    async consumeLimit(key, now, window, maximum) {
+      const old = this.limits.get(key);
+      const entry = !old || old.started <= now - window ? { started: now, count: 0 } : old;
+      if (entry.count >= maximum) return false;
+      entry.count++;
+      this.limits.set(key, entry);
+      return true;
+    },
+    async clearLimit(key) { this.limits.delete(key); },
     async userByEmail(email) {
       return users.find((u) => u.email === email) || null;
     },
@@ -83,6 +93,8 @@ export function memoryAccountsStore() {
     },
     async setPassword(userId, passwordHash) {
       users.find((x) => x.id === userId).password_hash = passwordHash;
+      for (const [hash, token] of this.tokens) if (token.userId === userId) this.tokens.delete(hash);
+      await this.deleteSessions(userId);
     },
     async deleteSessions(userId) {
       for (const [h, s] of sessions) if (s.userId === userId) sessions.delete(h);
@@ -95,6 +107,7 @@ export function memoryAccountsStore() {
       const u = users.find((x) => x.id === userId);
       u.email = email;
       u.verified = false;
+      for (const [hash, token] of this.tokens) if (token.userId === userId) this.tokens.delete(hash);
       return true;
     },
     async deleteUser(userId) {

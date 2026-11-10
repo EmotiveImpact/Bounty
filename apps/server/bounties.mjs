@@ -855,7 +855,7 @@ export function memberView(db, member, { now }) {
  * position lasts while the plan is chosen (no end date). A plan without
  * early access, or no plan, clears it. Earned levels are untouched.
  */
-export function applyPlanTier(db, email, tipTier) {
+export function applyPlanTier(db, email, tipTier, areas = null) {
   if (!email) return;
   const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'members'").get();
   if (!exists) return;
@@ -864,6 +864,12 @@ export function applyPlanTier(db, email, tipTier) {
     paid,
     String(email).toLowerCase(),
   );
+  if (areas !== null) {
+    const member = memberForAccount(db, email);
+    if (member) db.prepare("UPDATE members SET alert_localities = ? WHERE id = ?").run(
+      JSON.stringify(json(member.alert_localities, []).slice(0, areas)), member.id,
+    );
+  }
 }
 
 /** The scout profile linked to a signed-in account, or null. */

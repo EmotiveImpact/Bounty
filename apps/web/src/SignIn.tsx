@@ -192,7 +192,7 @@ export default function SignIn({
           <>
             <p className="signin-done" role="status">
               {asked.mailOn
-                ? "If that email has a Bounty account, a reset link is on its way. It works once, for one hour. Check your junk folder if it hasn’t arrived in a few minutes."
+                ? "Request received. If that email has a Bounty account, check your inbox and junk folder for a reset link. It works once, for one hour. If it does not arrive, try again."
                 : "We can’t send emails just yet. Message us from the Help page with the email you signed up with, and we’ll send you a reset link."}
             </p>
             {!asked.mailOn && (

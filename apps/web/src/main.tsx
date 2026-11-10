@@ -70,12 +70,12 @@ const ON_ERROR: Partial<Record<string, () => void>> = {
   research: clearResearchDraft,
 };
 
-function legacy(view: View) {
+function legacy(view: View, operator = false) {
   const Screen = LEGACY[view];
   if (!Screen) return null;
   return (
     <TabBoundary key={view} onError={ON_ERROR[view]}>
-      <Screen />
+      {view === "research" ? <Research operator={operator} /> : <Screen />}
     </TabBoundary>
   );
 }
@@ -88,7 +88,7 @@ function legacy(view: View) {
 type Auth = { required: boolean; inviteOpen: boolean; member: Member | null; operator: boolean };
 
 function Root() {
-  const [auth, setAuth] = React.useState<Auth>({ required: false, inviteOpen: false, member: null, operator: true });
+  const [auth, setAuth] = React.useState<Auth>({ required: false, inviteOpen: false, member: null, operator: false });
   const [signingIn, setSigningIn] = React.useState<false | "in" | "up">(false);
   // Links in account emails: #reset=<token> and #verify=<token>.
   const [resetToken, setResetToken] = React.useState<string | null>(null);
@@ -109,6 +109,7 @@ function Root() {
     })
       .then(async (res) => {
         const data = await res.json().catch(() => null);
+        if (res.ok) window.dispatchEvent(new Event("bounty:auth-changed"));
         setConfirmed(
           res.ok
             ? { ok: true, text: "Thanks, your email " + (data?.email ?? "") + " is confirmed." }
@@ -121,9 +122,9 @@ function Root() {
     fetch("/api/auth/me")
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
-        if (data?.required)
+        if (typeof data?.required === "boolean")
           setAuth({
-            required: true,
+            required: data.required,
             inviteOpen: Boolean(data.inviteOpen),
             member: data.user ?? null,
             operator: data.operator === true,
@@ -135,13 +136,17 @@ function Root() {
     refresh();
     const open = () => setSigningIn("in");
     window.addEventListener(SIGN_IN_EVENT, open);
-    return () => window.removeEventListener(SIGN_IN_EVENT, open);
+    window.addEventListener("bounty:auth-changed", refresh);
+    return () => {
+      window.removeEventListener(SIGN_IN_EVENT, open);
+      window.removeEventListener("bounty:auth-changed", refresh);
+    };
   }, [refresh]);
   const close = React.useCallback(() => setSigningIn(false), []);
   return (
     <>
       <ProtoApp
-        legacy={legacy}
+        legacy={(view) => legacy(view, auth.operator)}
         operator={auth.operator}
         account={
           auth.required

@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { createServer } from 'node:net';
+import { accountCases } from './account-transaction-cases.mjs';
 import { postgresKeepStore } from '../apps/server/keep.mjs';
 
 const { default: EmbeddedPostgres } = await import(process.env.BOUNTY_PG_LAB_MODULE || 'embedded-postgres');
@@ -121,6 +122,12 @@ test('isolated native PostgreSQL durability lab', { timeout: 60000 }, async (t) 
     assert.deepEqual(await sr.snapshot(), original);
     await reader.query('DROP TRIGGER pause_synthetic ON bounty_keep_files');
     assert.equal(await sr.commit(1, [file('db', 'retry')], []), 2);
+  });
+
+  await t.test('accounts and snapshots commit or recover together, including a lost commit acknowledgement', async (sub) => {
+    await admin.query('CREATE SCHEMA synthetic_accounts');
+    const client = await connect('synthetic_accounts');
+    await accountCases(sub, { connect: () => connect('synthetic_accounts'), query: query(client) });
   });
 
   await t.test('a full database process restart preserves only committed snapshots', async () => {

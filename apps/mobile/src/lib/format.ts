@@ -14,10 +14,12 @@ export const percent = (share: number) =>
 
 /** Pounds typed by a person ("£4.50", "4,50" is refused) as pence, or null. */
 export function poundsText(text: string): number | null {
-  const t = text.trim().replace(/[£,\s]/g, "");
-  if (!t) return null;
-  const n = Number(t);
-  return Number.isFinite(n) && n > 0 ? toPence(n) : null;
+  const t = text.trim().replace(/^£\s*/, "");
+  // Only correctly grouped British thousands and up to two decimal places.
+  if (!/^(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d{1,2})?$/.test(t)) return null;
+  const [whole, fraction = ""] = t.replaceAll(",", "").split(".");
+  const pence = Number(whole) * 100 + Number(fraction.padEnd(2, "0"));
+  return Number.isSafeInteger(pence) && pence > 0 ? pence : null;
 }
 
 const ukDateTime = new Intl.DateTimeFormat("en-GB", {

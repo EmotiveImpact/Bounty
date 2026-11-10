@@ -148,7 +148,7 @@ export function routes(db, members = null, { now = () => new Date() } = {}) {
         const before = await members.plan(user.id);
         const row = await members.setPlan(user.id, id, id && before?.plan ? before.since : since);
         // The plan's tip timing reaches the linked scout profile now.
-        applyPlanTier(db, user.email, id ? planById(id).tipTier : null);
+        applyPlanTier(db, user.email, id ? planById(id).tipTier : null, id ? planById(id).areas : 0);
         return { current: describeChoice(row) };
       },
     ],

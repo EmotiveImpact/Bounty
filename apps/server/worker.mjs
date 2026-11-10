@@ -141,34 +141,35 @@ async function main() {
     process.exitCode = 2;
     return;
   }
-  const { database } = await import("./db.mjs");
-  const db = database();
-  try {
-    const { saved, fetched } = await importOpenPrices(db, { ...options, log: console.error });
-    console.log(
-      `Imported ${saved} UK observations from ${fetched} GBP Open Prices records ` +
-        `(${options.pages} page${options.pages === 1 ? "" : "s"}). Data: Open Prices, ODbL.`,
-    );
-    // New prices reach open bounties at once (see research.mjs).
-    // The estimate is worked out again for each, not only the blockers.
-    const { refreshOpenBounties } = await import("./routes-bounties.mjs");
-    let out;
+  const { withWorkingData } = await import("./working-data.mjs");
+  return withWorkingData(async (db) => {
     try {
-      out = await refreshOpenBounties(db, { now: new Date().toISOString() });
-    } catch (error) {
-      console.error(`Imported, but open bounties could not be re-checked: ${error.message}`);
-      process.exitCode = 1;
-      return;
-    }
-    if (out.stopped.length || out.reopened.length || out.heldBack.length || out.failed.length)
+      const { saved, fetched } = await importOpenPrices(db, { ...options, log: console.error });
       console.log(
-        `Re-checked open bounties: ${out.stopped.length} stopped, ${out.reopened.length} open again, ` +
-          `${out.heldBack.length} with claim holders told to stop, ${out.failed.length} not worked out again.`,
+        `Imported ${saved} UK observations from ${fetched} GBP Open Prices records ` +
+          `(${options.pages} page${options.pages === 1 ? "" : "s"}). Data: Open Prices, ODbL.`,
       );
-  } catch (error) {
-    console.error("Open Prices import failed: " + error.message + (error.saved ? ` (${error.saved} rows saved before the failure)` : ""));
-    process.exitCode = 1;
-  }
+      // New prices reach open bounties at once (see research.mjs).
+      // The estimate is worked out again for each, not only the blockers.
+      const { refreshOpenBounties } = await import("./routes-bounties.mjs");
+      let out;
+      try {
+        out = await refreshOpenBounties(db, { now: new Date().toISOString() });
+      } catch (error) {
+        console.error(`Imported, but open bounties could not be re-checked: ${error.message}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (out.stopped.length || out.reopened.length || out.heldBack.length || out.failed.length)
+        console.log(
+          `Re-checked open bounties: ${out.stopped.length} stopped, ${out.reopened.length} open again, ` +
+            `${out.heldBack.length} with claim holders told to stop, ${out.failed.length} not worked out again.`,
+        );
+    } catch (error) {
+      console.error("Open Prices import failed: " + error.message + (error.saved ? ` (${error.saved} rows saved before the failure)` : ""));
+      process.exitCode = 1;
+    }
+  });
 }
 
 if (import.meta.main ?? import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();

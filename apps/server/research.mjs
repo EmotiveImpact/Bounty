@@ -246,50 +246,51 @@ async function main() {
     process.exitCode = 2;
     return;
   }
-  const { database } = await import("./db.mjs");
-  const db = database();
-  const { provider, input, refresh } = args;
-  try {
-    if (FILE_PROVIDERS.includes(provider)) {
-      if (isFixture(input)) throw Error("Refusing to import a test fixture as live evidence: " + input);
-      const { saved, parsed, skipped, withoutSeller } = importFile(db, provider, await readFile(input, "utf8"), { name: input });
-      console.log(
-        `Saved ${saved} ${provider} research rows` +
-          (provider === "awin"
-            ? ` from ${parsed} GBP feed rows` + (skipped ? ` (${skipped} skipped: missing id or title, or no positive price)` : "")
-            : "") +
-          ". Reload Research and Sources to see them.",
-      );
-      if (provider === "awin")
+  const { withWorkingData } = await import("./working-data.mjs");
+  return withWorkingData(async (db) => {
+    const { provider, input, refresh } = args;
+    try {
+      if (FILE_PROVIDERS.includes(provider)) {
+        if (isFixture(input)) throw Error("Refusing to import a test fixture as live evidence: " + input);
+        const { saved, parsed, skipped, withoutSeller } = importFile(db, provider, await readFile(input, "utf8"), { name: input });
         console.log(
-          "Feed rows are online offers. They never confirm branch stock, and the feed gives no pack count, so pack stays unknown until you confirm it.",
+          `Saved ${saved} ${provider} research rows` +
+            (provider === "awin"
+              ? ` from ${parsed} GBP feed rows` + (skipped ? ` (${skipped} skipped: missing id or title, or no positive price)` : "")
+              : "") +
+            ". Reload Research and Sources to see them.",
         );
-      if (withoutSeller)
+        if (provider === "awin")
+          console.log(
+            "Feed rows are online offers. They never confirm branch stock, and the feed gives no pack count, so pack stays unknown until you confirm it.",
+          );
+        if (withoutSeller)
+          console.log(
+            `${withoutSeller} of ${saved} sales have no seller name (a listing id is not a seller), so they do not count as independent sales.`,
+          );
+        await recheckBounties(db);
+        return;
+      }
+      const result = await importLookup(db, provider, input, { refresh });
+      const name = sourceFor(provider).name;
+      if (result.cached)
         console.log(
-          `${withoutSeller} of ${saved} sales have no seller name (a listing id is not a seller), so they do not count as independent sales.`,
+          `Reused ${result.rows.length} ${name} rows from the lookup at ${result.fetched}. ` +
+            `No network call was made; the cache lasts until ${result.expires}. Pass --refresh to fetch again.`,
         );
-      await recheckBounties(db);
-      return;
+      else
+        console.log(
+          `Saved ${result.saved} ${name} rows from a live lookup at ${result.fetched}. ` +
+            `Repeats of this query reuse them until ${result.expires} unless you pass --refresh.`,
+        );
+      if (provider === "ebay")
+        console.log("These are active asking prices. They are competition evidence, never sales.");
+      if (!result.cached) await recheckBounties(db);
+    } catch (error) {
+      console.error(provider + " import failed: " + error.message);
+      process.exitCode = 1;
     }
-    const result = await importLookup(db, provider, input, { refresh });
-    const name = sourceFor(provider).name;
-    if (result.cached)
-      console.log(
-        `Reused ${result.rows.length} ${name} rows from the lookup at ${result.fetched}. ` +
-          `No network call was made; the cache lasts until ${result.expires}. Pass --refresh to fetch again.`,
-      );
-    else
-      console.log(
-        `Saved ${result.saved} ${name} rows from a live lookup at ${result.fetched}. ` +
-          `Repeats of this query reuse them until ${result.expires} unless you pass --refresh.`,
-      );
-    if (provider === "ebay")
-      console.log("These are active asking prices. They are competition evidence, never sales.");
-    if (!result.cached) await recheckBounties(db);
-  } catch (error) {
-    console.error(provider + " import failed: " + error.message);
-    process.exitCode = 1;
-  }
+  });
 }
 
 if (import.meta.main ?? import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
