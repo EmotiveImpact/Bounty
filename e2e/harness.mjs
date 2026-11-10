@@ -133,6 +133,9 @@ export async function atWidths(browser, url, fn, widths = [390, 1280]) {
       }
     });
     await page.goto(url);
+    // The app now waits for its authoritative session before mounting. Let
+    // local-mode screens initialise before a test deliberately clears drafts.
+    await page.getByRole("button", { name: "Your account", exact: true }).waitFor();
     await fn(page, width);
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     await page.close();
