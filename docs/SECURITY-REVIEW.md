@@ -8,6 +8,7 @@ No merge, deployment, live customer records, production probing or account chang
 
 | Finding | Severity and evidence | Correction and verification |
 | --- | --- | --- |
+| Stale scout ownership after email reuse | High confidentiality risk. Reproduced with two synthetic instances: after deletion and re-registration, the second instance returned the previous owner’s private scout profile during its five-second cache interval. | Every hosted account request checks the current snapshot version, reads included. Failed freshness checks refuse the request. Regression proves a new account with the reused email receives no old profile. The synthetic account store now allocates monotonically increasing IDs like PostgreSQL. |
 | Slow POST owns the global write lock before its body arrives | High availability risk. Reproduced on the parent: a partial loopback request entered the account transaction and blocked an unrelated read. | `request-intake.mjs` buffers the complete body before entering the snapshot queue. Ten-second total intake deadline, 7 MiB per body, 16 MiB combined buffered data and 32 pending requests per instance. Existing tighter route limits still apply. Regression proves unrelated reads continue; slow, oversized, interrupted and capacity-exhausting requests release their reservation. |
 | Database lock waits have no application limit | Availability hardening. No production lock exhaustion claimed. | Request transactions set a five-second lock timeout and fifteen-second statement/idle transaction timeouts. Failures roll back through the existing durable-response boundary. The native PostgreSQL test holds the actual advisory lock, confirms the waiter times out without running its action, then proves a retry succeeds. |
 | Failed web sign-out is displayed as success | High on a shared device. Source confirmed; browser reproduction and corrected-path results are recorded in CI. The previous UI ignored network errors and HTTP failures. | Only a successful server response completes sign-out. Failed requests retain the identity and display an explicit warning that the session may still be active. |
@@ -22,7 +23,7 @@ No merge, deployment, live customer records, production probing or account chang
 
 Local synthetic checks on this branch:
 
-- `npm test`: 659 passed, zero failed/skipped.
+- `npm test`: 660 passed, zero failed/skipped.
 - `npm run build`: passed. Existing large-bundle notice remains.
 - Native PostgreSQL lab: seven passed, including concurrent sessions, killed backend, lost commit acknowledgement and process restart.
 - Mobile Expo 58 lint, TypeScript and web export: passed. Export used loopback port 9 as its API URL and did not contact production.
@@ -40,7 +41,7 @@ Receipt uploads use restricted formats, magic-byte checks, bounded sizes and has
 
 ## Remaining release and operational risks
 
-1. Obtain explicit approval for an isolated Neon/Vercel staging acceptance run, then test cold starts, actual proxy/cookie behaviour, duplicate retries, concurrent instances and the configured time/size limits with synthetic records. A slow 5 MiB photo may now need a retry on poor mobile connections.
+1. Obtain explicit approval for an isolated Neon/Vercel staging acceptance run, then test cold starts, actual proxy/cookie behaviour, duplicate retries, concurrent instances and the configured time/size limits with synthetic records. A slow 5 MiB photo may now need a retry on poor mobile connections. Freshness checks on every account read add Neon traffic and latency; validate this pilot trade-off.
 2. Validate native iPhone/Android packaging, cookie persistence, logout/account switching, background/resume and camera journeys. The mobile dependency overrides passed static checks and web bundling, not a signed native release.
 3. Existing unscoped browser drafts are preserved but hidden on hosted accounts because ownership is unknown. Confirm a member-led migration/export path before rollout. Never assign them automatically. Scoped browser storage is UI isolation, not encryption against someone with browser-profile or same-origin script access.
 4. Review live hosting access, GitHub/Vercel/Neon administrator MFA, least-privilege database credentials, preview isolation, audit logs and secret rotation separately. Nothing in this source review establishes whether a deployment has been compromised.

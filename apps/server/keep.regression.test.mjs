@@ -404,3 +404,27 @@ test('security: partial body expires with 408 and a later write succeeds', async
   assert.equal(entered, 0);
   assert.equal((await a.call('POST', undefined, goal('After slow sender'))).status, 201);
 });
+
+test('security: an account reusing a deleted email cannot read the old cached scout profile', async (t) => {
+  const { accounts } = await import('./accounts.mjs');
+  const { memoryAccountsStore } = await import('./test-support.mjs');
+  const accountStore = memoryAccountsStore();
+  const members = accounts(accountStore, { inviteCode: 'synthetic' });
+  const snapshots = memoryStore();
+  // Fixed clock keeps the other instance inside the old five-second cache.
+  const options = { members, transaction: fn => fn(), now: () => 100000 };
+  const a = await instance(t, snapshots, options);
+  const b = await instance(t, snapshots, options);
+  const credentials = { email: 'reused@example.test', password: 'synthetic password', invite: 'synthetic' };
+  const first = await a.call('POST', '/api/auth/signup', credentials);
+  const cookie = { Cookie: first.headers.get('set-cookie').split(';')[0] };
+  assert.equal((await a.call('POST', '/api/members', { name: 'Private previous scout', sellerName: 'previous-seller' }, cookie)).status, 201);
+  assert.equal((await b.call('GET', '/api/members/me', undefined, cookie)).body.member.name, 'Private previous scout');
+  assert.equal((await a.call('POST', '/api/account/delete', { password: credentials.password }, cookie)).status, 200);
+  const replacement = await a.call('POST', '/api/auth/signup', credentials);
+  assert.notEqual(replacement.body.user.id, first.body.user.id);
+  const nextCookie = { Cookie: replacement.headers.get('set-cookie').split(';')[0] };
+  const read = await b.call('GET', '/api/members/me', undefined, nextCookie);
+  assert.equal(read.status, 200);
+  assert.equal(read.body.member, null, 'cached email ownership must not disclose the previous member');
+});

@@ -181,7 +181,10 @@ export function keepForGood({ store, dir, build, log = console.error, checkEvery
     return serial(async () => {
       try {
         await readyInsideQueue();
-        await freshen(!READS.has(req.method));
+        // Snapshot-derived ownership may have changed on another instance.
+        // Hosted accounts must not authorise a read using a cached email map
+        // after deletion/re-registration or an email change.
+        await freshen(Boolean(transaction) || !READS.has(req.method));
         const response = bufferedResponse(maxResponseBytes);
         const run = async () => {
           const path = new URL(req.url, "http://localhost").pathname;
