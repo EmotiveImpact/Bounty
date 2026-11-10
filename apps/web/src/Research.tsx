@@ -50,10 +50,10 @@ const PAGE = 50;
 
 /** Research for members: the six-step check. The evidence register and the
     audit sign-off are operator tools and live on the Admin page. */
-export default function Research({ onAuditDraft }: { onAuditDraft?: (d: AuditDraft) => void } = {}) {
+export default function Research({ onAuditDraft, operator = false }: { onAuditDraft?: (d: AuditDraft) => void; operator?: boolean } = {}) {
   return (
     <section className="research">
-      <ResearchCalculator onAuditDraft={onAuditDraft} />
+      <ResearchCalculator onAuditDraft={onAuditDraft} operator={operator} />
     </section>
   );
 }

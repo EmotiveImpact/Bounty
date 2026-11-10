@@ -8,6 +8,7 @@ All tests use synthetic accounts, receipts, SQLite files and disposable PostgreS
 
 | Finding | Controlled evidence | Correction |
 | --- | --- | --- |
+| Admin UI before role lookup | Code review found the initial browser role defaulted to operator | Default to no Admin access until the server confirms the role; hide operator-only research controls from members; refresh the role after mailbox verification |
 | Private operator reads | Signed-out permissions/evidence requests returned 200; permissions included a seeded private note | Evidence, permissions, checks and audit reads require an authenticated operator |
 | Operator impersonation through URL | PR #31 returned 200 for signed-out `GET /api/bounties?viewer=operator` | Hosted viewer identity comes from the session; a query parameter cannot select another role or scout |
 | Unverified operator email | PR #31 returned 200 from `/api/sources` after an unverified signup using an allowlisted address | Admin requires a configured email and verified mailbox ownership; changing email removes verification |
@@ -46,7 +47,7 @@ Mail is an external side effect. It runs after commit, with a ten-second request
 - New HTTP tests cover operator/private-read denial, verified operator identity, profile ownership, alert limits, atomic purchase validation, concurrent retries and database reopen.
 - New unit tests cover nested transaction boundaries, deferred email, an explicit ROLLBACK command tag, failed actions and CLI import recovery.
 - The new operator-view and no-plan-area tests were run before their fixes and failed with HTTP 200/201 instead of refusal. A separate synthetic PR #31 checkout confirmed the four privacy/privilege failures above.
-- Browser suite runs in GitHub Actions. Local Chromium remains unavailable because this environment denies its singleton socket. Check the actual PR run for browser evidence; the workflow itself is not a passing result.
+- [GitHub run 42801030660](https://github.com/EmotiveImpact/Bounty/actions/runs/42801030660) passed all checks at `5a944a10548a116b8dbb5f080521d36980c441fe`, including all 16 browser tests. A further browser regression now checks that pending or ordinary-member role lookup cannot expose Admin. Check the latest PR run for that added test. Local Chromium remains unavailable because this environment denies its singleton socket.
 
 Run the native lab using the command in [DURABLE-WRITES.md](DURABLE-WRITES.md). It always creates a disposable loopback PostgreSQL cluster and never reads a production connection string. The PR workflow also runs mobile lint/type checks without deployment credentials.
 

@@ -975,9 +975,10 @@ export function clearResearchDraft() {
   }
 }
 export function ResearchCalculator({
-  onAuditDraft,
+  onAuditDraft, operator = false,
 }: {
   onAuditDraft?: (draft: AuditDraft) => void;
+  operator?: boolean;
 }) {
   // Restored once, on mount, from this browser tab's saved draft.
   const [restored] = useState(loadDraft);
@@ -1577,7 +1578,7 @@ export function ResearchCalculator({
           {error && <p role="alert">{error}</p>}
           {estimate && <Result estimate={estimate} stale={stale} />}
 
-          {estimate && (
+          {estimate && operator && (
             <StockCheckForm
               key={key(estimate.offer.provider, estimate.offer.sourceId)}
               offer={estimate.offer}
@@ -1599,9 +1600,9 @@ export function ResearchCalculator({
               >
                 Track in ledger
               </button>
-              <button type="button" onClick={draftBounty} disabled={!current}>
+              {operator && <button type="button" onClick={draftBounty} disabled={!current}>
                 Draft a bounty
-              </button>
+              </button>}
               {onAuditDraft && (
                 <button type="button" onClick={auditDraft} disabled={!current}>
                   Add to validation audit

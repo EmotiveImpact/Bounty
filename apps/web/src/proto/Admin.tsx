@@ -195,6 +195,7 @@ export default function Admin() {
             label: "Check for audit",
             content: wrap(
               <Research
+                operator
                 onAuditDraft={(d) => {
                   setDraft(d as AuditHandover);
                   setTab("audit");
