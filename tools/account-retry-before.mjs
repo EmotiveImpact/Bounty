@@ -12,14 +12,15 @@ try {
   execFileSync('git', ['archive', '--output=' + archive, parent]);
   execFileSync('tar', ['-xf', archive, '-C', before]); rmSync(archive);
   symlinkSync(resolve('node_modules'), join(before, 'node_modules'), 'dir');
-  copyFileSync(resolve('apps/server/ledger-retry.test.mjs'), join(before, 'apps/server/ledger-retry.test.mjs'));
-  const run = spawnSync(process.execPath, ['--test', '--test-reporter=tap', 'apps/server/ledger-retry.test.mjs'], {
+  for (const name of ['ledger-retry.test.mjs', 'proof-recovery.test.mjs'])
+    copyFileSync(resolve('apps/server', name), join(before, 'apps/server', name));
+  const run = spawnSync(process.execPath, ['--test', '--test-reporter=tap', 'apps/server/ledger-retry.test.mjs', 'apps/server/proof-recovery.test.mjs'], {
     cwd: before, encoding: 'utf8', timeout: 30000,
     env: { ...process.env, DATABASE_URL: '', BOUNTY_KEEP_DATA: 'off' },
   });
   process.stdout.write(run.stdout || ''); process.stderr.write(run.stderr || '');
   assert.equal(run.status, 1);
-  assert.match(run.stdout, /# fail 4\b/); assert.match(run.stdout, /# skipped 0\b/);
+  assert.match(run.stdout, /# fail 6\b/); assert.match(run.stdout, /# skipped 0\b/);
 
   // Execute the original provider with a deterministic hook scheduler. This
   // reproduces JavaScript state transitions, not native navigation or cookies.
@@ -57,5 +58,5 @@ try {
   await new Promise(resolve => setImmediate(resolve));
   offline = true; await offlineRender().refresh();
   assert.equal(offlineRender().signedIn, true, 'parent retains private identity after failed revalidation');
-  console.log('Confirmed 4 ledger regressions and 2 mobile provider state failures on pinned PR #33. Native-device behaviour remains unverified.');
+  console.log('Confirmed 4 ledger regressions, 2 proof storage failures and 2 mobile provider state failures on pinned PR #33. Native-device behaviour remains unverified.');
 } finally { rmSync(before, { recursive: true, force: true }); }

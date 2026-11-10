@@ -11,12 +11,13 @@ PR #34 builds on draft PR #33 (parent `a6c501da48984869027285aa31d850336e20e700`
 | Failed mobile session check retains private identity | Original provider executed with an unavailable fake account API. | A failed check removes private identity and shows a reconnect/retry screen. Account-ID keys remount screens and menus after identity changes. Failed sign-out remains an explicit error. |
 | Stock amount field silently accepts malformed comma prices | The old form removes every comma before converting pounds; `1,2` becomes £12. | Use the existing strict pounds parser in Stock, full ledger records and trip completion. Browser regression covers rejection without a record being created. |
 | Proof upload failure says the already-recorded entry was not saved | The entry and optional proof are separate requests; the previous catch displayed “Not saved”. | Explain that the entry exists and the proof failed. Same-form retry uses the existing entry ID through server deduplication. |
+| Truncated receipt files and symbolic links are accepted by filename alone | Two controlled synthetic tests fail on the pinned parent. A partial PDF is acknowledged, and a linked file can have its target permissions changed. | Verify an existing regular file through a no-follow descriptor, checking size and SHA-256 before accepting it. Preserve suspect bytes and refuse the upload. |
 | Tiny input chunks escape byte-only memory accounting | Each chunk retains an array entry and promise callback regardless of byte size. Synthetic tiny/empty chunk tests exercise the new bound. | Cap chunks at 4,096 per request in addition to existing byte, count and time limits. Release reservations on rejection; normal subsequent requests work. |
 
 ## Verification
 
-- `npm test`: 672 passed, zero failed/skipped, including four new ledger, seven mobile session and one fragmented-body regression.
-- `node tools/account-retry-before.mjs`: four ledger failures and two mobile provider state failures reproduced on pinned PR #33. The script expects those failures, uses a temporary checkout, and makes no external API requests.
+- `npm test`: 674 passed, zero failed/skipped, including four new ledger, two proof-storage, seven mobile session and one fragmented-body regression.
+- `node tools/account-retry-before.mjs`: four ledger failures, two proof-storage failures and two mobile provider state failures reproduced on pinned PR #33. The script expects those failures, uses a temporary checkout, and makes no external API requests.
 - Native PostgreSQL lab: seven passed, including interrupted saves, stale concurrent snapshots, lost commit acknowledgements, lock timeouts and database restart.
 - Web TypeScript and Vite build passed. Existing bundle-size warning remains.
 - Mobile Expo 58 lint, TypeScript and isolated web export passed. Export API points to loopback port 9.
@@ -33,3 +34,5 @@ Mobile provider state and navigation wiring were checked locally; native iOS/And
 Request chunk caps bound per-request object overhead; they are not distributed denial-of-service protection. Invitation guessing, rotating-address abuse and deliberate password-budget exhaustion still need an edge/trusted-client strategy. Arbitrary forwarded-IP headers must not be trusted. Hosted firewall/rate-limit configuration, repository/hosting MFA and access review, isolated Neon staging acceptance and backup restoration drills remain unverified and require separately proposed actions and approval before any deployment or live change.
 
 The new SQLite request table is additive. No existing accounts, receipts, Stock or Money rows are rewritten or deleted. Review PRs in order #31, #32, #33, #34. No PR is approved for deployment merely because synthetic tests pass.
+
+Proof verification refuses existing partial/corrupt files instead of silently accepting or overwriting them. Recovery of a suspect real receipt needs a reviewed action with a backup. This is not a claim of atomic local-filesystem publication or a physical power-loss test; the hosted durability boundary remains the acknowledged Neon transaction.
