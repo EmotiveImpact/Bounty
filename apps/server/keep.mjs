@@ -6,6 +6,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSy
 import { dirname, join, relative, sep } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 
+import { requestIntake, rejectIntake } from "./request-intake.mjs";
+
 const READS = new Set(["GET", "HEAD", "OPTIONS"]);
 const SKIP = /-(wal|shm|journal)$/;
 const digest = (buf) => createHash("sha256").update(buf).digest("hex");
@@ -54,7 +56,9 @@ function bufferedResponse(limit) {
  */
 export function keepForGood({ store, dir, build, log = console.error, checkEvery = 5000, now = Date.now,
   transaction = null,
+  intakeOptions = {},
   maxResponseBytes = 16 * 1024 * 1024 }) {
+  const receive = requestIntake(intakeOptions);
   let current = null;
   let restored = false;
   let version = 0;
@@ -169,11 +173,18 @@ export function keepForGood({ store, dir, build, log = console.error, checkEvery
     try { invalidate(); } catch (error) { log("Bounty keep: close failed: " + error.message); }
   }
 
-  function handle(req, res) {
+  async function handle(incoming, res) {
+    let intake;
+    try { intake = await receive(incoming); }
+    catch (error) { rejectIntake(incoming, res, error); return; }
+    const req = intake.req;
     return serial(async () => {
       try {
         await readyInsideQueue();
-        await freshen(!READS.has(req.method));
+        // Snapshot-derived ownership may have changed on another instance.
+        // Hosted accounts must not authorise a read using a cached email map
+        // after deletion/re-registration or an email change.
+        await freshen(Boolean(transaction) || !READS.has(req.method));
         const response = bufferedResponse(maxResponseBytes);
         const run = async () => {
           const path = new URL(req.url, "http://localhost").pathname;
@@ -208,7 +219,7 @@ export function keepForGood({ store, dir, build, log = console.error, checkEvery
             : "We could not confirm this request completed. Check your records before trying again.",
         }));
       }
-    });
+    }).finally(intake.release);
   }
 
   function change(fn) {

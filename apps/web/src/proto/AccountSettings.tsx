@@ -29,6 +29,7 @@ export default function AccountSettings({ onSignedOut, onEmailChanged }: { onSig
   const [account, setAccount] = useState<Account | null>(null);
   const [open, setOpen] = useState<Open>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [noteError, setNoteError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [current, setCurrent] = useState("");
@@ -46,6 +47,7 @@ export default function AccountSettings({ onSignedOut, onEmailChanged }: { onSig
 
   const show = (o: Open) => {
     setOpen(o);
+    setNoteError(false);
     setError(null);
     setCurrent("");
     setNext("");
@@ -65,12 +67,18 @@ export default function AccountSettings({ onSignedOut, onEmailChanged }: { onSig
   }
 
   async function resend() {
-    const data = await call("/verify/send", {}).catch(() => null);
-    setNote(
-      data?.queued ? "Verification email requested. Check your inbox; if it does not arrive, try again." : data?.sent
-        ? "We’ve sent a new link to " + account?.email + ". It works for 7 days."
-        : data?.mailOn ? "The email was not sent. Please try again." : "Email is not switched on yet.",
-    );
+    setNoteError(false);
+    try {
+      const data = await call("/verify/send", {});
+      setNote(
+        data?.queued ? "Verification email requested. Check your inbox; if it does not arrive, try again." : data?.sent
+          ? "We’ve sent a new link to " + account?.email + ". It works for 7 days."
+          : data?.mailOn ? "The email was not sent. Please try again." : "Email is not switched on yet.",
+      );
+    } catch (error) {
+      setNoteError(true);
+      setNote(error instanceof Error ? error.message : "The email request failed. Please try again.");
+    }
   }
 
   async function download() {
@@ -88,7 +96,7 @@ export default function AccountSettings({ onSignedOut, onEmailChanged }: { onSig
   return (
     <Section title="Your account" lead="Sign-in details, your data and your account.">
       <Card>
-        {note && <Notice tone="profit">{note}</Notice>}
+        {note && <Notice tone={noteError ? "warn" : "profit"}>{note}</Notice>}
         <Rows>
           <Row
             title={account.email}

@@ -18,6 +18,9 @@ export function accountTransactions({ connect, query, log = console.error }) {
       let committed = false;
       try {
         await client.query('BEGIN');
+        await client.query("SET LOCAL lock_timeout = '5s'");
+        await client.query("SET LOCAL statement_timeout = '15s'");
+        await client.query("SET LOCAL idle_in_transaction_session_timeout = '15s'");
         // Account operations also use this lock outside the snapshot wrapper.
         // It prevents a password confirmation racing a reset or email change.
         await client.query('SELECT pg_advisory_xact_lock(176903, 1)');

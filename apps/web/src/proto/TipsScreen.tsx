@@ -1,3 +1,4 @@
+import { privateLocal } from "../private-storage";
 // Tips, built from the building blocks (src/ui/kit.tsx): a feed of shelf
 // tips from other scouts, each with the one thing to know first (what you
 // keep, places left, when the shelf was last seen) and one main button.
@@ -53,7 +54,7 @@ function ago(iso: string | null) {
 }
 function readActing(): number | null {
   try {
-    const v = localStorage.getItem(ACTING_KEY);
+    const v = privateLocal.getItem(ACTING_KEY);
     return v && /^\d+$/.test(v) ? Number(v) : null;
   } catch {
     return null;
@@ -61,7 +62,7 @@ function readActing(): number | null {
 }
 function writeActing(id: number) {
   try {
-    localStorage.setItem(ACTING_KEY, String(id));
+    privateLocal.setItem(ACTING_KEY, String(id));
   } catch {
     // Still works for this visit.
   }

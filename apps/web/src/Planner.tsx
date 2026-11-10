@@ -1,3 +1,4 @@
+import { privateLocal } from "./private-storage";
 import React, { useEffect, useRef, useState } from "react";
 import {
   api,
@@ -468,7 +469,7 @@ const limitText = (t: Trip) => {
 const ACCESS_KEY = "bounty-access-hide";
 function loadHidden(): string[] {
   try {
-    const saved = JSON.parse(localStorage.getItem(ACCESS_KEY) || "[]");
+    const saved = JSON.parse(privateLocal.getItem(ACCESS_KEY) || "[]");
     return Array.isArray(saved) ? saved.filter((s) => typeof s === "string") : [];
   } catch {
     return [];
@@ -476,7 +477,7 @@ function loadHidden(): string[] {
 }
 function saveHidden(ids: string[]) {
   try {
-    localStorage.setItem(ACCESS_KEY, JSON.stringify(ids));
+    privateLocal.setItem(ACCESS_KEY, JSON.stringify(ids));
   } catch {
     /* storage unavailable: the filter lasts for this visit only */
   }

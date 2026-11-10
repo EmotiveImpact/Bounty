@@ -284,6 +284,7 @@ export function accounts(store, { inviteCode = null, now = () => Date.now(), mai
   }
 
   const publicUser = (user) => ({
+    id: String(user.id),
     email: user.email,
     name: user.name || null,
     ...(user.verified === undefined ? {} : { verified: Boolean(user.verified) }),
@@ -317,6 +318,9 @@ export function accounts(store, { inviteCode = null, now = () => Date.now(), mai
   }
 
   async function sendVerify(user, origin) {
+    if (!mail.on) return false;
+    if (!(await store.consumeLimit(limitKey("verify-email", user.email), now(), 3600000, 3)))
+      throw new HttpError(429, "Too many confirmation emails. Try again in an hour.");
     const token = await makeToken(user, "verify", VERIFY_DAYS * 86400000);
     const link = `${origin}/#verify=${token}`;
     return mail.send({

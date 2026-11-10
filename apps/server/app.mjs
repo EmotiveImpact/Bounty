@@ -220,7 +220,7 @@ export function createApi(
         };
       }
       if (post && path === "/api/account/verify/send") {
-        const sent = await members.sendVerify(user, origin(secure)).catch(() => false);
+        const sent = await members.sendVerify(user, origin(secure));
         return { status: 200, body: { sent: members.mailQueued ? false : sent, ...(members.mailQueued && sent ? { queued: true } : {}), mailOn: Boolean(members.mailOn) } };
       }
       if (post && path === "/api/account/password") {

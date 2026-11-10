@@ -1,3 +1,4 @@
+import { privateLocal } from "../private-storage";
 import React, {
   useCallback,
   useEffect,
@@ -190,7 +191,7 @@ const keepWord = (d: Deal) =>
 
 function load<T>(key: string, fallback: T): T {
   try {
-    const raw = localStorage.getItem(key);
+    const raw = privateLocal.getItem(key);
     return raw === null ? fallback : (JSON.parse(raw) as T);
   } catch {
     return fallback;
@@ -198,8 +199,8 @@ function load<T>(key: string, fallback: T): T {
 }
 function store(key: string, value: unknown) {
   try {
-    if (value === null) localStorage.removeItem(key);
-    else localStorage.setItem(key, JSON.stringify(value));
+    if (value === null) privateLocal.removeItem(key);
+    else privateLocal.setItem(key, JSON.stringify(value));
   } catch {
     // Private windows may refuse storage; it lasts for this visit only.
   }

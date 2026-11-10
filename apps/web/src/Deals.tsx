@@ -1,3 +1,4 @@
+import { privateLocal } from "./private-storage";
 import { loadProfile } from "./api";
 import type { Verdict } from "./Verdict";
 
@@ -54,7 +55,7 @@ export type Deal = {
 export function savedExtras(): Record<string, unknown> {
   let saved = false;
   try {
-    saved = localStorage.getItem("bounty-profile") !== null;
+    saved = privateLocal.getItem("bounty-profile") !== null;
   } catch {
     saved = false;
   }

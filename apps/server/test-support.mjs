@@ -39,6 +39,7 @@ export async function serve(db, modules, options = {}) {
 // The same shape as postgresStore, kept in memory.
 export function memoryAccountsStore() {
   const users = [];
+  let nextUserId = 1;
   const sessions = new Map();
   return {
     users,
@@ -58,7 +59,7 @@ export function memoryAccountsStore() {
     },
     async createUser({ email, name, passwordHash }) {
       if (users.some((u) => u.email === email)) return null;
-      const user = { id: users.length + 1, email, name, password_hash: passwordHash };
+      const user = { id: nextUserId++, email, name, password_hash: passwordHash };
       users.push(user);
       return { id: user.id, email, name };
     },

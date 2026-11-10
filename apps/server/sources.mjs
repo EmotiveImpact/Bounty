@@ -308,6 +308,8 @@ export function awin(text) {
     trim: true,
     columns: (header) => {
       const names = header.map((h) => String(h).trim());
+      if (new Set(names).size !== names.length || names.some(name => ["__proto__", "prototype", "constructor"].includes(name)))
+        throw Error("Invalid Awin feed columns: duplicate or reserved name");
       const missing = AWIN_REQUIRED.filter((k) => !names.includes(k));
       if (missing.length)
         throw Error("Invalid Awin feed columns: missing " + missing.join(", "));

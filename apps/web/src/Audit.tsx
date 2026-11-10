@@ -1,3 +1,4 @@
+import { privateLocal } from "./private-storage";
 import { useEffect, useState, type FormEvent } from "react";
 import { api, barcodeText, dateTime, initialProfile, money, toPence } from "./api";
 import type { AuditDraft, StockCheck } from "./ResearchCalculator";
@@ -189,7 +190,7 @@ function blankTripInputs(inputs: Record<string, unknown> | null): string[] {
 const LOCALITY_KEY = "bounty-audit-pilot-locality";
 export function loadPilotLocality(): string {
   try {
-    const value = localStorage.getItem(LOCALITY_KEY);
+    const value = privateLocal.getItem(LOCALITY_KEY);
     return typeof value === "string" ? value : "";
   } catch {
     return "";
@@ -197,8 +198,8 @@ export function loadPilotLocality(): string {
 }
 function savePilotLocality(value: string) {
   try {
-    if (value.trim()) localStorage.setItem(LOCALITY_KEY, value.trim());
-    else localStorage.removeItem(LOCALITY_KEY);
+    if (value.trim()) privateLocal.setItem(LOCALITY_KEY, value.trim());
+    else privateLocal.removeItem(LOCALITY_KEY);
   } catch {
     // Storage unavailable: the setting lasts for this visit only.
   }

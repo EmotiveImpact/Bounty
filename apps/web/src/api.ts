@@ -1,3 +1,4 @@
+import { privateLocal } from "./private-storage";
 // Shared client helpers. All money from the API is integer pence.
 
 /** Fired when the API needs a signed-in member; main.tsx opens sign-in. */
@@ -133,7 +134,7 @@ function savedFare(value: unknown, fareFree: boolean): number | null {
 
 export function loadProfile(): Profile {
   try {
-    const raw = JSON.parse(localStorage.getItem("bounty-profile") || "{}");
+    const raw = JSON.parse(privateLocal.getItem("bounty-profile") || "{}");
     const saved = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
     // The mark that someone edited it is not part of the profile.
     const { edited: _edited, ...values } = saved;
@@ -159,7 +160,7 @@ const isTripField = (k: unknown): k is TripField => (TRIP_FIELDS as readonly unk
 export function saveProfile(profile: Profile, { edited = [] }: { edited?: readonly TripField[] } = {}) {
   try {
     const fields = TRIP_FIELDS.filter((k) => edited.includes(k));
-    localStorage.setItem("bounty-profile", JSON.stringify({ ...profile, edited: fields }));
+    privateLocal.setItem("bounty-profile", JSON.stringify({ ...profile, edited: fields }));
   } catch {
     /* storage unavailable: the profile lasts for this visit only */
   }
@@ -173,7 +174,7 @@ export const PROFILE_EVENT = "bounty:profile";
 
 function savedMark(): unknown {
   try {
-    const raw = JSON.parse(localStorage.getItem("bounty-profile") || "{}");
+    const raw = JSON.parse(privateLocal.getItem("bounty-profile") || "{}");
     return raw && typeof raw === "object" && !Array.isArray(raw) ? raw.edited : undefined;
   } catch {
     return undefined;
@@ -236,11 +237,11 @@ function cleanRules(saved: unknown): MemberRules {
 /** The member's saved thresholds, in API units. Empty when none are saved. */
 export function loadMemberRules(): MemberRules {
   try {
-    const raw = localStorage.getItem(RULES_KEY);
+    const raw = privateLocal.getItem(RULES_KEY);
     if (raw !== null) return cleanRules(JSON.parse(raw));
     // One-off move of thresholds saved by an earlier Research tab, which
     // kept them as form text in pounds and percent.
-    const legacy = JSON.parse(localStorage.getItem(LEGACY_RESEARCH_RULES_KEY) || "{}");
+    const legacy = JSON.parse(privateLocal.getItem(LEGACY_RESEARCH_RULES_KEY) || "{}");
     const rules: MemberRules = {};
     if (legacy && typeof legacy === "object")
       for (const key of RULE_KEYS) {
@@ -262,8 +263,8 @@ export function loadMemberRules(): MemberRules {
 /** Saves the member's thresholds for every tab. */
 export function saveMemberRules(rules: MemberRules) {
   try {
-    localStorage.setItem(RULES_KEY, JSON.stringify(cleanRules(rules)));
-    localStorage.removeItem(LEGACY_RESEARCH_RULES_KEY);
+    privateLocal.setItem(RULES_KEY, JSON.stringify(cleanRules(rules)));
+    privateLocal.removeItem(LEGACY_RESEARCH_RULES_KEY);
   } catch {
     /* storage unavailable: the thresholds last for this visit only */
   }
@@ -283,14 +284,14 @@ export const barcodeText = (code: string | null | undefined): string => {
 export type Lens = "simple" | "pro";
 export function loadLens(): Lens {
   try {
-    return localStorage.getItem("bounty-lens") === "pro" ? "pro" : "simple";
+    return privateLocal.getItem("bounty-lens") === "pro" ? "pro" : "simple";
   } catch {
     return "simple";
   }
 }
 export function saveLens(lens: Lens) {
   try {
-    localStorage.setItem("bounty-lens", lens);
+    privateLocal.setItem("bounty-lens", lens);
   } catch {
     // Private windows may refuse storage; the switch still works for this visit.
   }

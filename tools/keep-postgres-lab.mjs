@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { createServer } from 'node:net';
+import { accountTransactions } from '../apps/server/account-transaction.mjs';
 import { accountCases } from './account-transaction-cases.mjs';
 import { postgresKeepStore } from '../apps/server/keep.mjs';
 
@@ -128,6 +129,19 @@ test('isolated native PostgreSQL durability lab', { timeout: 60000 }, async (t) 
     await admin.query('CREATE SCHEMA synthetic_accounts');
     const client = await connect('synthetic_accounts');
     await accountCases(sub, { connect: () => connect('synthetic_accounts'), query: query(client) });
+  });
+
+  await t.test('a blocked global account lock times out, rolls back and permits retry', async () => {
+    const blocker = await connect('public');
+    await blocker.query('BEGIN');
+    await blocker.query('SELECT pg_advisory_xact_lock(176903, 1)');
+    const tx = accountTransactions({ connect: () => connect('public'), query: query(admin), log: () => {} });
+    let entered = false;
+    try {
+      await assert.rejects(tx.transaction(async () => { entered = true; }), { code: '55P03' });
+      assert.equal(entered, false, 'no account action ran while the lock was unavailable');
+    } finally { await blocker.query('ROLLBACK'); }
+    assert.equal(await tx.transaction(async () => 42), 42);
   });
 
   await t.test('a full database process restart preserves only committed snapshots', async () => {
