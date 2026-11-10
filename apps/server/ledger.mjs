@@ -114,6 +114,10 @@ export function schema(db, { now = new Date() } = {}) {
     db.exec(entriesTable("ledger_entries"));
     db.exec(proofsTable("ledger_proofs"));
     db.exec(LEGACY_TABLE);
+    db.exec(`CREATE TABLE IF NOT EXISTS ledger_purchase_requests (
+      request_id TEXT PRIMARY KEY, payload TEXT NOT NULL,
+      trip_id INTEGER NOT NULL REFERENCES ledger_trips(id), entry_id INTEGER NOT NULL
+    )`);
     migrateToAutoincrement(db);
     // After the rebuild above (which only ever runs on databases made before
     // this table existed), so the rebuild never has to carry its rows.
@@ -1937,3 +1941,38 @@ export function metrics(db) {
   };
 }
 
+
+/** One logical purchase, including retries after an interrupted HTTP response. */
+export function recordPurchase(db, input, { now = new Date() } = {}) {
+  if (!isObject(input)) fail("Send a JSON object");
+  const requestId = text(input.requestId, "requestId", 120);
+  if (!/^[A-Za-z0-9_-]{16,120}$/.test(requestId)) fail("Supply a purchase request identifier");
+  if (input.actualConfirmed !== true) fail("Confirm this is a real purchase using the price you actually paid");
+  const purchase = {
+    item: text(input.item, "item", 120),
+    shop: text(input.shop, "shop", 60, { optional: true }),
+    units: int(input.units, "units", 1, MAX_UNITS),
+    unitPrice: int(input.unitPrice, "unitPrice (pence)", 1, MAX_PENCE),
+    occurred: pastDate(input.occurred, "date", now),
+    sourceSample: input.sourceSample === undefined ? false : bool(input.sourceSample, "sourceSample"),
+  };
+  const payload = JSON.stringify(purchase);
+  return transaction(db, () => {
+    const previous = db.prepare("SELECT * FROM ledger_purchase_requests WHERE request_id = ?").get(requestId);
+    if (previous) {
+      if (previous.payload !== payload) fail("This request identifier already belongs to a different purchase", 409);
+      return { id: previous.trip_id, entryId: previous.entry_id, created: false };
+    }
+    const id = createTrip(db, {
+      label: `Trip ${purchase.occurred}${purchase.shop ? " · " + purchase.shop : ""}`.slice(0, 120),
+      source: "manual", kind: "resale",
+    }, { now });
+    const entryId = addEntry(db, id, {
+      type: "receipt", amount: purchase.units * purchase.unitPrice, units: purchase.units,
+      reference: purchase.item, occurred: purchase.occurred,
+      note: `Actual purchase confirmed by the member.${purchase.shop ? " Bought at " + purchase.shop + "." : ""}${purchase.sourceSample ? " Opened from an illustrative example; actual price entered separately." : ""}`,
+    }, { now });
+    db.prepare("INSERT INTO ledger_purchase_requests VALUES (?, ?, ?, ?)").run(requestId, payload, id, entryId);
+    return { id, entryId, created: true };
+  });
+}

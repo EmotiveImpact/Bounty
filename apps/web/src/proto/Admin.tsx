@@ -127,6 +127,35 @@ function MemberHelp() {
   );
 }
 
+function LegacyRecords() {
+  const [records, setRecords] = useState<{ trips: number; targets: number } | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    fetch("/api/account/legacy-records").then(async r => {
+      if (!r.ok) throw Error("Could not check older shared records.");
+      setRecords(await r.json());
+    }).catch(e => setError(e.message));
+  }, []);
+  async function download() {
+    try {
+      const res = await fetch("/api/account/legacy-export");
+      if (!res.ok) throw Error("Could not export shared records.");
+      const url = URL.createObjectURL(new Blob([JSON.stringify(await res.json(), null, 2)], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url; link.download = "bounty-shared-records.json"; link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) { setError((e as Error).message); }
+  }
+  return <Card>
+    <h3>Older shared records</h3>
+    {error ? <Notice tone="warn">{error}</Notice> : records ? <>
+      <p>{records.trips} trips and {records.targets} goals remain in the shared store.</p>
+      <p>These records have not been assigned to a member. Confirm ownership before moving them. This export contains records and receipt metadata; receipt files remain in the retained snapshot.</p>
+      <Button onClick={() => void download()}>Download records for review</Button>
+    </> : <p>Checking shared records…</p>}
+  </Card>;
+}
+
 export default function Admin() {
   const [tab, setTab] = useState<Tab>("tips");
   const [draft, setDraft] = useState<AuditHandover | null>(null);
@@ -155,6 +184,7 @@ export default function Admin() {
               <div className="adm-members">
                 <HelpInbox />
                 <MemberHelp />
+                <LegacyRecords />
               </div>
             ),
           },

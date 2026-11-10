@@ -2,8 +2,9 @@
 // (Simple: calm figures; Pro: charts and the working behind them). Every
 // figure here comes from the ledger: payouts, receipts, expenses and refunds
 // that were actually recorded. Nothing is modelled or made up.
+import { poundsText, todayUk } from "../money-input";
 import React, { useEffect, useMemo, useState } from "react";
-import { api, dateTime, money, toPence, type Lens } from "../api";
+import { api, dateTime, money, type Lens } from "../api";
 import {
   Button,
   Card,
@@ -213,17 +214,17 @@ function MoneyInner({ lens, lensButtons, go }: Props) {
 
   async function addGoal(ev: React.FormEvent) {
     ev.preventDefault();
-    const amount = Number(draft.amount.replace(/[£,\s]/g, ""));
+    const amount = poundsText(draft.amount);
     const bad: Record<string, string> = {};
     if (!draft.name.trim()) bad.name = "Say what the money is for, like a holiday.";
-    if (!Number.isFinite(amount) || amount <= 0 || amount > 100000) bad.amount = "An amount between £1 and £100,000.";
+    if (amount === null || amount < 100 || amount > 10000000) bad.amount = "An amount between £1 and £100,000.";
     setErrs(bad);
     if (Object.keys(bad).length) return;
     setBusy(true);
     try {
       const r = await api<Targets>("goals/targets", {
         name: draft.name.trim(),
-        amount: toPence(amount),
+        amount,
         deadline: draft.deadline || null,
         start: null,
       });
@@ -245,23 +246,22 @@ function MoneyInner({ lens, lensButtons, go }: Props) {
   }
   async function saveTarget(ev: React.FormEvent) {
     ev.preventDefault();
-    const t = targetDraft.trim().replace(/[£,\s]/g, "");
-    const amount = t === "" ? 0 : Number(t);
-    if (!Number.isFinite(amount) || amount < 0 || amount > 100000) {
+    const amount = targetDraft.trim() === "" ? 0 : poundsText(targetDraft);
+    if (amount === null || amount > 10000000) {
       setTargetErr("An amount between £0 and £100,000. Leave it empty for no target.");
       return;
     }
     setBusy(true);
     try {
       const current = await api<GoalsData & Record<string, unknown>>("goals");
-      const today = new Date().toISOString().slice(0, 10);
+      const today = todayUk();
       const by = typeof current.cashNeededBy === "string" ? current.cashNeededBy : null;
       const saved = await api<GoalsData>(
         "goals",
         {
           ...current,
           targetType,
-          monthlyTarget: toPence(amount),
+          monthlyTarget: amount,
           // A cash-back date that has already passed cannot be saved again.
           cashNeededBy: by && by >= today ? by : null,
         },

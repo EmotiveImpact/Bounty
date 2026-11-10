@@ -47,7 +47,11 @@ async function start({ mailOn = true, operators = [] } = {}) {
     const set = res.headers.get("set-cookie");
     return { status: res.status, body: text ? JSON.parse(text) : null, cookie: set ? set.split(";")[0] : null };
   };
-  const join_ = async (email) => (await call("POST", "/api/auth/signup", { email, password: PASSWORD, invite: INVITE })).cookie;
+  const join_ = async (email) => {
+    const cookie = (await call("POST", "/api/auth/signup", { email, password: PASSWORD, invite: INVITE })).cookie;
+    if (operators.includes(email)) await store.setVerified((await store.userByEmail(email)).id, true);
+    return cookie;
+  };
   const linkToken = (message, kind) => new RegExp(`#${kind}=([A-Za-z0-9_-]+)`).exec(message.text)[1];
   return {
     root,

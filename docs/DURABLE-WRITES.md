@@ -40,15 +40,15 @@ Detached imports are removed from durable mode. `freshPrices(..., { wait: null }
 
 ## Account behaviour and ambiguous outcomes
 
-Hosted snapshot mode temporarily refuses `POST /api/account/email` and `POST /api/account/delete` with `503 account_change_unavailable`, before changing either accounts or files. Those handlers previously changed independently committed account tables and snapshot files. They cannot be made atomic by buffering a response. They require a common transaction or a separately reviewed durable coordination design before re-enabling. Local non-snapshot mode is unchanged.
+PR #32 completes the common account/snapshot transaction and re-enables email changes, deletion and plan changes. Account rows, tokens and sessions use the same request-owned PostgreSQL connection as the snapshot commit. Only a COMMIT command acknowledgement releases success or cookies. Account failures and snapshot conflicts roll back together. See [LAUNCH-FIXES.md](LAUNCH-FIXES.md) for the design, additional tests and remaining acceptance work.
 
-Other account/session/mail operations still have their existing independent transactions or external side effects. For example, account creation may succeed before a later snapshot error. This patch does not claim a distributed transaction across those operations or email delivery.
+A connection can fail after the server commits but before the caller receives its acknowledgement. `503 save_not_confirmed` means the outcome is unconfirmed. The mobile purchase endpoint now persists a request identifier and can safely return the existing purchase on retry. Other operations still require checking current records before manually retrying; the server never automatically replays handlers.
 
-A connection can fail after the server has committed but before the caller receives its acknowledgement. `503 save_not_confirmed` deliberately says the outcome is unconfirmed, not that nothing was saved. Clients must inspect current records before manually retrying. The server never automatically replays handlers. There is no end-to-end idempotency key yet; an automatic client retry after an ambiguous result could duplicate a mutation. `409 snapshot_conflict` asks the user to reload before trying again.
+Email is attempted after commit and is described as requested, not confirmed delivered. A crash can prevent delivery, and the member can request another link. Authenticated hosting cannot disable snapshots with `BOUNTY_KEEP_DATA=off`.
 
 ## Verification
 
-Local results on Node 24.22.1:
+PR #31 results on Node 24.22.1 (the current follow-up results are in [LAUNCH-FIXES.md](LAUNCH-FIXES.md)):
 
 - `npm test`: 631 passed, no failures or skips. Includes six SQL tests using embedded PGlite, fifteen HTTP/cache durability regressions, existing persistence tests, import completion and API startup recovery.
 - `npm run build`: passed. Existing large-chunk warning remains.
@@ -90,7 +90,7 @@ This PR is reviewable, not approved to merge or deploy. In particular:
 2. **Existing damage is unknown.** No live data was inspected. This patch cannot reconstruct records already lost by the old implementation or prove an existing snapshot is coherent. Preserve backups and any recoverable local caches before attempting reconciliation.
 3. **Neon/Vercel acceptance remains unverified.** Native PostgreSQL validates SQL and locking, but not Neon's HTTP transport, service limits, Vercel termination/freeze behaviour or production-sized snapshots. Aggregate snapshot reads, gzip CPU/memory, response size and whole-folder write contention need a disposable Neon database and a separately authorised staging deployment.
 4. **Latency changes.** Reads now queue behind writes/imports. Durable-mode imports no longer detach after 20 seconds. An import exceeding Vercel's 60-second function budget can fail the request without acknowledging it. A separately designed import worker and relational storage are longer-term options.
-5. **Account feature restriction.** Approve the temporary email-change/account-deletion refusal, or design a shared transaction before rollout. Other account/external side effects and automatic retry/idempotency remain separate concerns.
+5. **Account and operator acceptance.** PR #32 supplies the shared transaction, but transport and failure acceptance must run on isolated Neon/Vercel staging. Existing operators must verify mailbox ownership. Email delivery remains an external side effect.
 6. **Browsers and CI.** Check the actual PR run before merge. The local browser suite was environment-blocked; a checked-in workflow is not itself evidence that CI passed.
 
 No production action is requested or taken by this report. A later approval request must identify the exact reviewed commit, affected Vercel project/deployments and Neon branch, backup/recovery evidence, the proposed write-pause and legacy-writer drain, staging tests, cutover and rollback steps. Obtain Edem's explicit approval for those concrete actions before merging, deploying, changing production access or touching customer data.

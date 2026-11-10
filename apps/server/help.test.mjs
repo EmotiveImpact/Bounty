@@ -8,7 +8,8 @@ import { routeModules } from "./app.mjs";
 const INVITE = "flip-together-2026";
 
 async function start() {
-  const members = accounts(memoryAccountsStore(), { inviteCode: INVITE });
+  const store = memoryAccountsStore();
+  const members = accounts(store, { inviteCode: INVITE });
   const api = await serve(openDb(":memory:"), routeModules, { members, password: null, operators: ["boss@example.com"] });
   const call = async (method, path, body, cookie) => {
     const res = await fetch(api.base + path, {
@@ -20,8 +21,11 @@ async function start() {
     const set = res.headers.get("set-cookie");
     return { status: res.status, body: text ? JSON.parse(text) : null, cookie: set ? set.split(";")[0] : null };
   };
-  const join = async (email) =>
-    (await call("POST", "/api/auth/signup", { email, password: "a long enough secret", invite: INVITE })).cookie;
+  const join = async (email) => {
+    const cookie = (await call("POST", "/api/auth/signup", { email, password: "a long enough secret", invite: INVITE })).cookie;
+    if (email === "boss@example.com") await store.setVerified((await store.userByEmail(email)).id, true);
+    return cookie;
+  };
   return { api, call, join };
 }
 

@@ -170,7 +170,7 @@ test("a database URL replaces the shared password for hosted use", () => {
 });
 
 test("Admin tools answer only a signed-in operator", async () => {
-  const { api, call } = await start({}, [" Boss@Example.co.uk "]);
+  const { api, call, store } = await start({}, [" Boss@Example.co.uk "]);
   try {
     assert.equal((await call("GET", "/api/desk")).status, 401, "signed out: sign in first, even to read");
     const member = sessionCookie(
@@ -182,6 +182,8 @@ test("Admin tools answer only a signed-in operator", async () => {
     const boss = sessionCookie(
       (await call("POST", "/api/auth/signup", { email: "boss@example.co.uk", password: "0123456789", invite: INVITE })).setCookie,
     );
+    assert.equal((await call("GET", "/api/auth/me", undefined, boss)).body.operator, false, "mailbox must be verified");
+    await store.setVerified((await store.userByEmail("boss@example.co.uk")).id, true);
     assert.equal((await call("GET", "/api/auth/me", undefined, boss)).body.operator, true);
     assert.deepEqual((await call("GET", "/api/desk", undefined, boss)).body, { desk: true });
     assert.deepEqual((await call("POST", "/api/desk", { a: 1 }, boss)).body, { a: 1 });
@@ -225,6 +227,7 @@ test("signed in, a scout profile is linked to the account and only that account 
     const ana = await signUp("ana@example.co.uk");
     const ben = await signUp("ben@example.co.uk");
     const boss = await signUp("boss@example.co.uk");
+    await store.setVerified((await store.userByEmail("boss@example.co.uk")).id, true);
     assert.deepEqual((await call("GET", "/api/members/me", undefined, ana)).body, { member: null });
     const made = await call("POST", "/api/members", { name: "Ana" }, ana);
     assert.equal(made.status, 201);

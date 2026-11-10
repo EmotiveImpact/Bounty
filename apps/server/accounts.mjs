@@ -13,6 +13,7 @@
 // SHA-256 hashes, so a copy of the database cannot be used to sign in.
 import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
+import { neonTransactions } from "./account-transaction.mjs";
 import { HttpError } from "./http.mjs";
 
 const scrypt = promisify(scryptCallback);
@@ -65,7 +66,7 @@ export function readCookie(req, name = COOKIE) {
  * Postgres store over a query function (text, params) => rows. Tables are
  * created on first use, so a new Neon database needs no set-up step.
  */
-export function postgresStore(query) {
+export function postgresStore(query, { transaction = (fn) => fn(), outside = query } = {}) {
   let ready;
   const init = () =>
     (ready ||= (async () => {
@@ -81,6 +82,9 @@ export function postgresStore(query) {
         user_id bigint NOT NULL REFERENCES bounty_users(id) ON DELETE CASCADE,
         created_at timestamptz NOT NULL DEFAULT now(),
         expires_at timestamptz NOT NULL
+      )`);
+      await query(`CREATE TABLE IF NOT EXISTS bounty_rate_limits (
+        key text PRIMARY KEY, started bigint NOT NULL, count integer NOT NULL
       )`);
       // The membership plan (plans.mjs) belongs to the account.
       await query("ALTER TABLE bounty_users ADD COLUMN IF NOT EXISTS plan text", []);
@@ -99,6 +103,19 @@ export function postgresStore(query) {
     }));
   const run = async (text, params) => (await init(), query(text, params));
   return {
+    ready: init,
+    transaction: async (fn) => { await init(); return transaction(fn); },
+    async consumeLimit(key, now, window, maximum) {
+      await init();
+      const rows = await outside(`INSERT INTO bounty_rate_limits(key, started, count) VALUES ($1, $2, 1)
+        ON CONFLICT (key) DO UPDATE SET
+          started = CASE WHEN bounty_rate_limits.started <= $2 - $3 THEN $2 ELSE bounty_rate_limits.started END,
+          count = CASE WHEN bounty_rate_limits.started <= $2 - $3 THEN 1 ELSE bounty_rate_limits.count + 1 END
+        WHERE bounty_rate_limits.started <= $2 - $3 OR bounty_rate_limits.count < $4
+        RETURNING count`, [key, now, window, maximum]);
+      return rows.length > 0;
+    },
+    async clearLimit(key) { await outside("DELETE FROM bounty_rate_limits WHERE key = $1", [key]); },
     async userByEmail(email) {
       const rows = await run("SELECT id, email, name, password_hash FROM bounty_users WHERE email = $1", [email]);
       return rows[0] || null;
@@ -131,7 +148,11 @@ export function postgresStore(query) {
       return users[0] || null;
     },
     async setPassword(userId, passwordHash) {
-      await run("UPDATE bounty_users SET password_hash = $2 WHERE id = $1", [userId, passwordHash]);
+      await run(`WITH changed AS (
+        UPDATE bounty_users SET password_hash = $2 WHERE id = $1 RETURNING id
+      ), tokens AS (
+        DELETE FROM bounty_tokens USING changed WHERE user_id = changed.id
+      ) DELETE FROM bounty_sessions USING changed WHERE user_id = changed.id`, [userId, passwordHash]);
     },
     async deleteSessions(userId) {
       await run("DELETE FROM bounty_sessions WHERE user_id = $1", [userId]);
@@ -147,6 +168,7 @@ export function postgresStore(query) {
         "UPDATE bounty_users SET email = $2, email_verified_at = NULL WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM bounty_users WHERE email = $2) RETURNING id",
         [userId, email],
       );
+      if (rows.length) await run("DELETE FROM bounty_tokens WHERE user_id = $1", [userId]);
       return rows.length > 0;
     },
     async deleteUser(userId) {
@@ -212,9 +234,8 @@ const planRow = (row) => ({
 
 /** Postgres store for a Neon connection string, over Neon's HTTP driver. */
 export async function neonStore(url) {
-  const { neon } = await import("@neondatabase/serverless");
-  const sql = neon(url);
-  return postgresStore((text, params) => sql.query(text, params));
+  const coordinator = await neonTransactions(url);
+  return postgresStore(coordinator.query, coordinator);
 }
 
 /**
@@ -231,8 +252,7 @@ const MAX_RESET_EMAILS = 3;
 const noMail = { on: false, send: async () => false };
 
 export function accounts(store, { inviteCode = null, now = () => Date.now(), mail = noMail } = {}) {
-  const failures = new Map();
-  const resetsSent = new Map();
+  const limitKey = (kind, email) => tokenHash(`${kind}:${email}`);
   const cookie = (token, maxAge, secure) =>
     [
       `${COOKIE}=${token}`,
@@ -251,16 +271,10 @@ export function accounts(store, { inviteCode = null, now = () => Date.now(), mai
     return { email, password };
   }
 
-  function limited(email) {
-    const entry = failures.get(email);
-    if (!entry || now() - entry.first > FAILURE_WINDOW_MS) return false;
-    return entry.count >= MAX_FAILURES;
+  async function limited(email) {
+    return !(await store.consumeLimit(limitKey("password", email), now(), FAILURE_WINDOW_MS, MAX_FAILURES));
   }
-  function failed(email) {
-    const entry = failures.get(email);
-    if (!entry || now() - entry.first > FAILURE_WINDOW_MS) failures.set(email, { first: now(), count: 1 });
-    else entry.count += 1;
-  }
+  const clearFailures = (email) => store.clearLimit(limitKey("password", email));
 
   async function startSession(user, secure) {
     const token = randomBytes(32).toString("base64url");
@@ -293,12 +307,12 @@ export function accounts(store, { inviteCode = null, now = () => Date.now(), mai
   };
   // Settings changes ask for the current password again.
   async function confirm(user, password) {
-    if (limited(user.email)) throw new HttpError(429, "Too many wrong passwords. Try again in 15 minutes.");
+    if (await limited(user.email)) throw new HttpError(429, "Too many wrong passwords. Try again in 15 minutes.");
     const full = await store.userById(user.id);
     if (!full || !(await checkPassword(String(password || ""), full.password_hash))) {
-      failed(user.email);
       throw new HttpError(401, "That password is not right");
     }
+    await clearFailures(user.email);
     return full;
   }
 
@@ -315,7 +329,7 @@ export function accounts(store, { inviteCode = null, now = () => Date.now(), mai
     });
   }
 
-  return {
+  const service = {
     inviteOpen: Boolean(inviteCode),
 
     /** The signed-in member for this request, or null. */
@@ -327,14 +341,13 @@ export function accounts(store, { inviteCode = null, now = () => Date.now(), mai
 
     async signIn(body, secure) {
       const { email, password } = credentials(body);
-      if (limited(email)) throw new HttpError(429, "Too many wrong passwords. Try again in 15 minutes.");
+      if (await limited(email)) throw new HttpError(429, "Too many wrong passwords. Try again in 15 minutes.");
       const user = await store.userByEmail(email);
       const ok = await checkPassword(password, user ? user.password_hash : await decoyHash());
       if (!user || !ok) {
-        failed(email);
         throw new HttpError(401, "That email and password do not match");
       }
-      failures.delete(email);
+      await clearFailures(email);
       return { user: publicUser(user), cookie: await startSession(user, secure) };
     },
 
@@ -357,6 +370,7 @@ export function accounts(store, { inviteCode = null, now = () => Date.now(), mai
     },
 
     mailOn: Boolean(mail.on),
+    mailQueued: Boolean(mail.queued),
     sendVerify,
 
     /** Emails a reset link when the email has an account. Says the same either way. */
@@ -364,10 +378,8 @@ export function accounts(store, { inviteCode = null, now = () => Date.now(), mai
       const email = String(body?.email || "").trim().toLowerCase();
       if (!EMAIL.test(email)) throw new HttpError(400, "Enter a valid email address");
       if (!mail.on) return { sent: false, mailOn: false };
-      const sent = resetsSent.get(email);
-      if (sent && now() - sent.first < 3600000 && sent.count >= MAX_RESET_EMAILS) return { sent: true, mailOn: true };
-      if (!sent || now() - sent.first >= 3600000) resetsSent.set(email, { first: now(), count: 1 });
-      else sent.count += 1;
+      if (!(await store.consumeLimit(limitKey("reset-email", email), now(), 3600000, MAX_RESET_EMAILS)))
+        return { sent: !mail.queued, mailOn: true, ...(mail.queued ? { queued: true } : {}) };
       const user = await store.userByEmail(email);
       if (user) {
         const token = await makeToken(user, "reset", RESET_HOURS * 3600000);
@@ -380,7 +392,7 @@ export function accounts(store, { inviteCode = null, now = () => Date.now(), mai
             `The link works once, for ${RESET_HOURS} hour. If it was not you, ignore this email and your password stays the same.\n\nBounty`,
         });
       }
-      return { sent: true, mailOn: true };
+      return { sent: !mail.queued, mailOn: true, ...(mail.queued ? { queued: true } : {}) };
     },
 
     /** For operators: a reset link to pass on by hand while email is off. */
@@ -401,7 +413,7 @@ export function accounts(store, { inviteCode = null, now = () => Date.now(), mai
       await store.deleteSessions(user.id);
       // Opening the link proves the email is theirs.
       await store.setVerified(user.id, true);
-      failures.delete(user.email);
+      await clearFailures(user.email);
       return { user: publicUser({ ...user, verified: true }), cookie: await startSession(user, secure) };
     },
 
@@ -460,4 +472,12 @@ export function accounts(store, { inviteCode = null, now = () => Date.now(), mai
       return store.setPlan(userId, plan, since);
     },
   };
+  if (store.transaction) {
+    for (const name of ["signIn", "signUp", "signOut", "forgot", "resetLink", "reset", "verify",
+      "sendVerify", "changePassword", "changeEmail", "deleteAccount", "setPlan"]) {
+      const call = service[name];
+      service[name] = (...args) => store.transaction(() => call(...args));
+    }
+  }
+  return service;
 }

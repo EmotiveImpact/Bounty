@@ -165,7 +165,7 @@ function Answer({ result }: { result: ScanResult }) {
       <Button
         kind="ghost"
         label="I bought it: add to Stock"
-        onPress={() => router.push({ pathname: "/add-stock", params: { item: d.name, price: (result.shelfPrice / 100).toFixed(2), shop: d.shop } })}
+        onPress={() => router.push({ pathname: "/add-stock", params: { item: d.name, price: (result.shelfPrice / 100).toFixed(2), shop: d.shop, sample: String(d.sample === true) } })}
       />
     </Card>
   );

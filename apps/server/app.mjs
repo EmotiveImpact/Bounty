@@ -67,6 +67,11 @@ export const OPERATOR_ROUTES = new Set([
   "POST /api/audit",
   "POST /api/audit/signoff",
   "GET /api/sources",
+  "GET /api/evidence",
+  "GET /api/research/checks",
+  "GET /api/audit",
+  "GET /api/audit/progress",
+  "GET /api/permissions",
   "POST /api/permissions",
 ]);
 
@@ -100,7 +105,7 @@ export function createApi(
 ) {
   const allowedHosts = new Set([...LOCAL_HOSTS, ...publicHosts]);
   const operatorEmails = new Set(operators.map((e) => String(e).trim().toLowerCase()));
-  const isOperator = (user) => !members || Boolean(user && operatorEmails.has(String(user.email).toLowerCase()));
+  const isOperator = (user) => !members || Boolean(user && user.verified === true && operatorEmails.has(String(user.email).toLowerCase()));
   const own = Boolean(members && personal);
   const shared = own ? modules.filter((m) => !PERSONAL_MODULES.includes(m)) : modules;
   const table = toTable([...shared.flatMap((m) => m.routes(db)), ...plans.routes(db, members)]);
@@ -178,6 +183,21 @@ export function createApi(
       if (!user) return { status: 401, body: { signIn: true, error: "Sign in first" } };
       if (method === "GET" && path === "/api/account")
         return { status: 200, body: { ...(await members.account(user)), operator: isOperator(user) } };
+      if (method === "GET" && ["/api/account/legacy-records", "/api/account/legacy-export"].includes(path)) {
+        if (!isOperator(user)) return { status: 403, body: { error: "Only an operator can do this" } };
+        const trips = listTrips(db);
+        const goals = goalTargets(db);
+        const overview = {
+          trips: trips.length, targets: goals.targets.length,
+          ownership: "unassigned", migrationApplied: false,
+          message: "Shared records are retained. Confirm ownership before copying anything into a member account.",
+        };
+        return { status: 200, body: path.endsWith("legacy-export") ? {
+          ...overview, exported: new Date().toISOString(),
+          stock: { trips: trips.map(t => getTrip(db, t.id)) }, money: { goals: getGoals(db), targets: goals },
+          proofFilesIncluded: false,
+        } : overview };
+      }
       if (method === "GET" && path === "/api/account/export") {
         const mine = own ? personalSpace(user).db : db;
         const trips = listTrips(mine).map((t) => getTrip(mine, t.id));
@@ -201,7 +221,7 @@ export function createApi(
       }
       if (post && path === "/api/account/verify/send") {
         const sent = await members.sendVerify(user, origin(secure)).catch(() => false);
-        return { status: 200, body: { sent, mailOn: Boolean(members.mailOn) } };
+        return { status: 200, body: { sent: members.mailQueued ? false : sent, ...(members.mailQueued && sent ? { queued: true } : {}), mailOn: Boolean(members.mailOn) } };
       }
       if (post && path === "/api/account/password") {
         const result = await members.changePassword(user, await readJson(req), secure);
@@ -211,22 +231,17 @@ export function createApi(
       if (post && path === "/api/account/email") {
         const result = await members.changeEmail(user, await readJson(req), origin(secure));
         // The scout profile follows the account to its new email.
-        try {
+        if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'members'").get())
           db.prepare("UPDATE members SET account_email = ? WHERE account_email = ?").run(result.user.email, result.from);
-        } catch {
-          /* no scout profiles on this server */
-        }
-        return { status: 200, body: { user: result.user, sent: result.sent, mailOn: Boolean(members.mailOn) } };
+        return { status: 200, body: { user: result.user, sent: members.mailQueued ? false : result.sent, ...(members.mailQueued && result.sent ? { queued: true } : {}), mailOn: Boolean(members.mailOn) } };
       }
       if (post && path === "/api/account/delete") {
         await members.deleteAccount(user, await readJson(req));
         // The scout profile stays for tip history, with nothing that names them.
-        try {
+        if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'members'").get()) {
           db.prepare(
             "UPDATE members SET account_email = NULL, name = 'Deleted member', locality = NULL, seller_name = NULL, seller_key = NULL, alerts_opt_in = 0, alert_localities = '[]' WHERE account_email = ?",
           ).run(String(user.email).toLowerCase());
-        } catch {
-          /* no scout profiles on this server */
         }
         if (own) {
           const key = personalKey(user);
@@ -329,6 +344,7 @@ export function createApi(
         body,
         user,
         operator: isOperator(user),
+        accountsOn: Boolean(members),
         // The signed-in member's plan row { plan, since } or null.
         plan: user && members?.plan ? () => members.plan(user.id) : async () => null,
       });

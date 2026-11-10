@@ -12,3 +12,5 @@
 | [DURABLE-WRITES.md](DURABLE-WRITES.md) | Snapshot failure reproductions, atomic-write corrections, test evidence and the explicit deployment approval gate. |
 | [IMAGES.md](IMAGES.md) | Every image the website uses (crew, products, link preview) and the rules for crew pictures. |
 | [STALE.md](STALE.md) | Leftover old code and docs, with a suggested fix for each. |
+
+- [Launch correctness fixes and remaining release blockers](LAUNCH-FIXES.md)

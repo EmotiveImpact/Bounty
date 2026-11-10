@@ -67,9 +67,9 @@ export default function AccountSettings({ onSignedOut, onEmailChanged }: { onSig
   async function resend() {
     const data = await call("/verify/send", {}).catch(() => null);
     setNote(
-      data?.mailOn
+      data?.queued ? "Verification email requested. Check your inbox; if it does not arrive, try again." : data?.sent
         ? "We’ve sent a new link to " + account?.email + ". It works for 7 days."
-        : "We can’t send emails just yet. Your account works fully in the meantime.",
+        : data?.mailOn ? "The email was not sent. Please try again." : "Email is not switched on yet.",
     );
   }
 
@@ -169,7 +169,7 @@ export default function AccountSettings({ onSignedOut, onEmailChanged }: { onSig
                 await load();
                 onEmailChanged();
                 setNote(
-                  data.mailOn
+                  data.queued ? "Email changed. A verification email was requested for " + data.user.email + "." : data.sent
                     ? "Email changed. We’ve sent a link to " + data.user.email + " to confirm it."
                     : "Email changed to " + data.user.email + ".",
                 );

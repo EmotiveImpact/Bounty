@@ -103,7 +103,7 @@ export default function DealScreen() {
             <Button
               label="I bought this: add to Stock"
               onPress={() =>
-                router.push({ pathname: "/add-stock", params: { item: deal.name, price: (deal.buy / 100).toFixed(2), shop: deal.shop } })
+                router.push({ pathname: "/add-stock", params: { item: deal.name, price: (deal.buy / 100).toFixed(2), shop: deal.shop, sample: String(deal.sample === true) } })
               }
             />
           </>

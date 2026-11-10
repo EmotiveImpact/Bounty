@@ -1,5 +1,5 @@
 import { router, useLocalSearchParams } from "expo-router";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { SignInNeeded, api } from "@/lib/api";
@@ -13,13 +13,18 @@ import { colours, space } from "@/ui/theme";
 // the website records a trip. Opens filled in from a deal or a scan.
 
 export default function AddStock() {
-  const params = useLocalSearchParams<{ item?: string; price?: string; shop?: string }>();
+  const params = useLocalSearchParams<{ item?: string; price?: string; shop?: string; sample?: string }>();
   const insets = useSafeAreaInsets();
   const { refresh } = useAuth();
   const [item, setItem] = useState(params.item ?? "");
   const [shop, setShop] = useState(params.shop ?? "");
   const [units, setUnits] = useState("1");
-  const [price, setPrice] = useState(params.price ?? "");
+  const [occurred] = useState(todayUk);
+  const sample = params.sample === "true";
+  const [price, setPrice] = useState(sample ? "" : params.price ?? "");
+  const [confirmed, setConfirmed] = useState(false);
+  const saving = useRef(false);
+  const attempt = useRef<{ payload: string; requestId: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -27,32 +32,33 @@ export default function AddStock() {
   const count = /^\d{1,4}$/.test(units.trim()) ? Number(units.trim()) : 0;
 
   async function save() {
+    if (saving.current) return;
     setError("");
     if (!item.trim()) return setError("Say what you bought.");
     if (count < 1) return setError("Enter how many you bought, as a whole number.");
     if (each === null) return setError("Enter the price for one, in pounds, for example 4.50");
+    if (!confirmed) return setError("Confirm you bought this item and the price is what you actually paid.");
+    saving.current = true;
     setBusy(true);
     try {
-      const date = todayUk();
-      const { id } = await api<{ id: number }>("ledger/trips", {
-        label: `Trip ${date}${shop.trim() ? " · " + shop.trim() : ""}`.slice(0, 120),
-        source: "manual",
-        kind: "resale",
-      });
-      await api("ledger/trips/" + id + "/entries", {
-        type: "receipt",
-        amount: count * each,
-        units: count,
-        reference: item.trim().slice(0, 120),
-        occurred: date,
-        note: `Added from the Bounty phone app${shop.trim() ? ". Bought at " + shop.trim() : ""}.`,
-      });
+      const date = occurred;
+      const purchase = {
+        item: item.trim(), shop: shop.trim(), units: count, unitPrice: each,
+        occurred: date, sourceSample: sample, actualConfirmed: true,
+      };
+      const payload = JSON.stringify(purchase);
+      // Retain the identifier on a network failure. A retry cannot add it twice.
+      if (attempt.current?.payload !== payload) attempt.current = {
+        payload, requestId: `purchase_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}_${Math.random().toString(36).slice(2)}`,
+      };
+      await api("ledger/purchases", { ...purchase, requestId: attempt.current.requestId });
       router.back();
     } catch (e) {
       // Signed out somewhere else: checking again takes the app back to sign-in.
       if (e instanceof SignInNeeded) return refresh();
       setError((e as Error).message);
     } finally {
+      saving.current = false;
       setBusy(false);
     }
   }
@@ -67,6 +73,7 @@ export default function AddStock() {
       <ScrollView contentContainerStyle={styles.page} keyboardShouldPersistTaps="handled">
         <Title size={30}>Add a purchase</Title>
         <Txt style={{ color: colours.inkSoft }}>It goes into Stock as a new trip, so you can see what is left to sell.</Txt>
+        {sample ? <Notice tone="warn">This came from a sample with made-up figures. Enter the actual price from your purchase.</Notice> : null}
         <Field label="What you bought" value={item} onChangeText={setItem} placeholder="For example Wireless headphones" maxLength={120} />
         <Field label="Shop" value={shop} onChangeText={setShop} placeholder="For example Tesco" maxLength={60} />
         <View style={{ flexDirection: "row", gap: space.m }}>
@@ -78,6 +85,9 @@ export default function AddStock() {
           </View>
         </View>
         {each !== null && count > 0 ? <Small>That is {money(each * count)} in all.</Small> : null}
+        <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: confirmed }} onPress={() => setConfirmed(!confirmed)}>
+          <Txt>{confirmed ? "☑" : "☐"} I bought this item and entered the price I actually paid.</Txt>
+        </Pressable>
         {error ? <Notice tone="warn">{error}</Notice> : null}
         <Button label="Save to Stock" busy={busy} onPress={save} />
       </ScrollView>
