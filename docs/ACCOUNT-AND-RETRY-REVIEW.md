@@ -23,6 +23,10 @@ PR #34 builds on draft PR #33 (parent `a6c501da48984869027285aa31d850336e20e700`
 - Mobile Expo 58 lint, TypeScript and isolated web export passed. Export API points to loopback port 9.
 - Browser regressions added for lost trip/entry acknowledgements, distinct subsequent entries, malformed prices and a failed proof followed by retry, at 390 and 1280 px. Remote CI result will be recorded before completion.
 
+The first remote browser run caught a further app bug: two distinct same-date, same-amount receipts produced identical React keys in their missing-proof advice. Keys now distinguish each row. It also caught a synthetic-fixture error: the same PDF was reused for two separate purchases, which the ledger correctly refuses. The fixtures now use distinct evidence. These are recorded separately; the refusal itself was not weakened.
+
+Receipt and shelf-photo copy no longer claims files stay on the reader’s computer. Uploaded files live in Bounty storage and hosted snapshots. The browser-only quick shelf reports remain labelled as local to the device because that separate flow uses browser storage.
+
 ## Behaviour and limits
 
 Request IDs are per explicit form submission, retained across retries in the still-open form and changed after confirmed success for a new record. Server deduplication survives process restarts. All shipped web trip/entry creation paths now supply IDs, including Planner, Research and multi-item trip completion. The mobile atomic purchase endpoint already has its separate persisted request IDs.

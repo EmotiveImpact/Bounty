@@ -2,8 +2,8 @@
 // listings and payout statements. Files are written to one directory on this
 // computer, named by the SHA-256 of the stored bytes, readable only by the
 // current user. Nothing in the API serves these files back: listings carry
-// metadata (hash, size, type, label) only, so proof contents never leave the
-// machine through Bounty.
+// metadata (hash, size, type, label) only. Hosted installations include these
+// private files in their durable Neon snapshots; they are not device-only.
 //
 // Photos are stripped of embedded metadata (Exif GPS location, device and
 // time) before they are hashed and stored, so the stored file and its hash

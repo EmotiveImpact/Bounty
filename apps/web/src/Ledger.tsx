@@ -900,8 +900,8 @@ function Verification({ r }: { r: Reconciliation }) {
         <>
           <b>Not verified because:</b>
           <ul className="checks">
-            {r.verificationMissing.map((m) => (
-              <li key={m}>{m}</li>
+            {r.verificationMissing.map((m, index) => (
+              <li key={index}>{m}</li>
             ))}
           </ul>
         </>
@@ -1431,8 +1431,8 @@ function Proofs({
           (file === "in use"
             ? "The stored file is kept because another proof uses the same file."
             : file === "error"
-              ? "The stored file could not be deleted from this computer. Check the API log."
-              : "The stored file was deleted from this computer."),
+              ? "The stored file could not be removed from Bounty’s storage. Contact support."
+              : "The stored file was removed from Bounty’s storage."),
       );
       onSaved();
     } catch (err) {
@@ -1467,10 +1467,8 @@ function Proofs({
     <fieldset>
       <legend>Private proofs</legend>
       <p className="muted">
-        Proofs stay on this computer. Bounty stores them in its private data
-        folder, readable only by your user account, and never shows or sends
-        their contents: only the label, type, size and a fingerprint (SHA-256
-        hash) appear here. Photos (JPEG or PNG) have their location and camera
+        Proofs are uploaded to Bounty’s private server storage. This screen shows only their label, type, size and fingerprint
+        (SHA-256 hash), not the file contents. Photos (JPEG or PNG) have their location and camera
         data removed before they are stored. PDF documents are stored unchanged,
         so their document properties, such as author and creation date, are
         kept.

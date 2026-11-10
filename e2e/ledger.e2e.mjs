@@ -542,7 +542,7 @@ test('stock: malformed prices are rejected and retrying a failed proof keeps one
         assert.equal((await app.api('/api/ledger/trips/' + id)).body.entries.length, 0);
         await dialog.getByLabel('You paid in total', { exact: true }).fill('12.50');
         await dialog.locator('input[name="proof"]').setInputFiles({
-          name: 'synthetic.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4\n%synthetic retry\n%%EOF\n'),
+          name: 'synthetic.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4\n%synthetic retry ' + page.viewportSize().width + '\n%%EOF\n'),
         });
         let refuse = true;
         await page.route('**/api/ledger/trips/' + id + '/proofs', route => {
